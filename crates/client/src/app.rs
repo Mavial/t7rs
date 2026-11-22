@@ -477,7 +477,7 @@ impl App {
     fn open_edit_channel(&mut self, channel: ChannelId) {
         let Some(view) = &self.view else { return };
         let Some(ch) = view.channels.get(&channel) else { return };
-        let tab = if view.may_in(channel, Perm::Rename) { FormTab::Channel } else { FormTab::Permissions };
+        let tab = if view.may_rename(channel) { FormTab::Channel } else { FormTab::Permissions };
         self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
             editing: Some(channel),
             parent: ch.parent,
@@ -1466,8 +1466,7 @@ impl App {
                                 ui.close();
                             }
                             let edit = if category { "Edit category…" } else { "Edit channel…" };
-                            let may_edit =
-                                view.may_in(ch_id, Perm::Rename) || view.may_in(ch_id, Perm::ManagePermissions);
+                            let may_edit = view.may_rename(ch_id) || view.may_in(ch_id, Perm::ManagePermissions);
                             if may_edit && ui.button(edit).clicked() {
                                 action = Some(TreeAction::Edit(ch_id));
                                 ui.close();
@@ -2445,8 +2444,8 @@ impl App {
             ChannelDialog::Form(f) => f.editing,
             _ => None,
         };
-        let may = |perm| editing.is_none_or(|id| view.is_some_and(|v| v.may_in(id, perm)));
-        let (may_edit, may_manage) = (may(Perm::Rename), may(Perm::ManageChannels));
+        let may_rename = editing.is_none_or(|id| view.is_some_and(|v| v.may_rename(id)));
+        let may_manage = editing.is_none_or(|id| view.is_some_and(|v| v.may_in(id, Perm::ManageChannels)));
         let saved_overrides = view.zip(editing).and_then(|(v, id)| v.channels.get(&id)).map(|c| c.overrides.clone());
         let moderators: Option<Vec<(Identity, Option<String>)>> = view
             .zip(editing)
@@ -2517,9 +2516,9 @@ impl App {
                             }
                         }
                         _ => {
-                            ui.add_enabled_ui(may_edit, |ui| {
+                            ui.add_enabled_ui(may_rename, |ui| {
                                 channel_fields(ui, form, may_create_permanent, may_manage);
-                                if may_edit && !may_manage {
+                                if may_rename && !may_manage {
                                     hint(ui, "As its moderator you can change the name and topic.");
                                 }
                             });
@@ -2532,7 +2531,7 @@ impl App {
                             let settings = form.settings();
                             match form.editing {
                                 Some(id) => {
-                                    if may_edit {
+                                    if may_rename {
                                         send.push(C2S::EditChannel { id, settings });
                                     }
                                     let saved = saved_overrides.as_deref().unwrap_or_default();
@@ -3352,7 +3351,6 @@ fn perm_label(perm: Perm) -> &'static str {
         Perm::Kick => "Kick",
         Perm::Ban => "Ban",
         Perm::ManageRoles => "Manage roles",
-        Perm::Rename => "Rename channels",
     }
 }
 

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
-use t7_proto::perms::{Member, Override, Perm, Permissions, Perms, RoleId, Roles};
+use t7_proto::perms::{ChannelPerms, Member, Override, Perm, Permissions, Perms, RoleId, Roles};
 use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo, Speech};
 
 use super::*;
@@ -84,7 +84,8 @@ fn view() -> ServerView {
     ];
     let info = ServerInfo { name: "Friday Night".into(), welcome: String::new(), max_clients: 32 };
     let channels = vec![lobby, games, ranked, duo, afk, music, staff, office, meeting, rooms, room];
-    let everywhere = channels.iter().map(|c| (c.id, Perms::ALL | Perms::of(&[Perm::Rename]))).collect();
+    let everything = ChannelPerms { perms: Perms::ALL, rename: true };
+    let everywhere = channels.iter().map(|c| (c.id, everything)).collect();
     let mut view =
         ServerView::new(1, info, channels, clients, Permissions { server: Perms::ALL, channels: everywhere });
     let mut roles = Roles { owner: Some(Identity([1; 32])), ..Roles::default() };
@@ -314,7 +315,8 @@ const SCENES: &[Scene] = &[
     ("24-moderator-edit", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         let view = app.view.as_mut().unwrap();
-        let moderator = Perms::of(&[Perm::View, Perm::Join, Perm::Speak, Perm::Kick, Perm::Rename]);
+        let moderator =
+            ChannelPerms { perms: Perms::of(&[Perm::View, Perm::Join, Perm::Speak, Perm::Kick]), rename: true };
         let channels = view.channels.keys().map(|&c| (c, moderator)).collect();
         view.apply(&S2C::Permissions(Permissions { server: Perms::of(&[Perm::View]), channels }));
         app.open_edit_channel(3);

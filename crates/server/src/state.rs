@@ -793,13 +793,13 @@ impl Server {
     }
 
     fn edit_channel(&mut self, id: ClientId, channel: ChannelId, settings: &ChannelSettings) {
-        let may = self.standing(id, Scope::Channel(channel)).perms;
-        if !may.has(Perm::Rename) {
+        let mine = self.standing(id, Scope::Channel(channel));
+        if !mine.rename {
             return self.error(id, "you can't edit this channel");
         }
         let Some(info) = self.channels.get(channel) else { return self.error(id, "channel does not exist") };
         let renames_only = settings.max_clients == info.max_clients && settings.password == PasswordChange::Keep;
-        if !may.has(Perm::ManageChannels) && !renames_only {
+        if !mine.perms.has(Perm::ManageChannels) && !renames_only {
             return self.error(id, "you can only change this channel's name and topic");
         }
         let permanent = !info.temporary;

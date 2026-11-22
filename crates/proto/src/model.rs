@@ -109,6 +109,10 @@ impl ServerView {
         self.permissions.may_in(channel, perm)
     }
 
+    pub fn may_rename(&self, channel: ChannelId) -> bool {
+        self.permissions.may_rename(channel)
+    }
+
     pub fn is_owner(&self) -> bool {
         let owner = self.roles.as_ref().and_then(|r| r.owner);
         owner.is_some_and(|o| self.me().is_some_and(|me| me.identity == o))
@@ -205,7 +209,7 @@ impl ChannelTree for ServerView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perms::Perms;
+    use crate::perms::{ChannelPerms, Perms};
     use crate::{ClientStatus, LeaveReason};
 
     fn chan(id: u32, parent: Option<u32>, order: u32) -> ChannelInfo {
@@ -238,7 +242,8 @@ mod tests {
             identity: Identity([1; 32]),
             speech: crate::Speech::Allowed,
         };
-        let channels = [1, 3].map(|c| (c, Perms::NONE)).into_iter().chain([(2, Perms::of(&[Perm::Kick]))]).collect();
+        let kick = ChannelPerms { perms: Perms::of(&[Perm::Kick]), rename: false };
+        let channels = [1, 3].map(|c| (c, ChannelPerms::default())).into_iter().chain([(2, kick)]).collect();
         let permissions = Permissions { server: Perms::NONE, channels };
         let channels = vec![chan(3, None, 1), chan(1, None, 0), chan(2, Some(1), 0)];
         let mut v = ServerView::new(1, info, channels, vec![me], permissions);

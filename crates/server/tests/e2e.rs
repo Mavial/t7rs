@@ -404,7 +404,7 @@ async fn error(c: &mut TestClient) -> String {
 
 fn may_in(welcome: &S2C, channel: ChannelId) -> Perms {
     let S2C::Welcome { permissions, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
-    *permissions.channels.get(&channel).unwrap_or_else(|| panic!("no channel {channel}"))
+    permissions.channels.get(&channel).unwrap_or_else(|| panic!("no channel {channel}")).perms
 }
 
 #[tokio::test]
