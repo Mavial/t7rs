@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
-    C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, LeaveReason, MAX_POKE_LEN,
+    C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason, MAX_POKE_LEN,
     MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget, encode_frame,
     validate_nickname,
 };
@@ -34,9 +34,8 @@ pub enum Event {
         protocol: u16,
         nickname: String,
         password: Option<String>,
-        /// The connection's TLS exporter value, for proving an identity on it.
-        #[expect(dead_code, reason = "client identities will sign it")]
-        exporter: [u8; 32],
+        /// Proven on this connection; `None` if the proof didn't verify.
+        identity: Option<Identity>,
         outbox: mpsc::Sender<Frame>,
         /// Receives the assigned id, or `None` if the handshake was rejected.
         reply: oneshot::Sender<Option<ClientId>>,
@@ -142,8 +141,8 @@ impl Server {
 
     fn handle(&mut self, ev: Event) {
         match ev {
-            Event::Join { addr, protocol, nickname, password, exporter: _, outbox, reply } => {
-                let id = self.join(addr, protocol, nickname, password, outbox);
+            Event::Join { addr, protocol, nickname, password, identity, outbox, reply } => {
+                let id = self.join(addr, protocol, nickname, password, identity, outbox);
                 let _ = reply.send(id);
             }
             Event::Message { id, msg } => self.message(id, msg),
@@ -192,6 +191,7 @@ impl Server {
         protocol: u16,
         nickname: String,
         password: Option<String>,
+        identity: Option<Identity>,
         outbox: mpsc::Sender<Frame>,
     ) -> Option<ClientId> {
         let reject = |reason: &str| {
@@ -209,6 +209,7 @@ impl Server {
                 "protocol mismatch (server {PROTOCOL_VERSION}, client {protocol}); this server needs an update"
             ));
         }
+        let Some(identity) = identity else { return reject("your identity proof is invalid") };
         if let Some(pw) = &self.password
             && password.as_deref() != Some(pw.as_str())
         {
@@ -225,7 +226,7 @@ impl Server {
         let id = self.next_id;
         self.next_id += 1;
         let channel = self.default_channel_for_join();
-        let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), admin: false };
+        let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), admin: false, identity };
 
         let mut clients: Vec<ClientInfo> = self.clients.values().map(|c| c.info.clone()).collect();
         clients.push(info.clone());

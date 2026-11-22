@@ -38,15 +38,16 @@ pub async fn handle(stream: TcpStream, addr: SocketAddr, acceptor: TlsAcceptor, 
 
     // Handshake: the first frame must be Hello.
     let hello = timeout_at(deadline, read_frame::<_, C2S>(&mut reader, &mut scratch)).await;
-    let (protocol, nickname, password) = match hello {
-        Ok(Ok(C2S::Hello { protocol, nickname, password })) => (protocol, nickname, password),
+    let (protocol, nickname, password, proof) = match hello {
+        Ok(Ok(C2S::Hello { protocol, nickname, password, identity })) => (protocol, nickname, password, identity),
         Ok(Ok(_)) => return tracing::debug!(%addr, "first message was not Hello"),
         Ok(Err(e)) => return tracing::debug!(%addr, "handshake failed: {e}"),
         Err(_) => return tracing::debug!(%addr, "handshake timed out"),
     };
 
     let (reply, id) = oneshot::channel();
-    let join = Event::Join { addr, protocol, nickname, password, exporter, outbox, reply };
+    let identity = proof.verify(&exporter);
+    let join = Event::Join { addr, protocol, nickname, password, identity, outbox, reply };
     if core.send(join).await.is_err() {
         return;
     }

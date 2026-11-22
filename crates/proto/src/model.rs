@@ -150,6 +150,7 @@ mod tests {
             channel: 1,
             status: ClientStatus::default(),
             admin: false,
+            identity: crate::Identity([1; 32]),
         };
         let mut v = ServerView::new(
             1,

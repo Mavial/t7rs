@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
+use t7_proto::identity::IdentityKey;
 use t7_proto::tls::{self, ConnectError, Fingerprint};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
@@ -39,6 +40,7 @@ struct Attempt {
     password: Option<String>,
     /// The certificate fingerprint seen here before, if any.
     pinned: Option<Fingerprint>,
+    key: IdentityKey,
 }
 
 /// What a session sends.
@@ -101,9 +103,10 @@ impl Net {
         nickname: String,
         password: Option<String>,
         pinned: Option<Fingerprint>,
+        key: IdentityKey,
     ) -> SessionId {
         self.session += 1;
-        let _ = self.tx.send(Command::Connect(Attempt { address, nickname, password, pinned }));
+        let _ = self.tx.send(Command::Connect(Attempt { address, nickname, password, pinned, key }));
         self.session
     }
 
@@ -258,10 +261,12 @@ async fn session(
         Err(_) => return Ended::Failed(format!("{target} did not answer the secure handshake. Is it an older T7 server?")),
     };
     events.emit(NetEvent::Secured(id, fingerprint));
+    let identity = attempt.key.prove(&tls::exporter(stream.get_ref().1));
     let (read, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(read);
 
-    let hello = C2S::Hello { protocol: PROTOCOL_VERSION, nickname: attempt.nickname, password: attempt.password };
+    let hello =
+        C2S::Hello { protocol: PROTOCOL_VERSION, nickname: attempt.nickname, password: attempt.password, identity };
     if let Err(e) = write_frame(&mut writer, &hello).await {
         return Ended::Failed(format!("Connection lost: {e}"));
     }

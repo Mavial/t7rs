@@ -1,11 +1,13 @@
 //! Spins up a real server on localhost and drives it with raw protocol clients.
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use t7_proto::identity::IdentityKey;
 use t7_proto::*;
 use t7_server::config::{Config, DEFAULT_CONFIG};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 
 type Tls = tls::ClientStream<TcpStream>;
 
@@ -13,24 +15,42 @@ struct TestClient {
     r: BufReader<ReadHalf<Tls>>,
     w: WriteHalf<Tls>,
     buf: Vec<u8>,
+    /// What this connection's identity proof signs.
+    exporter: [u8; 32],
 }
 
+/// One key per nickname, so reconnecting under a name is the same person.
+fn key(nick: &str) -> IdentityKey {
+    let mut seed = [0u8; 32];
+    seed.iter_mut().zip(nick.bytes()).for_each(|(s, b)| *s = b);
+    IdentityKey::from_seed(seed)
+}
+
+/// Loopback addresses for clients that must not share an IP.
+const HOME: Ipv4Addr = Ipv4Addr::LOCALHOST;
+
 impl TestClient {
-    async fn connect(addr: std::net::SocketAddr, nick: &str, pw: Option<&str>) -> (Self, S2C) {
+    async fn connect(addr: SocketAddr, nick: &str, pw: Option<&str>) -> (Self, S2C) {
         Self::connect_as(addr, nick, pw, PROTOCOL_VERSION).await
     }
-    async fn connect_as(addr: std::net::SocketAddr, nick: &str, pw: Option<&str>, protocol: u16) -> (Self, S2C) {
-        let (tls, _) = tls::connect(TcpStream::connect(addr).await.unwrap(), None).await.unwrap();
+    async fn connect_as(addr: SocketAddr, nick: &str, pw: Option<&str>, protocol: u16) -> (Self, S2C) {
+        let c = Self::open(addr, HOME).await;
+        let proof = key(nick).prove(&c.exporter);
+        c.hello(nick, pw, protocol, proof).await
+    }
+    /// A TLS connection that hasn't said Hello yet.
+    async fn open(addr: SocketAddr, from: Ipv4Addr) -> Self {
+        let sock = TcpSocket::new_v4().unwrap();
+        sock.bind((from, 0).into()).unwrap();
+        let (tls, _) = tls::connect(sock.connect(addr).await.unwrap(), None).await.unwrap();
+        let exporter = tls::exporter(tls.get_ref().1);
         let (r, w) = tokio::io::split(tls);
-        let mut c = Self { r: BufReader::new(r), w, buf: Vec::new() };
-        c.send(C2S::Hello {
-            protocol,
-            nickname: nick.into(),
-            password: pw.map(Into::into),
-        })
-        .await;
-        let first = c.recv().await;
-        (c, first)
+        Self { r: BufReader::new(r), w, buf: Vec::new(), exporter }
+    }
+    async fn hello(mut self, nick: &str, pw: Option<&str>, protocol: u16, identity: IdentityProof) -> (Self, S2C) {
+        self.send(C2S::Hello { protocol, nickname: nick.into(), password: pw.map(Into::into), identity }).await;
+        let first = self.recv().await;
+        (self, first)
     }
     async fn send(&mut self, m: C2S) {
         write_frame(&mut self.w, &m).await.unwrap();
@@ -258,7 +278,12 @@ async fn clients_without_tls_are_told_to_update() {
     // A protocol 4 client: a plain frame, no TLS. Its Hello frame length (22)
     // starts with the same byte as a TLS record.
     let mut old = TcpStream::connect(addr).await.unwrap();
-    let hello = C2S::Hello { protocol: 4, nickname: "eighteen_char_nick".into(), password: None };
+    // Protocol 4's Hello, which had no identity.
+    #[derive(serde::Serialize)]
+    enum OldC2S {
+        Hello { protocol: u16, nickname: String, password: Option<String> },
+    }
+    let hello = OldC2S::Hello { protocol: 4, nickname: "eighteen_char_nick".into(), password: None };
     let frame = encode_frame(&hello);
     assert_eq!(frame[0], tls::HANDSHAKE_RECORD);
     old.write_all(&frame).await.unwrap();
@@ -420,4 +445,36 @@ impl Channels {
         }
         walk(&cfg.channels)
     }
+}
+
+fn rejected(reply: &S2C) -> &str {
+    match reply {
+        S2C::Rejected { reason } => reason,
+        other => panic!("not rejected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn identities_are_proven_on_each_connection() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (_, welcome) = TestClient::connect(addr, "alice", None).await;
+    let S2C::Welcome { your_id, clients, .. } = &welcome else { panic!("not welcomed: {welcome:?}") };
+    assert_eq!(clients.iter().find(|c| c.id == *your_id).unwrap().identity, key("alice").identity());
+
+    // A signature over other bytes than this connection's exporter.
+    let c = TestClient::open(addr, HOME).await;
+    let forged = key("mallory").prove(&[0; 32]);
+    let (_, reply) = c.hello("mallory", None, PROTOCOL_VERSION, forged).await;
+    assert!(rejected(&reply).contains("identity proof"), "{reply:?}");
+
+    // A real proof, but from another connection.
+    let first = TestClient::open(addr, HOME).await;
+    let replayed = key("mallory").prove(&first.exporter);
+    let (_, reply) = TestClient::open(addr, HOME).await.hello("mallory", None, PROTOCOL_VERSION, replayed).await;
+    assert!(rejected(&reply).contains("identity proof"), "{reply:?}");
+
+    // One person may connect twice.
+    let (_, again) = TestClient::connect(addr, "alice", None).await;
+    let S2C::Welcome { your_id, clients, .. } = &again else { panic!("not welcomed: {again:?}") };
+    assert_eq!(clients.iter().find(|c| c.id == *your_id).unwrap().identity, key("alice").identity());
 }

@@ -32,6 +32,10 @@ async fn main() {
     let (tls, fingerprint) = tls::connect(tcp, None).await.expect("TLS handshake");
     let version = tls.get_ref().1.protocol_version().expect("handshake is done");
     println!("{version:?} to {server}, server certificate {fingerprint}");
+    // A new identity each run.
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).expect("system randomness");
+    let identity = identity::IdentityKey::from_seed(seed).prove(&tls::exporter(tls.get_ref().1));
     let (r, mut w) = tokio::io::split(tls);
     let mut r = BufReader::new(r);
     let nickname = match mode.as_str() {
@@ -42,7 +46,7 @@ async fn main() {
         _ => "ListenBot",
     }
     .to_owned();
-    write_frame(&mut w, &C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password: None }).await.unwrap();
+    write_frame(&mut w, &C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password: None, identity }).await.unwrap();
     let mut buf = Vec::new();
     let (mut crypto, names) = match read_frame::<_, S2C>(&mut r, &mut buf).await.unwrap() {
         S2C::Welcome { your_id, voice_key, clients, .. } => {

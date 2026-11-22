@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod identity;
 pub mod model;
 pub mod tls;
 pub mod update;
@@ -41,6 +42,8 @@ pub const IDLE_TIMEOUT_SECS: u64 = 30;
 
 pub type ClientId = u32;
 pub type ChannelId = u32;
+
+pub use identity::{Identity, IdentityProof};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct ClientStatus {
@@ -101,6 +104,8 @@ pub struct ClientInfo {
     pub status: ClientStatus,
     /// Server admin: may manage every channel.
     pub admin: bool,
+    /// The same on every connection with the same key; two connections may share one.
+    pub identity: Identity,
 }
 
 /// Where a text message goes.
@@ -129,6 +134,7 @@ pub enum C2S {
         protocol: u16,
         nickname: String,
         password: Option<String>,
+        identity: IdentityProof,
     },
     /// `password` is needed for password-protected channels (admins skip it).
     JoinChannel { channel: ChannelId, password: Option<String> },
@@ -279,6 +285,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             nickname: "alice".into(),
             password: None,
+            identity: identity::IdentityKey::from_seed([3; 32]).prove(&[4; 32]),
         };
         let frame = encode_frame(&msg);
         assert_eq!(

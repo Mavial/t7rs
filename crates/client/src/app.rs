@@ -298,7 +298,8 @@ impl App {
         self.settings.nickname = nickname.clone();
         let pinned = self.settings.server_certs.get(&net::canonical_address(&address)).copied();
         let login_password = Some(password.clone()).filter(|p| !p.is_empty());
-        self.session = self.net.connect(address.clone(), nickname, login_password, pinned);
+        let key = self.settings.identity_key.get_or_insert_with(settings::new_identity_key).clone();
+        self.session = self.net.connect(address.clone(), nickname, login_password, pinned, key);
         self.conn = Conn::Connecting { address, password };
         self.view = None;
         self.ping = None;
