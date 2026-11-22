@@ -3,6 +3,7 @@
 mod app;
 mod audio;
 mod brand;
+mod channel_drop;
 mod dsp;
 mod icons;
 mod net;

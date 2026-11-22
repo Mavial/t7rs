@@ -14,6 +14,7 @@ use t7_proto::{
 };
 
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
+use crate::channel_drop::{self, DropTarget, Outcome, Zone};
 use crate::icons::{self, Icon};
 use crate::net::{self, Ended, Net, NetEvent, SessionId};
 use crate::settings::{self, Recent, Settings};
@@ -81,6 +82,7 @@ enum TreeAction {
     Create(Option<ChannelId>),
     Edit(ChannelId),
     Shift(ChannelId, i32),
+    Move(ChannelId, DropTarget),
     MakeDefault(ChannelId),
     Delete(ChannelId),
     AdminLogin,
@@ -92,6 +94,9 @@ enum TreeAction {
 
 /// Payload while dragging yourself onto another channel.
 struct DragSelf;
+
+/// Payload while an admin drags a channel to rearrange the tree.
+struct DragChannel(ChannelId);
 
 /// Voice is considered blocked when no UDP pong arrived for this long.
 const VOICE_TIMEOUT: Duration = Duration::from_secs(4);
@@ -1051,6 +1056,9 @@ impl App {
                     ui.spacing_mut().item_spacing.y = 1.0;
                     let mine = view.my_channel();
                     let dragging_self = egui::DragAndDrop::has_payload_of_type::<DragSelf>(ui.ctx());
+                    let dragging_channel = egui::DragAndDrop::payload::<DragChannel>(ui.ctx()).map(|d| d.0);
+                    let pointer = ui.input(|i| i.pointer.interact_pos());
+                    let may_rearrange = view.allowed(Action::RearrangeChannels);
 
                     for &(depth, ch_id) in view.tree() {
                         let ch = &view.channels[&ch_id];
@@ -1059,8 +1067,17 @@ impl App {
                         let is_mine = mine == Some(ch_id);
                         let full = ch.max_clients.is_some_and(|m| clients.len() as u32 >= m);
 
-                        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-                        let drop_hover = dragging_self && resp.contains_pointer() && !is_mine;
+                        let sense = if may_rearrange { Sense::click_and_drag() } else { Sense::click() };
+                        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), sense);
+                        let channel_drop = match (dragging_channel, pointer) {
+                            (Some(dragged), Some(pos)) if resp.contains_pointer() => {
+                                let zone = Zone::at((pos.y - rect.top()) / rect.height());
+                                Some((zone, channel_drop::drop_target(&view.channels, dragged, ch_id, zone)))
+                            }
+                            _ => None,
+                        };
+                        let drop_hover = (dragging_self && resp.contains_pointer() && !is_mine)
+                            || matches!(channel_drop, Some((Zone::Into, Outcome::Move(_))));
                         let bg = if drop_hover {
                             theme::ACCENT_BG
                         } else if is_mine {
@@ -1074,6 +1091,13 @@ impl App {
                         p.rect_filled(rect, CornerRadius::same(6), bg);
                         if drop_hover {
                             p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
+                        }
+                        if let Some((zone @ (Zone::Before | Zone::After), Outcome::Move(_))) = channel_drop {
+                            // Indented to the level the channel lands on.
+                            let y = if zone == Zone::Before { rect.top() - 0.5 } else { rect.bottom() + 0.5 };
+                            let left = rect.left() + indent + 4.0;
+                            p.circle_filled(egui::pos2(left, y), 3.0, theme::ACCENT);
+                            p.line_segment([egui::pos2(left, y), egui::pos2(rect.right() - 4.0, y)], Stroke::new(2.0, theme::ACCENT));
                         }
                         let icon_color = if is_mine { theme::ACCENT_TEXT } else { theme::TEXT_FAINT };
                         let x = rect.left() + indent + 6.0;
@@ -1100,8 +1124,28 @@ impl App {
                             p.text(rect.right_center() - vec2(8.0, 0.0), Align2::RIGHT_CENTER, count, FontId::proportional(11.5), c);
                         }
 
-                        if resp.double_clicked() || resp.dnd_release_payload::<DragSelf>().is_some() {
+                        // Releasing takes the payload whatever its type, so ask only for the one being dragged.
+                        if resp.double_clicked() || (dragging_self && resp.dnd_release_payload::<DragSelf>().is_some()) {
                             join = Some(ch_id);
+                        }
+                        if may_rearrange {
+                            resp.dnd_set_drag_payload(DragChannel(ch_id));
+                            if resp.dragged() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            }
+                        }
+                        if let Some((_, outcome)) = channel_drop {
+                            if let Outcome::NotAllowed(why) = outcome {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+                                egui::Tooltip::for_widget(&resp).at_pointer().show(|ui| {
+                                    ui.label(RichText::new(why.message()).color(theme::TEXT_DIM));
+                                });
+                            }
+                            if let (Some(dragged), Outcome::Move(target)) = (dragging_channel, outcome)
+                                && resp.dnd_release_payload::<DragChannel>().is_some()
+                            {
+                                action = Some(TreeAction::Move(dragged, target));
+                            }
                         }
                         let mut tip: Vec<String> = Vec::new();
                         if !ch.topic.is_empty() {
@@ -1286,6 +1330,9 @@ impl App {
                     Some(TreeAction::Create(parent)) => self.open_create_channel(parent),
                     Some(TreeAction::Edit(ch)) => self.open_edit_channel(ch),
                     Some(TreeAction::Shift(ch, delta)) => self.shift_channel(ch, delta),
+                    Some(TreeAction::Move(ch, to)) => {
+                        self.net.send(C2S::MoveChannel { id: ch, parent: to.parent, position: to.position });
+                    }
                     Some(TreeAction::MakeDefault(ch)) => self.net.send(C2S::SetDefaultChannel { id: ch }),
                     Some(TreeAction::Delete(ch)) => self.open_delete_channel(ch),
                     Some(TreeAction::AdminLogin) => {
