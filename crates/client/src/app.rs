@@ -1107,7 +1107,8 @@ impl App {
                             p.text(rect.right_center() - vec2(8.0, 0.0), Align2::RIGHT_CENTER, count, FontId::proportional(11.5), c);
                         }
 
-                        if resp.double_clicked() || resp.dnd_release_payload::<DragSelf>().is_some() {
+                        // Releasing takes the payload whatever its type, so ask only for the one being dragged.
+                        if resp.double_clicked() || (dragging_self && resp.dnd_release_payload::<DragSelf>().is_some()) {
                             join = Some(ch_id);
                         }
                         if may_rearrange {
