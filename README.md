@@ -110,9 +110,9 @@ The server enforces them, and the client shows only the menu entries they allow.
   and kicks them off the server. The ban covers their identity from any
   address. **Also ban IP address** (on by default) also kicks off and keeps
   out every other identity at their address, which includes everyone else
-  behind it, like a household or a LAN. The server refuses an IP ban on the admin's own
-  address. A banned person who tries to connect sees the reason and how long
-  the ban has left.
+  behind it, like a household or a LAN. The server refuses an IP ban on the
+  admin's own address. A banned person who tries to connect sees the reason
+  and how long the ban has left.
 
 ## Server configuration
 
