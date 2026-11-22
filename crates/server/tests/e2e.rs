@@ -234,9 +234,14 @@ async fn voice_is_routed_encrypted_within_the_channel() {
     va.sock.send(&va.sent).await.unwrap();
     assert_eq!(vb.recv_owned().await, None, "replay was forwarded");
 
-    // So is one sealed with another key, even with a's id on it.
+    // So is one sealed with another key, even with a's id on it. a's counters
+    // stay below 10 in this test, so the forger skips past them: only the key
+    // check can drop its datagram, not the replay window.
     let mut forger = voice::ClientSide::new(va.id, &[0x42; 32]);
     let mut forged = Vec::new();
+    for _ in 0..10 {
+        forger.seal(voice::ToServer::Ping { nonce: 0 }, &mut forged);
+    }
     forger.seal(voice::ToServer::Audio { seq: 2, payload: &[1] }, &mut forged);
     va.sock.send(&forged).await.unwrap();
     assert_eq!(vb.recv_owned().await, None, "forgery was forwarded");
@@ -563,6 +568,39 @@ async fn moderators_kick_from_their_channels_only() {
 }
 
 #[tokio::test]
+async fn kicked_people_land_where_a_joining_client_would() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    let [lobby, hangout, gaming, squad] = ["Lobby", "Hangout", "Gaming", "Squad 1"].map(|name| id_of(&channels, name));
+    let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    for channel in [gaming, hangout] {
+        admin.send(C2S::SetModerator { channel, identity: key("mod").identity(), moderator: true }).await;
+        moder.channels().await;
+    }
+    user.send(C2S::JoinChannel { channel: squad, password: None }).await;
+    moder.until(|m| *m == S2C::ClientMoved { id: user_id, channel: squad }).await;
+
+    // The default channel needs a password: the kick lands them in the first open channel.
+    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Lobby") };
+    admin.send(C2S::EditChannel { id: lobby, settings: locked }).await;
+    moder.channels().await;
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    moder.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    assert_eq!(moder.recv().await, S2C::ClientMoved { id: user_id, channel: hangout });
+
+    // The default channel is full (admin and mod are in it), and the kick is
+    // out of Hangout, so the next open channel it is.
+    let full = ChannelSettings { max_clients: Some(2), password: PasswordChange::Remove, ..settings("Lobby") };
+    admin.send(C2S::EditChannel { id: lobby, settings: full }).await;
+    moder.channels().await;
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    moder.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    assert_eq!(moder.recv().await, S2C::ClientMoved { id: user_id, channel: gaming });
+}
+
+#[tokio::test]
 async fn bans_keep_identities_and_addresses_out() {
     let addr = start(&with_admin_token("t")).await;
     // The admin comes from another address than the people it bans.
@@ -621,6 +659,49 @@ async fn bans_keep_identities_and_addresses_out() {
     assert!(error(&mut user).await.contains("only admins"));
     user.send(C2S::Unban { id: mallory_ban.id }).await;
     assert!(error(&mut user).await.contains("only admins"));
+}
+
+#[tokio::test]
+async fn ip_bans_eject_everyone_at_that_address() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, admin_id, _) = admin_login(addr, ADMIN_IP).await;
+    let (mut eve, we) = TestClient::connect_from(addr, ELSEWHERE, "eve", &key("eve")).await;
+    let (mut sock, ws) = TestClient::connect_from(addr, ELSEWHERE, "sock", &key("sock")).await;
+    let (mut bystander, _) = TestClient::connect_from(addr, HOME, "bystander", &key("bystander")).await;
+    let (eve_id, sock_id) = (welcomed_id(&we), welcomed_id(&ws));
+
+    admin.send(C2S::Ban { target: eve_id, duration_secs: None, reason: "spam".into(), include_ip: true }).await;
+    for (client, id) in [(&mut eve, eve_id), (&mut sock, sock_id)] {
+        let kicked = client.until(|m| matches!(m, S2C::ClientKicked { id: k, .. } if *k == id)).await;
+        let notice = S2C::ClientKicked { id, by: admin_id, from_server: true, reason: "banned for good (spam)".into() };
+        assert_eq!(kicked, notice);
+        client.closed().await;
+    }
+    // Someone at another address stays.
+    bystander.send(C2S::Ping { nonce: 7 }).await;
+    assert_eq!(bystander.until(|m| matches!(m, S2C::Pong { .. })).await, S2C::Pong { nonce: 7 });
+}
+
+#[tokio::test]
+async fn only_admins_rearrange_channels() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    let afk = id_of(&channels, "AFK");
+    // Even a moderator of the channel may not.
+    let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
+    admin.send(C2S::SetModerator { channel: afk, identity: key("mod").identity(), moderator: true }).await;
+    let mut before = moder.channels().await;
+
+    moder.send(C2S::MoveChannel { id: afk, parent: None, position: 0 }).await;
+    assert!(error(&mut moder).await.contains("only admins"));
+    moder.send(C2S::SetDefaultChannel { id: afk }).await;
+    assert!(error(&mut moder).await.contains("only admins"));
+
+    let (_, welcome) = TestClient::connect(addr, "later", None).await;
+    let S2C::Welcome { channels: mut after, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
+    before.sort_by_key(|c| c.id);
+    after.sort_by_key(|c| c.id);
+    assert_eq!(after, before, "the channel tree changed");
 }
 
 #[tokio::test]

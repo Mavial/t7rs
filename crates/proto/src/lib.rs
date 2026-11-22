@@ -183,11 +183,11 @@ pub enum C2S {
     Authenticate { token: String },
     /// Admins only. By identity, so someone offline can be removed too.
     SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
-    /// Out of their channel to the default one (admins and the channel's
+    /// Out of their channel to where a new client would land (admins and the channel's
     /// moderators), or off the server (admins). See [`perms`].
     Kick { target: ClientId, from_server: bool, reason: String },
     /// Admins only. Bans their identity, and their IP address with `include_ip`,
-    /// for `duration_secs` (`None`: for good), and kicks them off the server.
+    /// for `duration_secs` (`None`: for good), and kicks off everyone it covers.
     Ban { target: ClientId, duration_secs: Option<u64>, reason: String, include_ip: bool },
     /// Admins only; answered with [`S2C::Bans`].
     ListBans,

@@ -82,7 +82,7 @@ Each person has one of three roles on a server. The strongest comes first.
 | Role | Who | May |
 | --- | --- | --- |
 | Admin | Anyone who logged in with the server's admin token | Everything, including kicks off the server, bans, the ban list, and choosing moderators |
-| Channel moderator | An identity that an admin made moderator of a channel | In that channel and every channel below it: edit the channel, and kick people out of it to the default channel |
+| Channel moderator | An identity that an admin made moderator of a channel | In that channel and every channel below it: edit the channel, and kick people out of it |
 | Everyone | Everyone else | Join, talk, chat and poke. Make temporary channels, and edit or delete the ones they made |
 
 The server and the client share one set of rules (`crates/proto/src/perms.rs`).
@@ -101,17 +101,18 @@ The server enforces them, and the client shows only the menu entries they allow.
   change the default channel, choose moderators, or kick anyone off the
   server. They can't kick admins or other moderators of the same channel or a
   higher one.
-- **Kick:** **Kick from channel…** moves someone to the default channel.
+- **Kick:** **Kick from channel…** moves someone to the default channel, or,
+  if that is full or has a password, to the first open channel with room.
   **Kick from server…** (admins) disconnects them, and they can connect again.
   Everyone sees who kicked whom and the reason in chat. Nobody can kick or ban
   themselves.
 - **Ban:** **Ban…** (admins) bans someone for 1 hour, 1 day, 1 week or for good,
   and kicks them off the server. The ban covers their identity from any
-  address. **Also ban IP address** (on by default) also keeps out new
-  identities from their address, which includes everyone else behind it, like
-  a household or a LAN. The server refuses an IP ban on the admin's own
-  address. A banned person who tries to connect sees the reason and how long
-  the ban has left.
+  address. **Also ban IP address** (on by default) also kicks off and keeps
+  out every other identity at their address, which includes everyone else
+  behind it, like a household or a LAN. The server refuses an IP ban on the
+  admin's own address. A banned person who tries to connect sees the reason
+  and how long the ban has left.
 
 ## Server configuration
 
@@ -147,6 +148,7 @@ The server keeps more files next to its config:
 - `bans.toml`: the ban list, saved at every ban and unban. Expired bans are
   dropped when the server starts and when an admin opens the ban list. To
   lift a ban by hand, stop the server and delete its `[[bans]]` entry.
+  `next_id` keeps ban ids from being reused, so leave it in place.
 - `admin_token.txt`: the admin token, generated on first start (unless
   `admin_token` is set) and printed in the log at every start. Anyone with it
   can manage all channels, so share it only with your admins.
@@ -188,6 +190,9 @@ Set log verbosity with `RUST_LOG=debug`.
   server's log, or ask its admin, before choosing "Trust new certificate and
   connect". The very first connection is only as trustworthy as the network
   it runs over; compare the fingerprint with the admin if that matters to you.
+  For that reason T7 doesn't send a saved admin token on a first connection,
+  or right after you trust a new certificate. Log in again from ⋯ → Admin
+  login once the fingerprint checks out.
 - Clients from before TLS (protocol 4 and older) can't connect. The server
   tells them to update.
 
