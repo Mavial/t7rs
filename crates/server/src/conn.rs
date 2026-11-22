@@ -74,8 +74,14 @@ pub async fn handle(stream: TcpStream, addr: SocketAddr, acceptor: TlsAcceptor, 
                 }
                 Err(_) => break LeaveReason::TimedOut,
             },
-            // The core dropped our outbox (kicked / too slow): stop reading.
-            _ = &mut writer => return,
+            // The core dropped our outbox (kicked / too slow) and the writer
+            // has sent what was queued. Read until they hang up: closing with
+            // unread data would reset the connection, which can destroy the
+            // kick notice before they read it.
+            _ = &mut writer => {
+                let _ = timeout(Duration::from_secs(2), tokio::io::copy(&mut reader, &mut tokio::io::sink())).await;
+                return;
+            }
         }
     };
     let _ = core.send(Event::Left { id, reason }).await;

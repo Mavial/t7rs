@@ -10,7 +10,7 @@ use t7_proto::perms::{self, Action};
 use t7_proto::tls::Fingerprint;
 use t7_proto::{
     C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason, MAX_CHANNEL_DEPTH,
-    MAX_CHANNEL_NAME_LEN, MAX_CHANNEL_TOPIC_LEN, PasswordChange, S2C, TextTarget,
+    MAX_CHANNEL_NAME_LEN, MAX_CHANNEL_TOPIC_LEN, MAX_REASON_LEN, PasswordChange, S2C, TextTarget,
 };
 
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
@@ -82,6 +82,7 @@ enum TreeAction {
     Delete(ChannelId),
     AdminLogin,
     SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
+    Kick { target: ClientId, from_server: bool },
 }
 
 /// Payload while dragging yourself onto another channel.
@@ -118,6 +119,11 @@ struct PokeForm {
     name: String,
     message: String,
     focus_requested: bool,
+}
+
+/// The moderation dialog on screen, if any.
+enum Moderation {
+    Kick { target: ClientId, name: String, from_server: bool, reason: String, focused: bool },
 }
 
 /// A server came back with a different certificate than the pinned one.
@@ -206,6 +212,9 @@ pub struct App {
     pokes: std::collections::VecDeque<PokeAlert>,
     sound_pack: Pack,
     channel_dialog: Option<ChannelDialog>,
+    moderation: Option<Moderation>,
+    /// Who kicked us off the server and why, for when the connection closes.
+    kicked: Option<String>,
     cert_change: Option<CertChange>,
     /// Address of the connected server, for per-server admin tokens.
     server_address: String,
@@ -256,6 +265,8 @@ impl App {
             pokes: Default::default(),
             sound_pack: Pack::BuiltIn,
             channel_dialog: None,
+            moderation: None,
+            kicked: None,
             cert_change: None,
             server_address: String::new(),
             pending_admin_token: None,
@@ -306,6 +317,7 @@ impl App {
         self.view = None;
         self.ping = None;
         self.last_error = None;
+        self.kicked = None;
         self.form = None;
     }
 
@@ -449,9 +461,47 @@ impl App {
         self.voice.playback.set_user_volume(id, volume);
     }
 
+    fn open_kick(&mut self, target: ClientId, from_server: bool) {
+        let Some(name) = self.view.as_ref().and_then(|v| v.nickname(target)) else { return };
+        let name = name.to_owned();
+        self.moderation = Some(Moderation::Kick { target, name, from_server, reason: String::new(), focused: false });
+    }
+
     fn open_poke(&mut self, target: ClientId) {
         let Some(name) = self.view.as_ref().and_then(|v| v.nickname(target)) else { return };
         self.poke_form = Some(PokeForm { target, name: name.to_owned(), message: String::new(), focus_requested: false });
+    }
+
+    fn on_kicked(&mut self, id: ClientId, by: ClientId, from_server: bool, reason: &str) {
+        let Some(view) = &self.view else { return };
+        let name = |id| view.nickname(id).unwrap_or("Someone").to_owned();
+        let (target, actor) = (name(id), name(by));
+        let Some(channel) = view.clients.get(&id).map(|c| c.channel) else { return };
+        let here = view.my_channel() == Some(channel);
+        let my_id = view.my_id;
+        let why = if reason.is_empty() { String::new() } else { format!(": {reason}") };
+        let place = if from_server {
+            "the server".to_owned()
+        } else if here {
+            "the channel".to_owned()
+        } else {
+            self.channel_name(channel)
+        };
+        if id == my_id {
+            let line = format!("{actor} kicked you from {place}{why}");
+            if from_server {
+                self.kicked = Some(line.clone());
+            }
+            self.push(if from_server { 0 } else { 1 }, LineKind::Error, line);
+            return;
+        }
+        let line = format!("{target} was kicked from {place} by {actor}{why}");
+        if here {
+            self.push(1, LineKind::System, line.clone());
+        }
+        if from_server || (!here && by == my_id) {
+            self.push(0, LineKind::System, line);
+        }
     }
 
     fn on_poked(&mut self, from: ClientId, message: String) {
@@ -571,6 +621,8 @@ impl App {
                 Some("The server's certificate has changed".to_owned())
             }
         };
+        let kicked = self.kicked.take();
+        let reason = kicked.clone().or(reason);
         let was_connected = matches!(self.conn, Conn::Connected);
         self.conn = Conn::Disconnected;
         self.view = None;
@@ -590,7 +642,7 @@ impl App {
         if reason.as_deref().is_some_and(|r| r.contains("please update your T7")) {
             self.updater.check_now();
         }
-        if !was_connected {
+        if !was_connected || kicked.is_some() {
             self.last_error = reason;
         }
         self.active_tab = 0;
@@ -654,12 +706,15 @@ impl App {
                 let name = c.nickname.clone();
                 let here = Some(c.channel) == view.my_channel();
                 let verb = match reason {
-                    LeaveReason::Disconnected => "disconnected",
-                    LeaveReason::TimedOut => "timed out",
-                    LeaveReason::Kicked => "was kicked",
+                    LeaveReason::Disconnected => Some("disconnected"),
+                    LeaveReason::TimedOut => Some("timed out"),
+                    // The kick notice already said so.
+                    LeaveReason::Kicked => None,
                 };
                 self.apply(&S2C::ClientLeft { id, reason });
-                self.push(0, LineKind::System, format!("{name} {verb}"));
+                if let Some(verb) = verb {
+                    self.push(0, LineKind::System, format!("{name} {verb}"));
+                }
                 if here {
                     self.push(1, LineKind::System, format!("{name} left the channel"));
                     self.sound(match reason {
@@ -725,6 +780,7 @@ impl App {
                     self.sound(Sound::Message);
                 }
             }
+            S2C::ClientKicked { id, by, from_server, reason } => self.on_kicked(id, by, from_server, &reason),
             S2C::Poked { from, message } => self.on_poked(from, message),
             S2C::Error { message } => {
                 // A saved token that no longer works (e.g. the server's was reset) is forgotten.
@@ -1125,8 +1181,19 @@ impl App {
                                         poke = Some(c.id);
                                         ui.close();
                                     }
-                                    if view.allowed(Action::SetModerator) {
+                                    let kick = |from_server| view.allowed(Action::Kick { target: c, from_server });
+                                    let (channel_kick, server_kick) = (kick(false), kick(true));
+                                    let set_moderator = view.allowed(Action::SetModerator);
+                                    if channel_kick || server_kick || set_moderator {
                                         ui.separator();
+                                    }
+                                    for (from_server, label) in [(false, "Kick from channel…"), (true, "Kick from server…")] {
+                                        if kick(from_server) && ui.button(label).clicked() {
+                                            action = Some(TreeAction::Kick { target: c.id, from_server });
+                                            ui.close();
+                                        }
+                                    }
+                                    if set_moderator {
                                         let moderator = ch.moderators.contains(&c.identity);
                                         let label =
                                             if moderator { "Remove as moderator".to_owned() } else { format!("Make moderator of {}", ch.name) };
@@ -1180,6 +1247,7 @@ impl App {
                     Some(TreeAction::SetModerator { channel, identity, moderator }) => {
                         self.net.send(C2S::SetModerator { channel, identity, moderator });
                     }
+                    Some(TreeAction::Kick { target, from_server }) => self.open_kick(target, from_server),
                     None => {}
                 }
             });
@@ -1638,6 +1706,57 @@ impl App {
         }
     }
 
+    fn moderation_dialog(&mut self, ctx: &egui::Context) {
+        // A dialog about someone who has left closes by itself.
+        let online = |id: &ClientId| self.view.as_ref().is_some_and(|v| v.clients.contains_key(id));
+        let gone = match &self.moderation {
+            Some(Moderation::Kick { target, .. }) => !online(target),
+            None => false,
+        };
+        if gone {
+            self.moderation = None;
+        }
+        let (Some(dialog), Some(view)) = (&mut self.moderation, &self.view) else { return };
+        let default_name =
+            view.channels.values().find(|c| c.default).map(|c| c.name.clone()).unwrap_or_else(|| "the default channel".into());
+        let mut send: Option<C2S> = None;
+        let mut cancel = false;
+        let modal = egui::Modal::new(Id::unique("moderation")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            match dialog {
+                Moderation::Kick { target, name, from_server, reason, focused } => {
+                    let (title, note) = if *from_server {
+                        (format!("Kick {name} from the server"), "They can connect again right away.".to_owned())
+                    } else {
+                        (format!("Kick {name} from the channel"), format!("They move to {default_name}."))
+                    };
+                    ui.label(RichText::new(title).size(19.0).strong().color(theme::TEXT));
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(note).size(12.5).color(theme::TEXT_DIM));
+                    ui.add_space(12.0);
+                    reason_field(ui, reason, focused);
+                    ui.add_space(14.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(danger_button("Kick")).clicked() || enter {
+                            let reason = reason.trim().to_owned();
+                            send = Some(C2S::Kick { target: *target, from_server: *from_server, reason });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
+            }
+        });
+        if let Some(msg) = send {
+            self.net.send(msg);
+            self.moderation = None;
+        } else if cancel || modal.should_close() {
+            self.moderation = None;
+        }
+    }
+
     fn poke_alert(&mut self, ctx: &egui::Context) {
         let Some(alert) = self.pokes.front() else { return };
         let more = self.pokes.len() - 1;
@@ -1701,13 +1820,7 @@ impl App {
             }
             ui.add_space(14.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let accept = egui::Button::new(
-                    RichText::new("Trust new certificate and connect").color(Color32::WHITE).strong(),
-                )
-                .fill(theme::RED)
-                .stroke(Stroke::NONE)
-                .corner_radius(theme::RADIUS);
-                if ui.add(accept).clicked() {
+                if ui.add(danger_button("Trust new certificate and connect")).clicked() {
                     trust = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -1911,11 +2024,7 @@ impl App {
                     ui.label(RichText::new(text).size(13.0).color(theme::TEXT_DIM));
                     ui.add_space(14.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let delete = egui::Button::new(RichText::new("Delete").color(Color32::WHITE).strong())
-                            .fill(theme::RED)
-                            .stroke(Stroke::NONE)
-                            .corner_radius(theme::RADIUS);
-                        if ui.add(delete).clicked() {
+                        if ui.add(danger_button("Delete")).clicked() {
                             send = Some(C2S::DeleteChannel { id: *channel });
                         }
                         if ui.button("Cancel").clicked() {
@@ -2017,6 +2126,7 @@ impl App {
         self.connect_dialog(&ctx);
         self.audio_dialog(&ctx);
         self.poke_dialog(&ctx);
+        self.moderation_dialog(&ctx);
         self.poke_alert(&ctx);
         self.channel_dialog(&ctx);
         self.cert_change_dialog(&ctx);
@@ -2172,6 +2282,28 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color:
         *on = !*on;
     }
     clicked
+}
+
+/// A red button for an action that is hard to take back.
+fn danger_button(text: &str) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
+        .fill(theme::RED)
+        .stroke(Stroke::NONE)
+        .corner_radius(theme::RADIUS)
+}
+
+fn reason_field(ui: &mut egui::Ui, reason: &mut String, focused: &mut bool) {
+    let edit = ui.add(
+        egui::TextEdit::singleline(reason)
+            .hint_text("Reason (optional)")
+            .char_limit(MAX_REASON_LEN)
+            .desired_width(f32::INFINITY)
+            .margin(Margin::symmetric(10, 7)),
+    );
+    if !*focused {
+        edit.request_focus();
+        *focused = true;
+    }
 }
 
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool) -> egui::Response {

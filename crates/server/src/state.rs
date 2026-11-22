@@ -15,8 +15,8 @@ use t7_proto::perms::{self, Action};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason, MAX_POKE_LEN,
-    MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget, encode_frame,
-    validate_nickname,
+    MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget,
+    encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -347,6 +347,7 @@ impl Server {
                     Err(e) => self.error(id, &e.message()),
                 }
             }
+            C2S::Kick { target, from_server, reason } => self.kick(id, target, from_server, &reason),
         }
     }
 
@@ -436,6 +437,46 @@ impl Server {
             tracing::info!(id, nickname = %client.info.nickname, "client is now admin");
             self.broadcast(&S2C::ClientAdmin { id, admin: true }, |_| true);
         }
+    }
+
+    fn kick(&mut self, id: ClientId, target: ClientId, from_server: bool, reason: &str) {
+        let Some(reason) = self.reason(id, reason) else { return };
+        let Some(t) = self.clients.get(&target) else { return self.error(id, "that user is no longer online") };
+        if !self.allowed(id, Action::Kick { target: &t.info, from_server }) {
+            let msg = if from_server && !self.clients[&id].info.admin {
+                "only admins can kick people off the server".to_owned()
+            } else {
+                format!("you can't kick {}", t.info.nickname)
+            };
+            return self.error(id, &msg);
+        }
+        if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
+            return self.error(id, "you are kicking too fast");
+        }
+        self.eject(target, id, from_server, reason);
+    }
+
+    /// Tells everyone, then moves `target` to the default channel or disconnects it.
+    fn eject(&mut self, target: ClientId, by: ClientId, from_server: bool, reason: String) {
+        tracing::info!(target, by, from_server, reason, "client kicked");
+        self.broadcast(&S2C::ClientKicked { id: target, by, from_server, reason }, |_| true);
+        if from_server {
+            // Its writer sends the notice before it closes the connection.
+            self.remove(target, LeaveReason::Kicked);
+        } else {
+            self.move_to(target, self.channels.default_id());
+            self.remove_abandoned_channels();
+        }
+    }
+
+    /// A kick or ban reason, trimmed; `None` (with an error sent) if it's too long.
+    fn reason(&mut self, id: ClientId, raw: &str) -> Option<String> {
+        let reason: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
+        if reason.chars().count() > MAX_REASON_LEN {
+            self.error(id, &format!("reasons can have at most {MAX_REASON_LEN} characters"));
+            return None;
+        }
+        Some(reason)
     }
 
     /// Sends everyone the new channel list; saves it when permanent channels changed.

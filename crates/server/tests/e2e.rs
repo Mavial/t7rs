@@ -68,6 +68,13 @@ impl TestClient {
             .expect("timed out waiting for message")
             .unwrap()
     }
+    /// Reads until the server hangs up.
+    async fn closed(&mut self) {
+        let read = async {
+            while read_frame::<_, S2C>(&mut self.r, &mut self.buf).await.is_ok() {}
+        };
+        tokio::time::timeout(Duration::from_secs(2), read).await.expect("the server kept the connection open");
+    }
 }
 
 async fn start(cfg_text: &str) -> SocketAddr {
@@ -462,10 +469,24 @@ async fn admin_login(addr: SocketAddr, from: Ipv4Addr) -> (TestClient, ClientId,
     (admin, your_id, channels)
 }
 
+fn welcomed_id(welcome: &S2C) -> ClientId {
+    match welcome {
+        S2C::Welcome { your_id, .. } => *your_id,
+        other => panic!("not welcomed: {other:?}"),
+    }
+}
+
 fn rejected(reply: &S2C) -> &str {
     match reply {
         S2C::Rejected { reason } => reason,
         other => panic!("not rejected: {other:?}"),
+    }
+}
+
+async fn error(c: &mut TestClient) -> String {
+    match c.until(|m| matches!(m, S2C::Error { .. })).await {
+        S2C::Error { message } => message,
+        _ => unreachable!(),
     }
 }
 
@@ -492,6 +513,51 @@ async fn identities_are_proven_on_each_connection() {
     let (_, again) = TestClient::connect(addr, "alice", None).await;
     let S2C::Welcome { your_id, clients, .. } = &again else { panic!("not welcomed: {again:?}") };
     assert_eq!(clients.iter().find(|c| c.id == *your_id).unwrap().identity, key("alice").identity());
+}
+
+#[tokio::test]
+async fn moderators_kick_from_their_channels_only() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, admin_id, channels) = admin_login(addr, HOME).await;
+    let (gaming, squad, lobby) = (id_of(&channels, "Gaming"), id_of(&channels, "Squad 1"), id_of(&channels, "Lobby"));
+    let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let (mod_id, user_id) = (welcomed_id(&wm), welcomed_id(&wu));
+    admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: true }).await;
+    moder.channels().await;
+
+    // The user goes to a sub-channel of Gaming.
+    user.send(C2S::JoinChannel { channel: squad, password: None }).await;
+    moder.until(|m| *m == S2C::ClientMoved { id: user_id, channel: squad }).await;
+
+    // Nobody else may kick, and a moderator may not kick off the server.
+    user.send(C2S::Kick { target: mod_id, from_server: false, reason: String::new() }).await;
+    assert!(error(&mut user).await.contains("can't kick"));
+    moder.send(C2S::Kick { target: user_id, from_server: true, reason: "bye".into() }).await;
+    assert!(error(&mut moder).await.contains("only admins"));
+    moder.send(C2S::Kick { target: admin_id, from_server: false, reason: String::new() }).await;
+    assert!(error(&mut moder).await.contains("can't kick"), "an admin");
+
+    // A channel kick: everyone hears who and why, and the user lands in the default channel.
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: "  off topic ".into() }).await;
+    let kicked = S2C::ClientKicked { id: user_id, by: mod_id, from_server: false, reason: "off topic".into() };
+    assert_eq!(admin.until(|m| matches!(m, S2C::ClientKicked { .. })).await, kicked);
+    assert_eq!(user.until(|m| matches!(m, S2C::ClientKicked { .. })).await, kicked);
+    assert_eq!(user.recv().await, S2C::ClientMoved { id: user_id, channel: lobby });
+
+    // In the default channel there is nowhere to kick them to.
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    assert!(error(&mut moder).await.contains("can't kick"));
+
+    // An admin's server kick: the notice arrives before the connection closes.
+    admin.send(C2S::Kick { target: user_id, from_server: true, reason: "x".repeat(MAX_REASON_LEN + 1) }).await;
+    assert!(error(&mut admin).await.contains("at most"));
+    admin.send(C2S::Kick { target: user_id, from_server: true, reason: "enough".into() }).await;
+    let kicked = S2C::ClientKicked { id: user_id, by: admin_id, from_server: true, reason: "enough".into() };
+    assert_eq!(user.until(|m| matches!(m, S2C::ClientKicked { .. })).await, kicked);
+    user.closed().await;
+    let left = moder.until(|m| matches!(m, S2C::ClientLeft { .. })).await;
+    assert_eq!(left, S2C::ClientLeft { id: user_id, reason: LeaveReason::Kicked });
 }
 
 #[tokio::test]

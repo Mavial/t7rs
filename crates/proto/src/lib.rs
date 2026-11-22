@@ -30,6 +30,8 @@ pub const MAX_FRAME_LEN: usize = 256 * 1024;
 pub const MAX_NICKNAME_LEN: usize = 32;
 pub const MAX_TEXT_LEN: usize = 2000;
 pub const MAX_POKE_LEN: usize = 100;
+/// For kick and ban reasons.
+pub const MAX_REASON_LEN: usize = 100;
 pub const MAX_CHANNEL_NAME_LEN: usize = 40;
 pub const MAX_CHANNEL_TOPIC_LEN: usize = 200;
 /// Channels nest at most this deep (top level is depth 1).
@@ -162,6 +164,9 @@ pub enum C2S {
     Authenticate { token: String },
     /// Admins only. By identity, so someone offline can be removed too.
     SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
+    /// Out of their channel to the default one (admins and the channel's
+    /// moderators), or off the server (admins). See [`perms`].
+    Kick { target: ClientId, from_server: bool, reason: String },
 }
 
 /// Server → client.
@@ -199,6 +204,9 @@ pub enum S2C {
     /// The whole channel list, sent after any change to it.
     Channels(Vec<ChannelInfo>),
     ClientAdmin { id: ClientId, admin: bool },
+    /// Sent to everyone before the kicked client is moved to the default
+    /// channel, or disconnected with [`LeaveReason::Kicked`].
+    ClientKicked { id: ClientId, by: ClientId, from_server: bool, reason: String },
 }
 
 #[derive(Debug)]
