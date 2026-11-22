@@ -1,12 +1,7 @@
-//! Where a dragged channel lands in the tree, checked against the same rules
-//! the server applies in `Channels::move_to`, so a drop it would refuse is
-//! shown as not allowed instead of failing after the fact.
-
 use std::collections::HashMap;
 
 use t7_proto::{ChannelId, ChannelInfo, MAX_CHANNEL_DEPTH};
 
-/// Which part of the hovered row the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Zone {
     Before,
@@ -15,7 +10,6 @@ pub enum Zone {
 }
 
 impl Zone {
-    /// `fraction` is the pointer's height within the row: 0 at the top, 1 at the bottom.
     pub fn at(fraction: f32) -> Self {
         if fraction < 0.3 {
             Zone::Before
@@ -35,7 +29,6 @@ pub struct DropTarget {
     pub position: u32,
 }
 
-/// Why the server would refuse a drop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     IntoItself,
@@ -58,12 +51,10 @@ impl Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Move(DropTarget),
-    /// Dropping here leaves the tree as it is.
     Nothing,
     NotAllowed(Refusal),
 }
 
-/// What dropping `dragged` on `zone` of the row for `hovered` would do.
 pub fn drop_target(
     channels: &HashMap<ChannelId, ChannelInfo>,
     dragged: ChannelId,
@@ -120,12 +111,10 @@ fn children_of(channels: &HashMap<ChannelId, ChannelInfo>, parent: Option<Channe
     kids.into_iter().map(|c| c.id).collect()
 }
 
-/// `id`'s index among its current siblings.
 fn siblings_now(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> Option<usize> {
     children_of(channels, channels[&id].parent).iter().position(|&s| s == id)
 }
 
-/// Whether `id` is `ancestor` or somewhere below it.
 fn is_within(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId, ancestor: ChannelId) -> bool {
     let mut cur = Some(id);
     while let Some(c) = cur {
@@ -137,7 +126,6 @@ fn is_within(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId, ancestor
     false
 }
 
-/// Top level is depth 1.
 fn depth(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
     let mut depth = 1;
     let mut cur = channels.get(&id).and_then(|c| c.parent);
@@ -148,7 +136,6 @@ fn depth(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
     depth
 }
 
-/// Levels in the subtree under and including `id`.
 fn height(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
     1 + children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0)
 }
@@ -173,7 +160,6 @@ mod tests {
         }
     }
 
-    /// Lobby(1), Gaming(2) > Squad(3) > Duo(4), AFK(5), Music(6)
     fn tree() -> HashMap<ChannelId, ChannelInfo> {
         [
             ch(1, None, 0, "Lobby"),
@@ -201,7 +187,6 @@ mod tests {
 
     #[test]
     fn reorders_down_among_siblings() {
-        // Lobby after AFK: siblings without Lobby are Gaming, AFK, Music.
         assert_eq!(drop_target(&tree(), 1, 5, Zone::After), to(None, 2));
         assert_eq!(drop_target(&tree(), 1, 6, Zone::Before), to(None, 2));
     }
@@ -227,7 +212,6 @@ mod tests {
     #[test]
     fn refuses_nesting_past_the_depth_limit() {
         assert_eq!(drop_target(&tree(), 5, 4, Zone::Into), Outcome::NotAllowed(Refusal::TooDeep));
-        // Squad carries Duo with it, so it can't go under Lobby's child.
         let mut t = tree();
         t.insert(7, ch(7, Some(1), 0, "Quiet"));
         assert_eq!(drop_target(&t, 3, 7, Zone::Into), Outcome::NotAllowed(Refusal::TooDeep));

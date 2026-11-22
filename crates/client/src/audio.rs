@@ -1,12 +1,3 @@
-//! Voice audio: microphone capture → gate (voice activation / push-to-talk)
-//! → Opus encode, and per-speaker decode → jitter buffer → mix → speakers.
-//!
-//! Threads:
-//! - cpal's input callback only converts to mono and hands chunks to a
-//!   worker thread, which resamples to 48 kHz, gates and encodes.
-//! - The network thread decodes received frames into [`Playback`].
-//! - cpal's output callback mixes from [`Playback`] and resamples to the device.
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -22,21 +13,13 @@ use crate::dsp::{self, Cleanup, Processor};
 use crate::resample::Resampler;
 use crate::sounds::{Effects, Sound};
 
-/// Voice activation stays open this long after the level drops, so word
-/// endings and short pauses aren't clipped.
 const VA_HOLD: Duration = Duration::from_millis(400);
-/// Start playing a speaker once this much audio is buffered (absorbs jitter).
 const JITTER_PRIME: usize = FRAME_SAMPLES * 3;
-/// Beyond this backlog, drop old audio to keep latency low.
 const MAX_BACKLOG: usize = FRAME_SAMPLES * 12;
-/// Gaps up to this many frames are concealed; longer ones start a new talk spurt.
 const MAX_CONCEAL: u32 = 4;
 const SPEAKING_FOR: Duration = Duration::from_millis(250);
-/// Speaker audio kept for the echo canceller if capture falls behind (0.5 s).
 const ECHO_REFERENCE_MAX: usize = SAMPLE_RATE as usize / 2;
-/// Frames sent ahead of a voice-activation onset, so first syllables aren't clipped.
 const PRE_ROLL: usize = 2;
-/// Speech probability (`RNNoise`) above which a frame counts as talking.
 const SPEECH: f32 = 0.5;
 const BITRATE: std::num::NonZeroU32 = std::num::NonZeroU32::new(32_000).unwrap();
 
@@ -50,21 +33,16 @@ pub enum TxMode {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct AudioSettings {
-    /// Device names; `None` follows the system default.
     pub input_device: Option<String>,
     pub output_device: Option<String>,
     pub mode: TxMode,
-    /// Voice activation opens above this input level, in dBFS.
     pub threshold_db: f32,
     pub ptt_key: Option<PttKey>,
     pub input_gain_db: f32,
-    /// Linear, 1.0 = unchanged.
     pub output_volume: f32,
     pub cleanup: Cleanup,
     pub sounds: bool,
-    /// Linear, 1.0 = full.
     pub sounds_volume: f32,
-    /// Folder of a sound pack; `None` uses the built-in chimes.
     pub sound_pack: Option<std::path::PathBuf>,
 }
 
@@ -92,7 +70,6 @@ pub struct PttKey {
     pub vk: u16,
 }
 
-/// State shared between the UI, the capture worker and the audio callbacks.
 pub struct Shared {
     settings: Mutex<AudioSettings>,
     output_volume: AtomicU32,
@@ -100,10 +77,8 @@ pub struct Shared {
     transmitting: AtomicBool,
     muted: AtomicBool,
     deafened: AtomicBool,
-    /// Push-to-talk key held while our window has focus (non-Windows fallback).
     ptt_local: AtomicBool,
     error: Mutex<Option<String>>,
-    /// What the speakers just played (48 kHz), for the echo canceller.
     echo_reference: Mutex<VecDeque<f32>>,
 }
 
@@ -138,7 +113,6 @@ impl Shared {
         self.ptt_local.store(down, Ordering::Relaxed);
     }
 
-    /// Latest microphone level in dBFS (after gain).
     pub fn level_db(&self) -> f32 {
         f32::from_bits(self.level_db.load(Ordering::Relaxed))
     }
@@ -166,10 +140,8 @@ struct Speaker {
     last_heard: Instant,
 }
 
-/// Received voice, per speaker, waiting to be mixed into the output.
 pub struct Playback {
     speakers: Mutex<HashMap<ClientId, Speaker>>,
-    /// Per-person volume set by the listener (1.0 when absent).
     volumes: Mutex<HashMap<ClientId, f32>>,
     effects: Mutex<Effects>,
     ctx: egui::Context,
@@ -180,7 +152,6 @@ impl Playback {
         Arc::new(Self { speakers: Mutex::default(), volumes: Mutex::default(), effects: Mutex::default(), ctx })
     }
 
-    /// Decodes one received frame (called on the network thread).
     pub fn push(&self, from: ClientId, seq: u32, payload: &[u8]) {
         let mut speakers = self.speakers.lock().unwrap();
         let now = Instant::now();
@@ -203,8 +174,8 @@ impl Playback {
         let mut lost = 0;
         if let Some(next) = speaker.next_seq {
             let gap = seq.wrapping_sub(next);
-            if gap as i32 <= -1 {
-                return; // late or duplicate
+            if gap.cast_signed().is_negative() {
+                return;
             }
             if gap <= MAX_CONCEAL {
                 lost = gap;
@@ -225,7 +196,7 @@ impl Playback {
         }
         match speaker.decoder.decode(payload, FRAME_SAMPLES, &mut pcm) {
             Ok(n) => speaker.queue.extend(&pcm[..n]),
-            Err(_) => return, // garbage; ignore
+            Err(_) => return,
         }
         speaker.next_seq = Some(seq.wrapping_add(1));
         if speaker.queue.len() > MAX_BACKLOG {
@@ -236,14 +207,10 @@ impl Playback {
         let was_silent = now.duration_since(speaker.last_heard) > SPEAKING_FOR;
         speaker.last_heard = now;
         if was_silent {
-            self.ctx.request_repaint(); // talking indicator on
+            self.ctx.request_repaint();
         }
     }
 
-    /// Adds every speaker's next `out.len()` samples (48 kHz) into `out`.
-    /// Adds the next `out.len()` samples (48 kHz) of everyone talking, scaled
-    /// by `voice_gain` and each person's own volume, plus notification sounds
-    /// at their own volume.
     pub fn mix(&self, out: &mut [f32], voice_gain: f32) {
         let mut speakers = self.speakers.lock().unwrap();
         let volumes = self.volumes.lock().unwrap();
@@ -268,7 +235,6 @@ impl Playback {
         self.effects.lock().unwrap().mix(out);
     }
 
-    /// Clients heard in the last moment.
     pub fn speaking(&self) -> Vec<ClientId> {
         let now = Instant::now();
         let speakers = self.speakers.lock().unwrap();
@@ -306,10 +272,8 @@ impl Playback {
     }
 }
 
-/// Receives each encoded frame and its sequence number.
 pub type VoiceSink = Arc<dyn Fn(u32, &[u8]) + Send + Sync>;
 
-/// Running audio devices. Dropping it stops capture and playback.
 pub struct Engine {
     _input: Option<cpal::Stream>,
     _output: Option<cpal::Stream>,
@@ -329,7 +293,6 @@ impl Engine {
     }
 }
 
-/// Names of the available (input, output) devices.
 pub fn device_names() -> (Vec<String>, Vec<String>) {
     let host = cpal::default_host();
     let inputs = host.input_devices().map(|it| it.filter_map(|d| device_name(&d)).collect());
@@ -416,9 +379,6 @@ where
         .map_err(|e| e.to_string())
 }
 
-/// Resamples captured audio to 48 kHz, cleans it up (echo, noise, gain),
-/// gates it and encodes 20 ms frames. Ends when the input stream (and with it
-/// the sender) is dropped.
 fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink: &VoiceSink, ctx: &egui::Context) {
     let mut encoder =
         match opus1::OpusEncoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono, opus1::Application::Voip) {
@@ -427,8 +387,6 @@ fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink
         };
     encoder.set_bitrate(opus1::Bitrate::BitsPerSecond(BITRATE));
     encoder.set_signal(opus1::Signal::Voice);
-    // Each packet also carries a low-bitrate copy of the previous frame, so a
-    // single lost packet is rebuilt instead of guessed.
     encoder.set_inband_fec(opus1::InbandFec::On);
     let _ = encoder.set_packet_loss_perc(10);
 
@@ -436,7 +394,6 @@ fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink
     let mut resampler = Resampler::new(rate, SAMPLE_RATE);
     let mut pending: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 4);
     let mut packet = [0u8; MAX_OPUS_PAYLOAD];
-    // Recent cleaned-up audio, encoded only if speech starts right after it.
     let mut pre_roll: VecDeque<(u32, [f32; FRAME_SAMPLES])> = VecDeque::with_capacity(PRE_ROLL + 1);
     let mut seq = 0u32;
     let mut hold_until = Instant::now();
@@ -453,7 +410,6 @@ fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink
                 processor = Processor::new(cleanup);
             }
 
-            // Two 10 ms cleanup steps make one 20 ms codec frame.
             let gain = 10f32.powf(gain_db / 20.0);
             let mut frame = [0f32; FRAME_SAMPLES];
             let mut speech = 0f32;
@@ -468,7 +424,6 @@ fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink
                 cleanup_time += started.elapsed();
                 cleanup_frames += 1;
             }
-            // Every 10 s, at debug level: what sound cleanup costs on this machine.
             if cleanup_frames == 1000 {
                 tracing::debug!(us_per_10ms = cleanup_time.as_micros() / 1000, "sound cleanup");
                 (cleanup_time, cleanup_frames) = (Duration::ZERO, 0);
@@ -481,7 +436,6 @@ fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink
             let now = Instant::now();
             let wants = match mode {
                 TxMode::VoiceActivation => {
-                    // Loud enough *and* speech: keyboard clicks and fans don't open the mic.
                     if level > threshold && speech > SPEECH {
                         hold_until = now + VA_HOLD;
                     }
@@ -510,7 +464,6 @@ fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink
                 }
                 pre_roll.push_back((seq, frame));
             }
-            // Counts silent frames too, so receivers can tell a new talk spurt from loss.
             seq = seq.wrapping_add(1);
         }
     }
@@ -518,7 +471,6 @@ fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink
     ctx.request_repaint();
 }
 
-/// Hands the canceller everything the speakers played since the last call.
 fn feed_echo_reference(shared: &Shared, processor: &mut Processor) {
     let mut reference = shared.echo_reference.lock().unwrap();
     while reference.len() >= dsp::FRAME {
@@ -575,7 +527,6 @@ where
                 let frames = data.len() / channels;
                 mixed.clear();
                 mixed.resize(resampler.input_needed(frames), 0.0);
-                // Sound off silences the other people, not our own notification sounds.
                 let voice_gain = if shared.deafened.load(Ordering::Relaxed) {
                     0.0
                 } else {
@@ -594,7 +545,6 @@ where
                     meter_energy += f64::from(out * out);
                     frame.fill(T::from_sample(out));
                 }
-                // Once a second, at debug level: the level actually handed to the device.
                 meter_frames += frames;
                 if meter_frames >= rate {
                     let db = 10.0 * (meter_energy / meter_frames as f64).max(1e-12).log10();
@@ -608,8 +558,6 @@ where
         .map_err(|e| e.to_string())
 }
 
-/// A glitch (buffer under/overrun) recovers by itself, typically once as a
-/// stream starts; only real failures, like an unplugged device, reach the user.
 fn report_stream_error(shared: &Shared, ctx: &egui::Context, what: &str, e: &cpal::Error) {
     if e.kind() == cpal::ErrorKind::Xrun {
         tracing::debug!("{what} glitch: {e}");
@@ -621,7 +569,7 @@ fn report_stream_error(shared: &Shared, ctx: &egui::Context, what: &str, e: &cpa
 #[cfg(windows)]
 fn key_down_global(vk: u16) -> bool {
     // Works while another window (e.g. a game) has focus.
-    unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000 != 0 }
+    unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(vk)) < 0 }
 }
 
 #[cfg(not(windows))]
@@ -662,14 +610,12 @@ mod tests {
         p.push(7, 0, &packets[0]);
         p.push(7, 1, &packets[1]);
         assert!(mix_frames(&p, 1).iter().all(|&v| v == 0.0), "must wait for the jitter buffer");
-        // Frame 2 lost: 3 and 4 arrive, the gap is concealed, so 5 frames are queued.
         p.push(7, 3, &packets[3]);
         p.push(7, 4, &packets[4]);
         let out = mix_frames(&p, 5);
         let energy: f32 = out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32;
         assert!(energy > 0.01, "expected audible output, got energy {energy}");
         assert_eq!(p.speaking(), vec![7]);
-        // A late duplicate is dropped.
         p.push(7, 1, &packets[1]);
         assert!(mix_frames(&p, 1).iter().all(|&v| v == 0.0));
     }
@@ -728,7 +674,6 @@ mod tests {
             mix_frames(&p, 3)
         };
         let (normal, quiet_one, muted_one) = (run(1.0), run(0.5), run(0.0));
-        // Both people say the same thing: 2x at 100%, 1.5x with one at 50%, 1x with one muted.
         for ((n, q), m) in normal.iter().zip(&quiet_one).zip(&muted_one) {
             assert!((q - n * 0.75).abs() < 1e-5);
             assert!((m - n * 0.5).abs() < 1e-5);

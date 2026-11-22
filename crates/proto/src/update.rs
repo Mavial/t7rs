@@ -1,5 +1,5 @@
 //! Over-the-air updates: the release manifest (`latest.json`) and the message
-//! each build is signed with. Shared by the release tool and the client.
+//! each build is signed with.
 
 use std::fmt::Write as _;
 

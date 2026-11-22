@@ -1,15 +1,6 @@
-//! Over-the-air updates.
-//!
-//! A background thread checks the latest GitHub release's `latest.json`
-//! shortly after start and every few hours. When it lists a newer version for
-//! this platform, the build is downloaded next to the running executable and
-//! accepted only if its SHA-256 matches and its ed25519 signature verifies
-//! against the key built into T7. The swap happens on exit (or on "Restart to
+//! The swap happens on exit (or on "Restart to
 //! update"): the running executable is renamed aside, which Windows allows,
 //! and the new one takes its name.
-//!
-//! Only builds made by the release pipeline (`T7_RELEASE` set at compile time)
-//! update themselves; local development builds never replace themselves.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -23,7 +14,6 @@ use t7_proto::update::{Manifest, current_target, from_hex, parse_version, signed
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const ENABLED: bool = option_env!("T7_RELEASE").is_some();
 const MANIFEST_URL: &str = "https://github.com/Mavial/t7rs/releases/latest/download/latest.json";
-/// Release signing key (the secret half is a GitHub Actions secret).
 const PUBLIC_KEY: &str = "d293f0fe813036683dd8b909c9577906c5b5545cfd0d41f1bf3cdc2a4edc2d24";
 const FIRST_CHECK: Duration = Duration::from_secs(5);
 const CHECK_EVERY: Duration = Duration::from_hours(6);
@@ -32,12 +22,10 @@ const MAX_BUILD: u64 = 200 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
-    /// Not a release build, or no check has finished yet.
     Idle,
     Checking,
     UpToDate,
     Downloading(String),
-    /// Verified and waiting next to the executable.
     Ready(String),
     Failed(String),
 }
@@ -86,8 +74,6 @@ impl Updater {
         }
     }
 
-    /// Puts a downloaded update in place of the running executable. Returns
-    /// the executable's path if an update was installed.
     pub fn install(&self) -> Option<PathBuf> {
         if !matches!(self.status(), Status::Ready(_)) {
             return None;
@@ -134,7 +120,6 @@ fn agent() -> ureq::Agent {
     ureq::Agent::new_with_config(ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(120))).build())
 }
 
-/// The newer build for this platform, if the manifest lists one.
 fn fetch_newer() -> Result<Option<(String, String, String, String)>, String> {
     let url = std::env::var("T7_UPDATE_URL").unwrap_or_else(|_| MANIFEST_URL.to_owned());
     let mut response = agent().get(&url).call().map_err(|e| format!("couldn't reach the update server: {e}"))?;
@@ -177,7 +162,6 @@ fn download(version: &str, url: &str, sha256: &str, signature: &str) -> Result<(
         .map_err(|e| format!("couldn't save the update next to {}: {e}", exe.display()))
 }
 
-/// Accepts `bytes` only if they hash to `sha256` and are signed for this version and platform.
 fn verify(version: &str, target: &str, bytes: &[u8], sha256: &str, signature: &str) -> Result<(), String> {
     let actual = to_hex(&Sha256::digest(bytes));
     if !actual.eq_ignore_ascii_case(sha256) {
@@ -217,7 +201,6 @@ fn install_update() -> std::io::Result<PathBuf> {
     Ok(exe)
 }
 
-/// The executable the last update replaced; it can go once we're running.
 fn remove_previous_version() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(old_path(&exe));
@@ -238,12 +221,10 @@ mod tests {
     #[test]
     fn rejects_corrupt_and_foreign_builds() {
         let bytes = b"pretend executable";
-        // A key that isn't T7's release key: correctly signed, still refused.
         let stranger = SigningKey::from_bytes(&[7u8; 32]);
         let (sha, sig) = signed(&stranger, "9.9.9", "windows-x86_64", bytes);
         let err = verify("9.9.9", "windows-x86_64", bytes, &sha, &sig).unwrap_err();
         assert!(err.contains("isn't signed"), "{err}");
-        // Tampered bytes fail the checksum before the signature is even considered.
         let err = verify("9.9.9", "windows-x86_64", b"tampered", &sha, &sig).unwrap_err();
         assert!(err.contains("corrupt"), "{err}");
         assert!(verify("9.9.9", "windows-x86_64", bytes, &sha, "zz").is_err());

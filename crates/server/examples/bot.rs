@@ -62,7 +62,6 @@ async fn run(
     seq: u64,
 ) -> Result<(), FrameError> {
     let (tls, _) = tls::connect(TcpStream::connect(addr).await?, None).await.map_err(std::io::Error::other)?;
-    // A new identity each run.
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed).expect("system randomness");
     let identity = identity::IdentityKey::from_seed(seed).prove(&tls::exporter(tls.get_ref().1));
@@ -76,7 +75,6 @@ async fn run(
         write_frame(&mut w, &C2S::SendText { target: TextTarget::Channel, text: text.into() }).await?;
     }
 
-    // Drain incoming traffic and keep the connection alive.
     let reader = tokio::spawn(async move {
         let mut buf = Vec::new();
         while read_frame::<_, S2C>(&mut r, &mut buf).await.is_ok() {}

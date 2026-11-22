@@ -1,10 +1,7 @@
 //! Wire protocol shared by the T7 server and client.
 //!
 //! Every message travels over TLS 1.3 on TCP (see [`tls`]) as a frame: a
-//! little-endian `u32` payload length followed by a [postcard]-encoded
-//! message. Postcard is a compact varint-based binary format, so typical
-//! control messages are only a few bytes on the wire and (de)serialisation is
-//! extremely cheap.
+//! little-endian `u32` payload length followed by a [postcard]-encoded message.
 
 use std::net::IpAddr;
 
@@ -26,7 +23,7 @@ pub const PROTOCOL_VERSION: u16 = 5;
 pub const MIN_PROTOCOL_VERSION: u16 = 5;
 /// Default port of a T7 server (TCP for control, UDP for voice).
 pub const DEFAULT_PORT: u16 = 9988;
-/// Upper bound for a single frame. Protects both sides from memory abuse.
+/// Upper bound for a single frame.
 pub const MAX_FRAME_LEN: usize = 256 * 1024;
 
 pub const MAX_NICKNAME_LEN: usize = 32;
@@ -332,9 +329,6 @@ impl From<std::io::Error> for FrameError {
 }
 
 /// Encodes a message into a complete frame (length prefix + payload).
-///
-/// The result can be shared (e.g. via `Arc<[u8]>`) and written to many
-/// sockets, so a broadcast is serialised exactly once.
 pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
     let mut buf = vec![0u8; 4];
     let mut buf = postcard::to_extend(msg, std::mem::take(&mut buf)).expect("serialising into a Vec cannot fail");
@@ -345,6 +339,11 @@ pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
 
 /// Reads one frame and decodes it. `scratch` is reused between calls to
 /// avoid an allocation per message.
+///
+/// # Cancellation safety
+///
+/// Cancelling this future can leave the reader partway through a frame.
+/// Discard the stream if a read is cancelled.
 pub async fn read_frame<R, T>(reader: &mut R, scratch: &mut Vec<u8>) -> Result<T, FrameError>
 where
     R: AsyncRead + Unpin,

@@ -1,10 +1,7 @@
-//! The T7 mark: the in-app logo and the window icon.
-
 use egui::{Color32, CornerRadius, Rect, pos2};
 
 include!("brand_mark.rs");
 
-/// Paints the mark into `rect`, snapped to whole pixels so block edges stay crisp.
 pub fn paint(p: &egui::Painter, rect: Rect) {
     let unit = rect.width() / GRID as f32;
     let ppp = p.pixels_per_point();
@@ -26,7 +23,6 @@ pub fn window_icon() -> Option<winit::window::Icon> {
 mod tests {
     use super::*;
 
-    /// assets/icon.svg (README, docs) and MARK (app, window, .exe) must be the same picture.
     #[test]
     fn svg_matches_mark() {
         let svg = include_str!("../../../assets/icon.svg");

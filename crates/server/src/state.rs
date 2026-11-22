@@ -1,10 +1,3 @@
-//! The server core: a single task that owns all state.
-//!
-//! Connection tasks send [`Event`]s in; the core mutates state and pushes
-//! pre-encoded frames out to each connection's writer queue. One owner means
-//! no locks and a total order of events, and every broadcast is serialised
-//! exactly once no matter how many clients receive it.
-
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -25,10 +18,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::bans::{self, Bans, NewBan, describe_duration};
 use crate::channels::Channels;
 
-/// A complete, ready-to-write frame shared between all recipients.
 pub type Frame = Arc<[u8]>;
 
-/// Outgoing frames buffered per client before we consider it too slow.
 pub const OUTBOX_CAPACITY: usize = 1024;
 
 pub enum Event {
@@ -37,10 +28,8 @@ pub enum Event {
         protocol: u16,
         nickname: String,
         password: Option<String>,
-        /// Proven on this connection; `None` if the proof didn't verify.
         identity: Option<Identity>,
         outbox: mpsc::Sender<Frame>,
-        /// Receives the assigned id, or `None` if the handshake was rejected.
         reply: oneshot::Sender<Option<ClientId>>,
     },
     Message {
@@ -51,7 +40,6 @@ pub enum Event {
         id: ClientId,
         reason: LeaveReason,
     },
-    /// A raw voice datagram, not yet authenticated.
     Voice {
         from: SocketAddr,
         data: Vec<u8>,
@@ -69,7 +57,6 @@ struct Client {
     voice_bucket: TokenBucket,
 }
 
-/// Rate limiter: `burst` events at once, refilled at `per_sec`.
 struct TokenBucket {
     tokens: f32,
     burst: f32,
@@ -78,12 +65,10 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
-    /// Chat: 8 messages at once, then 2 per second.
     fn text() -> Self {
         Self::new(8.0, 2.0)
     }
 
-    /// Voice: 50 frames per second is real time; allow some jitter on top.
     fn voice() -> Self {
         Self::new(40.0, 60.0)
     }
@@ -111,12 +96,10 @@ pub struct Server {
     password: Option<String>,
     channels: Channels,
     bans: Bans,
-    /// Holds `channels.toml` and `bans.toml` (`None`: changes are not saved).
     data_dir: Option<PathBuf>,
     admin_token: String,
     clients: HashMap<ClientId, Client>,
     next_id: ClientId,
-    /// Clients whose outbox overflowed or closed; removed after the current event.
     dead: Vec<ClientId>,
     udp: Arc<UdpSocket>,
     datagram: Vec<u8>,
@@ -192,9 +175,7 @@ impl Server {
                     .filter(|c| c.info.id != id && c.info.channel == channel && !c.info.status.deafened);
                 for listener in listeners {
                     let Some(addr) = listener.voice_addr else { continue };
-                    // Sealed per listener, with their key.
                     listener.voice.seal(audio, &mut self.datagram);
-                    // Non-blocking: a full socket buffer drops the frame, like any lost packet.
                     let _ = self.udp.try_send_to(&self.datagram, addr);
                 }
             }
@@ -283,17 +264,17 @@ impl Server {
         Some(id)
     }
 
-    /// If the name is taken, append a number instead of refusing.
     fn unique_nickname(&self, base: String) -> String {
         let taken = |n: &str| self.clients.values().any(|c| c.info.nickname.eq_ignore_ascii_case(n));
         if !taken(&base) {
             return base;
         }
-        (1..).map(|i| format!("{base}{i}")).find(|n| !taken(n)).expect("infinite iterator")
+        (1..=self.clients.len())
+            .map(|suffix| format!("{base}{suffix}"))
+            .find(|name| !taken(name))
+            .expect("the client using the base name leaves at least one suffix free")
     }
 
-    /// Where someone joining the server, or kicked out of `leaving`, lands:
-    /// the default channel, or the first open channel with room if it's full.
     fn landing_channel(&self, leaving: Option<ChannelId>) -> ChannelId {
         let default = self.channels.default_id();
         std::iter::once(default)
@@ -478,12 +459,10 @@ impl Server {
         self.eject(target, id, from_server, reason);
     }
 
-    /// Tells everyone, then moves `target` where a joining client would land, or disconnects it.
     fn eject(&mut self, target: ClientId, by: ClientId, from_server: bool, reason: String) {
         tracing::info!(target, by, from_server, reason, "client kicked");
         self.broadcast(&S2C::ClientKicked { id: target, by, from_server, reason }, |_| true);
         if from_server {
-            // Its writer sends the notice before it closes the connection.
             self.remove(target, LeaveReason::Kicked);
         } else {
             let leaving = self.clients[&target].info.channel;
@@ -492,7 +471,6 @@ impl Server {
         }
     }
 
-    /// A kick or ban reason, trimmed; `None` (with an error sent) if it's too long.
     fn reason(&mut self, id: ClientId, raw: &str) -> Option<String> {
         let reason: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
         if reason.chars().count() > MAX_REASON_LEN {
@@ -514,7 +492,6 @@ impl Server {
             return self.error(id, "a ban must last at least a second");
         }
         let actor = &self.clients[&id];
-        // On a shared connection (a LAN, a household) this would lock the admin out too.
         if include_ip && t.addr.ip().to_canonical() == actor.addr.ip().to_canonical() {
             return self.error(id, &format!("{} connects from your IP address; ban them without it", t.info.nickname));
         }
@@ -535,8 +512,6 @@ impl Server {
             None => "for good".into(),
         };
         let notice = if reason.is_empty() { format!("banned {length}") } else { format!("banned {length} ({reason})") };
-        // Everyone the ban would keep out if they connected now: with an IP
-        // ban, that includes other identities at the address.
         let connected: Vec<ClientId> = self
             .clients
             .values()
@@ -580,7 +555,6 @@ impl Server {
         }
     }
 
-    /// Sends everyone the new channel list; saves it when permanent channels changed.
     fn channels_changed(&mut self, save: bool) {
         self.broadcast(&S2C::Channels(self.channels.snapshot()), |_| true);
         if save
@@ -591,7 +565,6 @@ impl Server {
         }
     }
 
-    /// Temporary channels disappear once nobody is in them (or below them).
     fn remove_abandoned_channels(&mut self) {
         let occupied: HashSet<ChannelId> = self.clients.values().map(|c| c.info.channel).collect();
         let abandoned = self.channels.abandoned_temporaries(&occupied);
@@ -638,7 +611,6 @@ impl Server {
                 if to == id || !self.clients.contains_key(&to) {
                     return self.error(id, "that user is no longer online");
                 }
-                // Recipient and sender (echo, so the sender sees it confirmed).
                 self.broadcast(&msg, |c| c.info.id == to || c.info.id == id);
             }
         }
@@ -647,7 +619,6 @@ impl Server {
     fn remove(&mut self, id: ClientId, reason: LeaveReason) {
         if let Some(client) = self.clients.remove(&id) {
             tracing::info!(addr = %client.addr, id, nickname = %client.info.nickname, ?reason, "client left");
-            // Dropping `client.outbox` ends its writer task, which closes the socket.
             self.broadcast(&S2C::ClientLeft { id, reason }, |_| true);
             self.remove_abandoned_channels();
         }
@@ -667,8 +638,6 @@ impl Server {
         self.broadcast(msg, |c| c.info.id == id);
     }
 
-    /// Encodes once and enqueues to every matching client. A client whose
-    /// queue is full is too slow to keep up and gets disconnected.
     fn broadcast(&mut self, msg: &S2C, filter: impl Fn(&Client) -> bool) {
         let frame = encode(msg);
         for client in self.clients.values().filter(|c| filter(c)) {
@@ -687,7 +656,6 @@ pub fn unix_now() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// What a banned client is told when it tries to join.
 fn banned_message(ban: &BanInfo, now: u64) -> String {
     let mut msg = "You are banned from this server".to_owned();
     if !ban.reason.is_empty() {

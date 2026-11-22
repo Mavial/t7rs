@@ -1,11 +1,3 @@
-# Builds, signs and publishes the T7 client when a version tag is pushed:
-#
-#   1. bump `version` in Cargo.toml, commit
-#   2. git tag vX.Y.Z && git push origin vX.Y.Z
-#
-# Installed clients find the release through latest.json and update themselves.
-# Needs the T7_SIGNING_KEY secret (see crates/release) and, optionally, the
-# T7_DEFAULT_SERVER variable (address prefilled for first-time users).
 name: Release
 
 on:

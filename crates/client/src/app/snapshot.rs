@@ -1,6 +1,3 @@
-//! Renders every screen and dialog to PNG with the real CPU renderer, for
-//! reviewing the UI without a server or clicking through it.
-//!
 //! `cargo test -p t7-client snapshots -- --ignored` writes to
 //! `target/snapshots`, or to `$T7_SNAPSHOT_DIR` when set.
 
@@ -203,7 +200,11 @@ const SCENES: &[Scene] = &[
     }),
     ("16-connecting", (1100, 720), |ctx| {
         let mut app = disconnected(ctx);
-        app.conn = Conn::Connecting { address: "friday.example.com".into(), password: String::new(), known_cert: true };
+        app.conn = Conn::Connecting {
+            address: "friday.example.com".into(),
+            password: String::new(),
+            pin: ServerPin::FirstUse,
+        };
         app
     }),
 ];
@@ -214,7 +215,6 @@ fn render(name: &str, (w, h): (u32, u32), make: fn(&egui::Context) -> App, scale
     let mut renderer = EguiSoftwareRender::new(ColorFieldOrder::Rgba).with_caching(false);
     let mut px = vec![[0u8; 4]; (w * h) as usize];
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w as f32 / scale, h as f32 / scale));
-    // Enough frames for layout to settle and fades to finish.
     for frame in 0..6 {
         let mut raw = egui::RawInput { screen_rect: Some(screen), time: Some(f64::from(frame)), ..Default::default() };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(scale);

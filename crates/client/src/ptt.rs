@@ -1,14 +1,9 @@
-//! Push-to-talk keys. Keys are stored as Windows virtual-key codes, which the
-//! capture thread can poll globally (while a game has focus). This module maps
-//! them to and from egui input for binding, labels and the focused fallback.
-
 use egui::{InputState, Key, PointerButton};
 
 const CONTROL: u16 = 0x11;
 const SHIFT: u16 = 0x10;
 const ALT: u16 = 0x12;
 
-/// (virtual-key code, egui key, label)
 const KEYS: &[(u16, Key, &str)] = &[
     (0x20, Key::Space, "Space"),
     (0x09, Key::Tab, "Tab"),
@@ -85,14 +80,12 @@ const KEYS: &[(u16, Key, &str)] = &[
     (0x7B, Key::F12, "F12"),
 ];
 
-/// (virtual-key code, mouse button, label)
 const BUTTONS: &[(u16, PointerButton, &str)] = &[
     (0x04, PointerButton::Middle, "Middle mouse"),
     (0x05, PointerButton::Extra1, "Mouse 4"),
     (0x06, PointerButton::Extra2, "Mouse 5"),
 ];
 
-/// The key or button pressed this frame, for binding. Escape is left to cancel.
 pub fn capture(input: &InputState) -> Option<u16> {
     for ev in &input.events {
         match ev {
@@ -120,7 +113,6 @@ pub fn label(vk: u16) -> String {
     known.chain(named).find(|&(v, _)| v == vk).map_or_else(|| format!("Key 0x{vk:02X}"), |(_, l)| l.to_owned())
 }
 
-/// Whether the key is held, as far as our own window can tell.
 pub fn is_down(vk: u16, input: &InputState) -> bool {
     if let Some(&(_, key, _)) = KEYS.iter().find(|(v, ..)| *v == vk) {
         return input.key_down(key);

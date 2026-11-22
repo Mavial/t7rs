@@ -1,5 +1,3 @@
-//! T7 server library: config loading and the async server itself.
-
 mod bans;
 mod channels;
 pub mod config;
@@ -80,7 +78,6 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
     }
 }
 
-/// The configured token, else the one saved in `admin_token.txt`, else a new one.
 fn admin_token(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<String> {
     if !cfg.admin_token.trim().is_empty() {
         return Ok(cfg.admin_token.trim().to_owned());
@@ -101,8 +98,6 @@ fn admin_token(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<String>
     Ok(token)
 }
 
-/// The certificate and key (DER) saved in `data_dir`, else a new self-signed
-/// pair, saved there if there is one.
 fn tls_certificate(data_dir: Option<&Path>) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
     let files = data_dir.map(|d| (d.join("tls_cert.der"), d.join("tls_key.der")));
     if let Some((cert, key)) = &files
@@ -129,8 +124,6 @@ fn write_secret(path: &Path, data: &[u8]) -> std::io::Result<()> {
     options.open(path)?.write_all(data)
 }
 
-/// Hands every datagram to the core. When the core is backed up, voice is
-/// dropped rather than queued: late audio is useless.
 async fn voice_loop(udp: Arc<UdpSocket>, core: mpsc::Sender<Event>) {
     let mut buf = [0u8; 2048];
     loop {

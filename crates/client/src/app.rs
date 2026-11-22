@@ -26,29 +26,23 @@ use crate::theme::{self, Btn};
 mod snapshot;
 
 const MAX_LINES: usize = 1000;
-/// Width of the recent-server cards and the button above them.
 const RECENT_W: f32 = 320.0;
-/// Channel tree: where a row's icon is centered and its name starts, from
-/// the row's left edge plus its indent, and the gap kept on the right.
 const TREE_ICON_X: f32 = 13.0;
 const TREE_TEXT_X: f32 = 28.0;
 const TREE_RIGHT_PAD: f32 = 8.0;
 const MAX_RECENT: usize = 8;
-/// Server prefilled for first-time users. Set at build time, e.g.
-/// `T7_DEFAULT_SERVER=example.com cargo build --release -p t7-client`.
 const DEFAULT_SERVER: Option<&str> = option_env!("T7_DEFAULT_SERVER");
+
+#[derive(Clone, Copy)]
+enum ServerPin {
+    FirstUse,
+    Saved(Fingerprint),
+    Replacement(Fingerprint),
+}
 
 enum Conn {
     Disconnected,
-    /// `password` is kept to retry after trusting a changed certificate.
-    /// `known_cert`: the certificate was pinned by an earlier connection. A pin
-    /// made on first use, or just trusted in place of a changed one, vouches
-    /// only for whoever answered, so a saved admin token is not sent on it.
-    Connecting {
-        address: String,
-        password: String,
-        known_cert: bool,
-    },
+    Connecting { address: String, password: String, pin: ServerPin },
     Connected,
 }
 
@@ -85,14 +79,12 @@ struct ConnectForm {
     focus_requested: bool,
 }
 
-/// Connect-on-startup request from the command line.
 #[derive(Default)]
 pub struct Launch {
     pub address: String,
     pub nickname: Option<String>,
 }
 
-/// Something picked in the channel tree, applied after drawing it.
 enum TreeAction {
     Create(Option<ChannelId>),
     Edit(ChannelId),
@@ -107,22 +99,17 @@ enum TreeAction {
     Bans,
 }
 
-/// Payload while dragging yourself onto another channel.
 struct DragSelf;
 
-/// Payload while an admin drags a channel to rearrange the tree.
 struct DragChannel(ChannelId);
 
-/// Voice is considered blocked when no UDP pong arrived for this long.
 const VOICE_TIMEOUT: Duration = Duration::from_secs(4);
 
 struct Voice {
     shared: Arc<audio::Shared>,
     playback: Arc<audio::Playback>,
     sink: VoiceSink,
-    /// Open while connected or while the voice settings are shown.
     engine: Option<audio::Engine>,
-    /// Last UDP pong: proof that voice gets through.
     seen: Option<Instant>,
     rtt: Option<Duration>,
     connected_at: Option<Instant>,
@@ -133,7 +120,6 @@ impl Voice {
         self.seen.is_some_and(|t| t.elapsed() < VOICE_TIMEOUT)
     }
 
-    /// Connected long enough that a missing pong means UDP is blocked.
     fn blocked(&self) -> bool {
         !self.reachable() && self.connected_at.is_some_and(|t| t.elapsed() > VOICE_TIMEOUT)
     }
@@ -146,32 +132,15 @@ struct PokeForm {
     focus_requested: bool,
 }
 
-/// The moderation dialog on screen, if any.
 enum Moderation {
-    Kick {
-        target: ClientId,
-        name: String,
-        from_server: bool,
-        reason: String,
-        focused: bool,
-    },
-    Ban {
-        target: ClientId,
-        name: String,
-        reason: String,
-        length: Option<u64>,
-        include_ip: bool,
-        focused: bool,
-    },
-    /// The ban list; `None` until the server sends it.
+    Kick { target: ClientId, name: String, from_server: bool, reason: String, focused: bool },
+    Ban { target: ClientId, name: String, reason: String, length: Option<u64>, include_ip: bool, focused: bool },
     Bans(Option<Vec<BanInfo>>),
 }
 
-/// The ban lengths to pick from: (label, seconds; `None` for good).
 const BAN_LENGTHS: [(Option<u64>, &str); 4] =
     [(Some(3600), "1 hour"), (Some(86_400), "1 day"), (Some(7 * 86_400), "1 week"), (None, "Permanent")];
 
-/// A server came back with a different certificate than the pinned one.
 struct CertChange {
     address: String,
     password: String,
@@ -179,14 +148,12 @@ struct CertChange {
     presented: Fingerprint,
 }
 
-/// A poke someone sent us, waiting to be acknowledged.
 struct PokeAlert {
     from: String,
     message: String,
     time: String,
 }
 
-/// The channel-related dialog on screen, if any (one at a time).
 enum ChannelDialog {
     Form(ChannelForm),
     Password { channel: ChannelId, name: String, password: String, focused: bool },
@@ -194,7 +161,6 @@ enum ChannelDialog {
     AdminLogin { token: String, focused: bool },
 }
 
-/// Creating (`editing: None`) or editing a channel.
 struct ChannelForm {
     editing: Option<ChannelId>,
     parent: Option<ChannelId>,
@@ -202,7 +168,6 @@ struct ChannelForm {
     topic: String,
     limited: bool,
     limit: u32,
-    /// Editing a channel that already has a password: keep protection on?
     had_password: bool,
     protected: bool,
     password: String,
@@ -229,11 +194,9 @@ impl ChannelForm {
 }
 
 struct AudioDialog {
-    /// (label, folder) of every selectable sound pack except the built-in one.
     packs: Vec<(String, std::path::PathBuf)>,
     inputs: Vec<String>,
     outputs: Vec<String>,
-    /// Waiting for a key press to bind push-to-talk.
     binding: bool,
 }
 
@@ -249,7 +212,6 @@ pub struct App {
     input: String,
     focus_input: bool,
     form: Option<ConnectForm>,
-    /// Shown on the empty state / connect dialog after a failed attempt.
     last_error: Option<String>,
     voice: Voice,
     audio_dialog: Option<AudioDialog>,
@@ -258,17 +220,12 @@ pub struct App {
     sound_pack: Pack,
     channel_dialog: Option<ChannelDialog>,
     moderation: Option<Moderation>,
-    /// Who kicked us off the server and why, for when the connection closes.
     kicked: Option<String>,
     cert_change: Option<CertChange>,
-    /// Address of the connected server, for per-server admin tokens.
     server_address: String,
-    /// Token sent but not yet confirmed; saved once the server accepts it.
     pending_admin_token: Option<String>,
-    /// Ask the window manager to flash the taskbar entry.
     attention: bool,
     updater: crate::update::Updater,
-    /// Set by "Restart to update": the shell closes the window after this frame.
     quit: bool,
 }
 
@@ -323,13 +280,10 @@ impl App {
             let nick = l.nickname.unwrap_or_else(|| app.settings.nickname.clone());
             app.connect(l.address, nick, String::new());
         } else if app.settings.recent.is_empty() && DEFAULT_SERVER.is_some() {
-            // First run of a build with a baked-in server: just ask for a nickname.
             app.open_connect_form();
         }
         app
     }
-
-    // ----- actions ---------------------------------------------------------
 
     fn open_connect_form(&mut self) {
         let address = self
@@ -346,17 +300,30 @@ impl App {
     }
 
     fn connect(&mut self, address: String, nickname: String, password: String) {
+        let pin = self
+            .settings
+            .server_certs
+            .get(&net::canonical_address(address.trim()))
+            .copied()
+            .map_or(ServerPin::FirstUse, ServerPin::Saved);
+        self.connect_with_pin(address, nickname, password, pin);
+    }
+
+    fn connect_with_pin(&mut self, address: String, nickname: String, password: String, pin: ServerPin) {
         let address = address.trim().to_owned();
         let nickname = nickname.trim().to_owned();
         if address.is_empty() || nickname.is_empty() {
             return;
         }
         self.settings.nickname.clone_from(&nickname);
-        let pinned = self.settings.server_certs.get(&net::canonical_address(&address)).copied();
+        let pinned = match pin {
+            ServerPin::FirstUse => None,
+            ServerPin::Saved(fingerprint) | ServerPin::Replacement(fingerprint) => Some(fingerprint),
+        };
         let login_password = Some(password.clone()).filter(|p| !p.is_empty());
         let key = self.settings.identity_key.get_or_insert_with(settings::new_identity_key).clone();
         self.session = self.net.connect(address.clone(), nickname, login_password, pinned, key);
-        self.conn = Conn::Connecting { address, password, known_cert: pinned.is_some() };
+        self.conn = Conn::Connecting { address, password, pin };
         self.view = None;
         self.ping = None;
         self.last_error = None;
@@ -427,7 +394,6 @@ impl App {
     fn open_delete_channel(&mut self, channel: ChannelId) {
         let Some(view) = &self.view else { return };
         let Some(ch) = view.channels.get(&channel) else { return };
-        // Everyone in the channel or below it.
         let mut below = vec![channel];
         let mut i = 0;
         while i < below.len() {
@@ -439,7 +405,6 @@ impl App {
         self.channel_dialog = Some(ChannelDialog::Delete { channel, name: ch.name.clone(), occupants });
     }
 
-    /// Moves a channel one place up (`-1`) or down (`+1`) among its siblings.
     fn shift_channel(&mut self, channel: ChannelId, delta: i32) {
         let Some(view) = &self.view else { return };
         let Some(ch) = view.channels.get(&channel) else { return };
@@ -589,8 +554,6 @@ impl App {
         self.input.clear();
     }
 
-    // ----- chat bookkeeping ------------------------------------------------
-
     fn push(&mut self, tab: usize, kind: LineKind, text: impl Into<String>) {
         let time = chrono::Local::now().format("%H:%M").to_string();
         let t = &mut self.tabs[tab];
@@ -631,8 +594,6 @@ impl App {
         }
     }
 
-    // ----- network events --------------------------------------------------
-
     fn poll_network(&mut self) {
         while let Ok(ev) = self.net.rx.try_recv() {
             match ev {
@@ -643,13 +604,12 @@ impl App {
                     self.voice.seen = Some(Instant::now());
                 }
                 NetEvent::Secured(s, fingerprint) if s == self.session => {
-                    // Trust on first use: the first certificate seen at an address is pinned.
                     if let Conn::Connecting { address, .. } = &self.conn {
                         self.settings.server_certs.entry(net::canonical_address(address)).or_insert(fingerprint);
                     }
                 }
                 NetEvent::Closed(s, ended) if s == self.session => self.on_closed(ended),
-                _ => {} // stale session
+                _ => {}
             }
         }
     }
@@ -683,7 +643,6 @@ impl App {
         if was_connected {
             self.sound(if reason.is_some() { Sound::ConnectionLost } else { Sound::Disconnected });
         }
-        // A server newer than us: fetch the update right away.
         if reason.as_deref().is_some_and(|r| r.contains("please update your T7")) {
             self.updater.check_now();
         }
@@ -696,9 +655,9 @@ impl App {
     fn on_message(&mut self, msg: S2C) {
         match msg {
             S2C::Welcome { your_id, server, channels, clients, .. } => {
-                let (address, known_cert) = match &self.conn {
-                    Conn::Connecting { address, known_cert, .. } => (address.clone(), *known_cert),
-                    _ => (String::new(), false),
+                let (address, pin) = match &self.conn {
+                    Conn::Connecting { address, pin, .. } => (address.clone(), *pin),
+                    _ => return,
                 };
                 self.server_address.clone_from(&address);
                 let recent = Recent { address, server_name: server.name.clone() };
@@ -731,7 +690,7 @@ impl App {
                     self.net.send(C2S::SetStatus(self.settings.status));
                 }
                 if let Some(token) = self.settings.admin_tokens.get(&self.server_address).cloned() {
-                    if known_cert {
+                    if matches!(pin, ServerPin::Saved(_)) {
                         self.authenticate(token);
                     } else {
                         let pin = self.settings.server_certs.get(&net::canonical_address(&self.server_address));
@@ -767,7 +726,6 @@ impl App {
                 let verb = match reason {
                     LeaveReason::Disconnected => Some("disconnected"),
                     LeaveReason::TimedOut => Some("timed out"),
-                    // The kick notice already said so.
                     LeaveReason::Kicked => None,
                 };
                 self.apply(&S2C::ClientLeft { id, reason });
@@ -847,14 +805,13 @@ impl App {
             }
             S2C::Poked { from, message } => self.on_poked(from, message),
             S2C::Error { message } => {
-                // A saved token that no longer works (e.g. the server's was reset) is forgotten.
                 if message == "wrong admin token" && self.pending_admin_token.take().is_some() {
                     self.settings.admin_tokens.remove(&self.server_address);
                 }
                 let tab = self.active_tab;
                 self.push(tab, LineKind::Error, message);
             }
-            S2C::Rejected { .. } | S2C::Pong { .. } => {} // handled by the net layer
+            S2C::Rejected { .. } | S2C::Pong { .. } => {}
         }
     }
 
@@ -863,8 +820,6 @@ impl App {
             v.apply(msg);
         }
     }
-
-    // ----- UI --------------------------------------------------------------
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let (connect, mute, deafen) = ctx.input_mut(|i| {
@@ -956,7 +911,6 @@ impl App {
             Conn::Connecting { address, .. } => (theme::AMBER, format!("Connecting to {address}…")),
             Conn::Disconnected => (theme::TEXT_FAINT, "Not connected".to_owned()),
         };
-        // Painted to the exact height of the buttons beside it.
         let galley = ui.painter().layout_no_wrap(text, FontId::proportional(12.5), theme::TEXT_DIM);
         let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 34.0, theme::CONTROL_H), Sense::hover());
         let p = ui.painter();
@@ -1019,7 +973,6 @@ impl App {
                         let packs = custom.into_iter().chain(sounds::installed_packs()).collect();
                         self.audio_dialog = Some(AudioDialog { packs, inputs, outputs, binding: false });
                     }
-                    // A hairline between the settings and the status toggles.
                     let (r, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
                     ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_STRONG));
                     let mut s = self.settings.status;
@@ -1065,7 +1018,6 @@ impl App {
                 let admin = view.me().is_some_and(|c| c.admin);
 
                 ui.horizontal(|ui| {
-                    // Lined up with the channel icons below.
                     ui.add_space(6.0);
                     ui.label(RichText::new("CHANNELS").size(11.0).color(theme::TEXT_FAINT).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1151,7 +1103,6 @@ impl App {
                             p.rect_filled(bar, CornerRadius::same(2), theme::ACCENT);
                         }
                         if let Some((zone @ (Zone::Before | Zone::After), Outcome::Move(_))) = channel_drop {
-                            // Indented to the level the channel lands on.
                             let y = if zone == Zone::Before { rect.top() - 0.5 } else { rect.bottom() + 0.5 };
                             let left = rect.left() + indent + 4.0;
                             p.circle_filled(egui::pos2(left, y), 3.0, theme::ACCENT);
@@ -1295,7 +1246,6 @@ impl App {
                                 );
                             }
                             let p = ui.painter();
-                            // The avatar starts where the channel's name does.
                             let ax = rect.left() + indent + TREE_TEXT_X + 9.0;
                             let center = egui::pos2(ax, rect.center().y);
                             paint_avatar(p, center, 9.0, &c.nickname);
@@ -1487,7 +1437,6 @@ impl App {
                 return;
             }
 
-            // Tabs
             let mut close = None;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -1525,7 +1474,6 @@ impl App {
             ui.separator();
             ui.add_space(2.0);
 
-            // Composer pinned to the bottom, messages fill the rest.
             let kind = self.tabs[self.active_tab].kind;
             let hint = match kind {
                 TabKind::Server => "Message everyone on the server".to_owned(),
@@ -1625,7 +1573,6 @@ impl App {
             let address = field(ui, "Server address", &mut form.address, false);
             let nickname = field(ui, "Nickname", &mut form.nickname, false);
             if !form.focus_requested {
-                // Start where typing is needed: the address, or the nickname if it's prefilled.
                 if form.address.trim().is_empty() { address } else { nickname }.request_focus();
                 form.focus_requested = true;
             }
@@ -1657,13 +1604,11 @@ impl App {
 }
 
 impl App {
-    /// Keeps the audio engine and its shared state in line with the app state.
     fn drive_audio(&mut self, ctx: &egui::Context) {
         let s = self.settings.status;
         let v = &mut self.voice;
         v.shared.set_status(s.muted, s.deafened);
         let connected = matches!(self.conn, Conn::Connected);
-        // A last sound (like "disconnected") finishes before the devices close.
         let finishing = v.engine.is_some() && v.playback.effects_active();
         let wanted = connected || self.audio_dialog.is_some() || finishing;
         if wanted && v.engine.is_none() {
@@ -1680,7 +1625,6 @@ impl App {
         {
             v.shared.set_ptt_local(ctx.input(|i| ptt::is_down(key.vk, i)));
         }
-        // Talking rings fade out without any input event, so poll while anyone talks.
         if v.shared.transmitting() || !v.playback.speaking().is_empty() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -1710,13 +1654,18 @@ impl App {
         let level = self.voice.shared.level_db();
         let open = self.voice.shared.transmitting();
 
-        let modal = theme::modal("voice-settings").show(ctx, |ui| {
+        const FOOTER_GAP: f32 = 16.0;
+        let dialog = theme::modal("voice-settings");
+        let frame_height =
+            dialog.frame.unwrap_or_else(|| egui::Frame::popup(&ctx.global_style())).total_margin().sum().y;
+        let modal = dialog.show(ctx, |ui| {
             ui.set_width(420.0);
+            let header_top = ui.next_widget_position().y;
             dialog_header(ui, "Voice settings", "Changes apply right away.");
 
-            // Keeps the title and the Done button on screen when the window is shorter than the
-            // dialog; 150 points covers both plus the modal's margins.
-            let body_height = (ui.ctx().content_rect().height() - 150.0).max(120.0);
+            let header_height = ui.next_widget_position().y - header_top;
+            let footer_height = FOOTER_GAP + theme::CONTROL_H + ui.spacing().item_spacing.y;
+            let body_height = (ctx.content_rect().height() - frame_height - header_height - footer_height).max(0.0);
             egui::ScrollArea::vertical().max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
                 ui.spacing_mut().interact_size.x = SLIDER_VALUE_W;
                 section(ui, "Devices");
@@ -1827,7 +1776,7 @@ impl App {
                 });
             });
 
-            ui.add_space(16.0);
+            ui.add_space(FOOTER_GAP);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let version = format!("T7 {}", crate::update::VERSION);
@@ -1867,12 +1816,12 @@ impl App {
             self.sound(Sound::Poke);
         }
         if restart {
-            self.voice.engine = None; // reopened with the new devices next frame
+            self.voice.engine = None;
         }
         if close {
             self.audio_dialog = None;
         } else {
-            ctx.request_repaint_after(Duration::from_millis(50)); // live level meter
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 }
@@ -1912,7 +1861,6 @@ impl App {
     }
 
     fn moderation_dialog(&mut self, ctx: &egui::Context) {
-        // A dialog about someone who has left closes by itself.
         let online = |id: &ClientId| self.view.as_ref().is_some_and(|v| v.clients.contains_key(id));
         let gone = match &self.moderation {
             Some(Moderation::Kick { target, .. } | Moderation::Ban { target, .. }) => !online(target),
@@ -2002,8 +1950,6 @@ impl App {
                         }
                     }
                     ui.add_space(18.0);
-                    // Top-aligned: a centered row would keep the height the
-                    // scroll area took on the frame the list arrived.
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                         if ui.add(Btn::primary("Done")).clicked() {
                             cancel = true;
@@ -2013,7 +1959,6 @@ impl App {
             }
         });
         if let Some(id) = unban {
-            // The server answers with the new list.
             self.net.send(C2S::Unban { id });
         }
         if let Some(msg) = send {
@@ -2099,19 +2044,13 @@ impl App {
             let change = self.cert_change.take().expect("dialog open");
             self.settings.server_certs.insert(net::canonical_address(&change.address), change.presented);
             let nickname = self.settings.nickname.clone();
-            self.connect(change.address, nickname, change.password);
-            // Only the user's check vouches for the new pin, as on a first use.
-            if let Conn::Connecting { known_cert, .. } = &mut self.conn {
-                *known_cert = false;
-            }
+            self.connect_with_pin(change.address, nickname, change.password, ServerPin::Replacement(change.presented));
         } else if cancel || modal.should_close() {
             self.cert_change = None;
         }
     }
 
     fn channel_dialog(&mut self, ctx: &egui::Context) {
-        // A dialog about a channel that just disappeared (deleted, or an emptied
-        // temporary channel) closes by itself.
         let about = match &self.channel_dialog {
             Some(ChannelDialog::Form(f)) => f.editing.or(f.parent),
             Some(ChannelDialog::Password { channel, .. } | ChannelDialog::Delete { channel, .. }) => Some(*channel),
@@ -2124,7 +2063,6 @@ impl App {
         let Some(dialog) = &mut self.channel_dialog else { return };
         let view = self.view.as_ref();
         let may_create_permanent = view.is_some_and(|v| v.allowed(Action::CreatePermanentChannel));
-        // Admins see who moderates the channel they edit: by nickname when online.
         let editing = match dialog {
             ChannelDialog::Form(f) => f.editing,
             _ => None,
@@ -2316,7 +2254,6 @@ impl App {
     }
 }
 
-/// A fingerprint as two rows of 16 bytes, so it fits a dialog.
 fn two_lines(fingerprint: Fingerprint) -> String {
     let text = fingerprint.to_string();
     let (first, second) = text.split_at(16 * 3);
@@ -2344,7 +2281,6 @@ fn open_sounds_folder() {
     }
 }
 
-/// What the window shell needs from the app.
 impl App {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.poll_network();
@@ -2366,7 +2302,6 @@ impl App {
         self.cert_change_dialog(&ctx);
     }
 
-    /// True once after a poke arrived: the shell flashes the taskbar entry.
     pub fn take_attention(&mut self) -> bool {
         std::mem::take(&mut self.attention)
     }
@@ -2383,11 +2318,8 @@ impl App {
     }
 
     pub fn on_exit(&mut self) {
-        self.disconnect();
-        // A downloaded update is put in place now and runs next time.
+        self.net.shutdown();
         self.updater.install();
-        // Give the network thread a moment to send the goodbye.
-        std::thread::sleep(Duration::from_millis(50));
     }
 
     pub fn take_quit(&mut self) -> bool {
@@ -2396,7 +2328,6 @@ impl App {
 
     fn restart_to_update(&mut self) {
         let Some(exe) = self.updater.install() else { return };
-        // Same arguments, so a command-line connection reconnects.
         match std::process::Command::new(&exe).args(std::env::args().skip(1)).spawn() {
             Ok(_) => self.quit = true,
             Err(e) => self.push(0, LineKind::Error, format!("Updated, but couldn't restart T7: {e}. Start it again.")),
@@ -2411,7 +2342,6 @@ fn base_tabs() -> Vec<Tab> {
     ]
 }
 
-/// One chat line as a single wrapped text layout: cheap to lay out and render.
 fn layout_line(line: &Line, my_id: ClientId, width: f32) -> LayoutJob {
     use egui::text::TextFormat;
     let fmt =
@@ -2459,7 +2389,6 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
 }
 
-/// A device picker; `None` follows the system default.
 fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, names: &[String]) -> bool {
     let mut changed = false;
     let shown = value.clone().unwrap_or_else(|| "System default".to_owned());
@@ -2475,7 +2404,6 @@ fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, names: 
 const METER_MIN_DB: f32 = -70.0;
 const METER_MAX_DB: f32 = -5.0;
 
-/// Live microphone level with the activation threshold marked.
 fn level_meter(ui: &mut egui::Ui, level_db: f32, threshold_db: f32, open: bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
     let t = |db: f32| ((db - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB)).clamp(0.0, 1.0);
@@ -2491,19 +2419,15 @@ fn level_meter(ui: &mut egui::Ui, level_db: f32, threshold_db: f32, open: bool) 
     );
 }
 
-/// Starts a group of settings: a small caps label with room above it.
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(14.0);
     ui.label(RichText::new(title.to_uppercase()).size(11.0).strong().color(theme::TEXT_FAINT));
     ui.add_space(2.0);
 }
 
-/// Width of the label column in settings rows.
 const ROW_LABEL_W: f32 = 104.0;
-/// Width of the number box after a slider.
 const SLIDER_VALUE_W: f32 = 60.0;
 
-/// A settings row: the label in a fixed column so every control starts at the same x.
 fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.horizontal(|ui| {
         let color = if ui.is_enabled() { theme::TEXT_DIM } else { theme::TEXT_FAINT };
@@ -2517,11 +2441,9 @@ fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) 
 #[derive(Clone, Copy)]
 enum Unit {
     Db,
-    /// Stored as a factor, shown as a percentage.
     Percent,
 }
 
-/// A slider filling the rest of a row, its value in an editable box at the end.
 fn slider(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, unit: Unit) {
     let width = ui.available_width() - SLIDER_VALUE_W - ui.spacing().item_spacing.x;
     ui.scope(|ui| {
@@ -2541,12 +2463,10 @@ fn slider(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f3
     ui.add_sized(vec2(SLIDER_VALUE_W, theme::CONTROL_H), drag);
 }
 
-/// A faint explanatory line under a control.
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).size(11.5).color(theme::TEXT_FAINT));
 }
 
-/// A dialog's title, and a line explaining it unless `note` is empty.
 fn dialog_header(ui: &mut egui::Ui, title: &str, note: &str) {
     ui.label(RichText::new(title).size(17.0).strong().color(theme::TEXT));
     if !note.is_empty() {
@@ -2556,7 +2476,6 @@ fn dialog_header(ui: &mut egui::Ui, title: &str, note: &str) {
     ui.add_space(14.0);
 }
 
-/// The right-aligned button row that ends a dialog: add the main action first.
 fn dialog_footer(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(18.0);
     ui.with_layout(Layout::right_to_left(Align::Center), add);
@@ -2567,7 +2486,6 @@ fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.add_space(-2.0);
 }
 
-/// A single-line text field, as tall as a button.
 fn text_input(value: &mut String) -> egui::TextEdit<'_> {
     egui::TextEdit::singleline(value)
         .desired_width(f32::INFINITY)
@@ -2576,7 +2494,6 @@ fn text_input(value: &mut String) -> egui::TextEdit<'_> {
         .margin(Margin::symmetric(10, 0))
 }
 
-/// A chat tab, with its unread count in a pill after the title.
 fn tab_button(ui: &mut egui::Ui, label: &str, active: bool, unread: u32) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(label.to_owned(), FontId::proportional(13.0), theme::TEXT);
     let count = (unread > 0).then(|| {
@@ -2611,7 +2528,6 @@ fn tab_button(ui: &mut egui::Ui, label: &str, active: bool, unread: u32) -> egui
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// An icon toggle button, tinted with `on_color` while on (muted, deafened...).
 fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color: Color32, tip: &str) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     let (fill, color, icon) = match (*on, resp.hovered()) {
@@ -2628,10 +2544,11 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color:
     clicked
 }
 
-/// One ban in the ban list. Returns whether Unban was clicked.
 fn ban_card(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
     let local = |secs: u64| {
-        chrono::DateTime::from_timestamp(secs as i64, 0)
+        i64::try_from(secs)
+            .ok()
+            .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
             .map_or_default(|t| t.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
     };
     let mut details = vec![ban.identity.to_string(), format!("by {} on {}", ban.banned_by, local(ban.created_unix))];
@@ -2705,4 +2622,33 @@ fn recent_card(ui: &mut egui::Ui, r: &Recent) -> egui::Response {
     let chevron = egui::Rect::from_center_size(rect.right_center() - vec2(18.0, 0.0), vec2(16.0, 16.0));
     icons::paint(p, chevron, Icon::ChevronRight, if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM });
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_previously_pinned_connection_uses_the_saved_admin_token() {
+        let mut settings = Settings::default();
+        let address = "localhost:9988";
+        settings.admin_tokens.insert(address.into(), "test token".into());
+        let mut app = App::new(&egui::Context::default(), settings, None);
+        let fingerprint = Fingerprint([1; 32]);
+        for (pin, expected_token) in [
+            (ServerPin::FirstUse, None),
+            (ServerPin::Replacement(fingerprint), None),
+            (ServerPin::Saved(fingerprint), Some("test token")),
+        ] {
+            app.conn = Conn::Connecting { address: address.into(), password: String::new(), pin };
+            app.on_message(S2C::Welcome {
+                your_id: 1,
+                voice_key: [0; 32],
+                server: t7_proto::ServerInfo { name: "T7".into(), welcome: String::new(), max_clients: 1 },
+                channels: vec![],
+                clients: vec![],
+            });
+            assert_eq!(app.pending_admin_token.as_deref(), expected_token);
+        }
+    }
 }

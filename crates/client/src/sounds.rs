@@ -1,15 +1,3 @@
-//! Notification sounds.
-//!
-//! Built in: short original chimes, synthesized while they play (no audio
-//! files, no memory). A sound pack can replace them:
-//! - a custom folder with WAV files named after the sounds ([`Sound::file_name`]);
-//!   missing files fall back to the chimes;
-//! - an ini pack: a folder whose `settings.ini` maps events to WAV
-//!   files. Packs are read where they are installed and nothing is copied. An
-//!   event the pack leaves empty stays silent.
-//!
-//! Pack files are decoded when they play, so a pack costs no memory at rest.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,22 +10,14 @@ use crate::resample::Resampler;
 pub enum Sound {
     Connected,
     Disconnected,
-    /// Our own connection dropped.
     ConnectionLost,
-    /// Someone connected to the server, landing in our channel.
     UserConnected,
-    /// Someone in our channel disconnected.
     UserDisconnected,
-    /// Someone in our channel timed out.
     UserLostConnection,
-    /// Someone switched into our channel.
     UserJoined,
-    /// Someone switched out of our channel.
     UserLeft,
-    /// We switched channels.
     ChannelSwitched,
     Poke,
-    /// A private message from someone else.
     Message,
     MicMuted,
     MicUnmuted,
@@ -60,7 +40,6 @@ impl Sound {
         Sound::MicUnmuted,
     ];
 
-    /// File name that replaces this sound in a custom folder.
     pub fn file_name(self) -> &'static str {
         match self {
             Sound::Connected => "connected.wav",
@@ -79,7 +58,6 @@ impl Sound {
         }
     }
 
-    /// The event key for this sound in a pack's `settings.ini`.
     fn ini_key(self) -> &'static str {
         match self {
             Sound::Connected => "CONNECTION_CONNECTED",
@@ -128,43 +106,31 @@ impl Sound {
     }
 }
 
-/// One bell-like tone: starts at `at` seconds into the sound.
 struct Note {
     at: f32,
     hz: f32,
     gain: f32,
 }
 
-/// Each note rings this long; by then its decay is inaudible.
 const NOTE_LEN: f32 = 0.35;
 const ATTACK: f32 = 0.004;
 const DECAY: f32 = 0.08;
-/// Peak level of a chime at full notification volume.
 const LEVEL: f32 = 0.22;
-/// Pack files longer than this are cut short.
 const MAX_FILE_SECS: usize = 4;
 
-// ---- sound packs -----------------------------------------------------------
-
-/// What to play for a sound.
 pub enum Resolved {
     Chime,
     File(PathBuf),
     Silent,
 }
 
-/// The selected sound pack, as an index of file paths (no audio loaded).
 pub enum Pack {
     BuiltIn,
-    /// WAVs named after the sounds; missing ones fall back to the chimes.
     Custom(PathBuf),
-    /// An ini pack: `None` means the pack keeps that event silent.
     Ini(HashMap<Sound, Option<PathBuf>>),
 }
 
 impl Pack {
-    /// Opens the pack in `dir`: an ini pack if it has a `settings.ini`,
-    /// otherwise a custom folder. `None` is the built-in chimes.
     pub fn open(dir: Option<&Path>) -> Self {
         let Some(dir) = dir else { return Pack::BuiltIn };
         let ini = dir.join("settings.ini");
@@ -216,7 +182,6 @@ fn parse_ini(text: &str, dir: &Path) -> HashMap<Sound, Option<PathBuf>> {
         .collect()
 }
 
-/// Sound packs found on this machine: (label, folder).
 pub fn installed_packs() -> Vec<(String, PathBuf)> {
     let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
     let roots = [
@@ -248,7 +213,6 @@ pub fn installed_packs() -> Vec<(String, PathBuf)> {
     packs
 }
 
-/// Reads any PCM/float WAV as 48 kHz mono, at most a few seconds.
 pub fn load_wav(path: &Path) -> Result<Arc<[f32]>, hound::Error> {
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
@@ -266,8 +230,6 @@ pub fn load_wav(path: &Path) -> Result<Arc<[f32]>, hound::Error> {
     out.truncate(SAMPLE_RATE as usize * MAX_FILE_SECS);
     Ok(out.into())
 }
-
-// ---- mixing ----------------------------------------------------------------
 
 enum Source {
     Chime(&'static [Note]),
@@ -312,7 +274,6 @@ impl Playing {
     }
 }
 
-/// Sounds currently playing, mixed into the speaker output.
 #[derive(Default)]
 pub struct Effects {
     playing: Vec<Playing>,
@@ -335,7 +296,6 @@ impl Effects {
         self.playing.clear();
     }
 
-    /// Adds the next `out.len()` samples (48 kHz) of every playing sound.
     pub fn mix(&mut self, out: &mut [f32]) {
         for p in &mut self.playing {
             let len = p.len();
@@ -367,7 +327,6 @@ mod tests {
         for sound in Sound::ALL {
             let mut fx = Effects::default();
             fx.play_chime(sound, 1.0);
-            // Odd chunk size, like a real output callback.
             let out = render(&mut fx, 441, 100);
             let peak = out.iter().fold(0f32, |m, v| m.max(v.abs()));
             assert!(peak > 0.05 && peak <= 1.0, "{sound:?} peak {peak}");
@@ -435,8 +394,7 @@ mod tests {
         assert!(matches!(pack.resolve(Sound::Message), Resolved::Chime));
         let Resolved::File(path) = pack.resolve(Sound::Poke) else { panic!("poke.wav not used") };
         let samples = load_wav(&path).unwrap();
-        // 0.1 s of stereo at 24 kHz becomes 0.1 s of mono at 48 kHz, level kept.
-        assert!((samples.len() as i32 - 4800).abs() <= 2, "{} samples", samples.len());
+        assert!(samples.len().abs_diff(4800) <= 2, "{} samples", samples.len());
         assert!((samples[100] - 0.5).abs() < 0.01);
         std::fs::remove_dir_all(dir).unwrap();
     }

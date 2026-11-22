@@ -1,6 +1,3 @@
-//! The channel tree: structure, validation, ordering and the saved format.
-//! Pure state, no networking: who may do what is decided by the caller.
-
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
@@ -14,7 +11,6 @@ use t7_proto::{
 
 use crate::config::ChannelConfig;
 
-/// Upper bound for a channel's user limit.
 const MAX_LIMIT: u32 = 1000;
 
 struct Channel {
@@ -66,7 +62,6 @@ pub struct Channels {
 }
 
 impl Channels {
-    /// Builds the tree from config entries. An empty list gets a single "Lobby".
     pub fn from_config(list: &[ChannelConfig]) -> Self {
         let mut channels = Self { map: BTreeMap::new(), default: 0, next_id: 1 };
         let mut default = None;
@@ -112,7 +107,6 @@ impl Channels {
         Ok(Self::from_config(&file.channels))
     }
 
-    /// Writes the permanent channels; write-then-rename, so a crash never truncates the file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let header = "# The live channel tree, kept up to date by the server as admins edit\n\
                       # channels in T7. Edit it only while the server is stopped.\n\n";
@@ -122,7 +116,6 @@ impl Channels {
         std::fs::rename(&tmp, path)
     }
 
-    /// Permanent channels in the saved format, siblings in display order.
     pub fn to_config(&self) -> Vec<ChannelConfig> {
         self.children_of(None).into_iter().filter_map(|id| self.config_of(id)).collect()
     }
@@ -143,7 +136,6 @@ impl Channels {
         })
     }
 
-    /// Everything clients need to draw the tree.
     pub fn snapshot(&self) -> Vec<ChannelInfo> {
         self.map.values().map(|c| c.info.clone()).collect()
     }
@@ -156,7 +148,6 @@ impl Channels {
         self.map.get(&id).map(|c| &c.info)
     }
 
-    /// All channel ids, parents before children, siblings in order.
     pub fn ids_in_order(&self) -> Vec<ChannelId> {
         let mut out = Vec::with_capacity(self.map.len());
         let mut stack: Vec<ChannelId> = self.children_of(None).into_iter().rev().collect();
@@ -233,7 +224,6 @@ impl Channels {
         Ok(())
     }
 
-    /// Moves `id` under `parent`, at `position` among its new siblings.
     pub fn move_to(&mut self, id: ChannelId, parent: Option<ChannelId>, position: u32) -> Result<(), ChannelError> {
         let moving = self.map.get(&id).ok_or(ChannelError::NotFound)?;
         let temporary = moving.info.temporary;
@@ -268,7 +258,6 @@ impl Channels {
         Ok(())
     }
 
-    /// Removes `id` and everything below it. Returns the removed ids.
     pub fn delete(&mut self, id: ChannelId) -> Result<Vec<ChannelId>, ChannelError> {
         let parent = self.map.get(&id).ok_or(ChannelError::NotFound)?.info.parent;
         let removed = self.subtree(id);
@@ -296,7 +285,6 @@ impl Channels {
         Ok(())
     }
 
-    /// Adds or removes a moderator. Returns whether anything changed.
     pub fn set_moderator(&mut self, id: ChannelId, identity: Identity, moderator: bool) -> Result<bool, ChannelError> {
         let list = &mut self.map.get_mut(&id).ok_or(ChannelError::NotFound)?.info.moderators;
         let had = list.contains(&identity);
@@ -308,7 +296,6 @@ impl Channels {
         Ok(true)
     }
 
-    /// `id` and all channels below it.
     pub fn subtree(&self, id: ChannelId) -> Vec<ChannelId> {
         let mut out = vec![id];
         let mut i = 0;
@@ -320,7 +307,6 @@ impl Channels {
         out
     }
 
-    /// Top-most temporary channels with nobody in them or below them.
     pub fn abandoned_temporaries(&self, occupied: &HashSet<ChannelId>) -> Vec<ChannelId> {
         self.map
             .values()
@@ -345,7 +331,6 @@ impl Channels {
         }
     }
 
-    /// Top level is depth 1.
     fn depth(&self, id: ChannelId) -> usize {
         let mut depth = 1;
         let mut cur = self.map.get(&id).and_then(|c| c.info.parent);
@@ -356,7 +341,6 @@ impl Channels {
         depth
     }
 
-    /// Levels in the subtree under and including `id`.
     fn height(&self, id: ChannelId) -> usize {
         1 + self.children_of(Some(id)).into_iter().map(|k| self.height(k)).max().unwrap_or(0)
     }
@@ -472,7 +456,6 @@ mod tests {
         assert_eq!(ch.create(Some(99), &settings("x"), false, 1), Err(ChannelError::NotFound));
         let limit0 = ChannelSettings { max_clients: Some(0), ..settings("x") };
         assert_eq!(ch.create(None, &limit0, false, 1), Err(ChannelError::BadLimit));
-        // Squad is depth 2; a child is depth 3 (allowed), a grandchild would be 4.
         let deep = ch.create(Some(3), &settings("Deep"), false, 1).unwrap();
         assert_eq!(ch.create(Some(deep), &settings("Deeper"), false, 1), Err(ChannelError::TooDeep));
     }
@@ -486,7 +469,6 @@ mod tests {
         let sub = ch.create(Some(temp), &settings("Sub"), true, 7).unwrap();
         assert!(ch.to_config().iter().all(|c| c.name != "Raid"), "temporary channels aren't saved");
 
-        // Someone in the sub-channel keeps the whole temporary tree alive.
         assert_eq!(ch.abandoned_temporaries(&HashSet::from([sub])), [] as [u32; 0]);
         assert_eq!(
             ch.abandoned_temporaries(&HashSet::from([1])),
@@ -500,9 +482,9 @@ mod tests {
     #[test]
     fn move_reorders_and_refuses_nonsense() {
         let mut ch = three();
-        ch.move_to(4, None, 0).unwrap(); // AFK to the top
+        ch.move_to(4, None, 0).unwrap();
         assert_eq!(names(&ch), ["AFK", "Lobby", "Gaming", "Squad"]);
-        ch.move_to(3, None, 99).unwrap(); // Squad out of Gaming, to the end
+        ch.move_to(3, None, 99).unwrap();
         assert_eq!(names(&ch), ["AFK", "Lobby", "Gaming", "Squad"]);
         assert_eq!(ch.get(3).unwrap().parent, None);
         ch.move_to(3, Some(2), 0).unwrap();

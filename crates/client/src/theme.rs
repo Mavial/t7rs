@@ -18,7 +18,6 @@ pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x70, 0x70, 0x70);
 pub const ACCENT: Color32 = Color32::from_rgb(0x25, 0x80, 0xc3);
 const ACCENT_HOVER: Color32 = Color32::from_rgb(0x30, 0x8f, 0xd4);
 const ACCENT_PRESSED: Color32 = Color32::from_rgb(0x1e, 0x6f, 0xab);
-/// Text and icons drawn on an `ACCENT` fill.
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
 pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0x6a, 0xb4, 0xea);
 pub const ACCENT_BG: Color32 = Color32::from_rgba_premultiplied(0x0e, 0x22, 0x34, 0xa0);
@@ -31,7 +30,6 @@ const RED_HOVER: Color32 = Color32::from_rgb(0xe8, 0x46, 0x4d);
 const RED_PRESSED: Color32 = Color32::from_rgb(0xbf, 0x31, 0x37);
 
 pub const RADIUS: u8 = 6;
-/// Height of buttons, text fields, combo boxes and segmented controls.
 pub const CONTROL_H: f32 = 30.0;
 
 pub fn apply(ctx: &egui::Context) {
@@ -117,9 +115,7 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
-/// Stable, pleasant color per nickname for avatars.
 pub fn avatar_color(name: &str) -> Color32 {
-    // OC-2 hues, mid-dark so white initials stay readable.
     const PALETTE: [Color32; 8] = [
         Color32::from_rgb(0xd1, 0x64, 0x27),
         Color32::from_rgb(0xcb, 0x9f, 0x34),
@@ -144,7 +140,7 @@ enum Kind {
 }
 
 /// A button painted here rather than by egui, whose fill overrides drop the
-/// hover and pressed states. `ui.add_enabled(false, ..)` greys it out.
+/// hover and pressed states.
 pub struct Btn<'a> {
     text: &'a str,
     kind: Kind,
@@ -157,27 +153,22 @@ impl<'a> Btn<'a> {
         Self { text, kind, small: false, min_width: 72.0 }
     }
 
-    /// Accent-filled: the one action a dialog or screen is for.
     pub fn primary(text: &'a str) -> Self {
         Self::new(text, Kind::Primary)
     }
 
-    /// Filled grey with a hairline border: Cancel and everything else.
     pub fn secondary(text: &'a str) -> Self {
         Self::new(text, Kind::Secondary)
     }
 
-    /// Red: an action that is hard to take back.
     pub fn danger(text: &'a str) -> Self {
         Self::new(text, Kind::Danger)
     }
 
-    /// No fill until hovered.
     pub fn ghost(text: &'a str) -> Self {
         Self::new(text, Kind::Ghost)
     }
 
-    /// 24 points tall, for actions inside a row or card.
     pub fn small(mut self) -> Self {
         self.small = true;
         self.min_width = 0.0;
@@ -252,7 +243,6 @@ impl egui::Widget for Btn<'_> {
             let radius = CornerRadius::same(RADIUS);
             p.rect(rect, radius, fade(fill), Stroke::new(1.0, fade(stroke)), egui::StrokeKind::Inside);
             if !weak && enabled {
-                // A faint top highlight gives filled buttons some depth.
                 let top = egui::Rect::from_min_size(
                     rect.min + egui::vec2(f32::from(RADIUS), 0.5),
                     egui::vec2(rect.width() - 2.0 * f32::from(RADIUS), 1.0),
@@ -266,7 +256,6 @@ impl egui::Widget for Btn<'_> {
     }
 }
 
-/// A row of mutually exclusive options in one rounded track.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) -> bool {
     let font = FontId::proportional(13.0);
     let galleys: Vec<_> =
@@ -313,8 +302,6 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options:
     changed
 }
 
-/// A full-width row: label on the left, an on/off switch on the right.
-/// The whole row toggles.
 pub fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
     let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
     if resp.clicked() {
@@ -341,7 +328,6 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
 }
 
-/// The frame every dialog uses: roomy margins and a soft shadow.
 pub fn modal(id: &str) -> egui::Modal {
     let frame = egui::Frame::new()
         .fill(PANEL)

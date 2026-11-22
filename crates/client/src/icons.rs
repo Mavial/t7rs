@@ -1,6 +1,3 @@
-//! Tiny vector icons (outline style) painted directly — no font or image
-//! assets needed and razor sharp at any DPI. Coordinates use a 24×24 grid.
-
 use std::f32::consts::PI;
 
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2};
@@ -57,7 +54,6 @@ impl Pen<'_> {
         self.poly(&[a, b], false);
     }
 
-    /// Rounded rectangle outline.
     fn rrect(&self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) {
         let mut pts = Vec::new();
         pts.extend(Self::arc_points(x1 - r, y0 + r, r, -90.0, 0.0));
@@ -127,7 +123,6 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::ChevronRight => pen.poly(&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)], false),
         Icon::Moon => {
-            // Crescent: big circle arc from (21,12) round to (12,3), back along a smaller arc.
             let mut pts = Pen::arc_points(12.0, 12.0, 9.0, 0.0, 270.0);
             pts.extend(Pen::arc_points(16.5, 7.5, 6.36, 225.0, 45.0));
             pen.poly(&pts, true);

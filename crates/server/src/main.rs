@@ -19,7 +19,6 @@ struct Args {
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        // No color codes when logs go to a file or a container log collector.
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
@@ -40,7 +39,6 @@ fn main() {
             cfg.bind,
             if cfg.password().is_some() { ", password protected" } else { "" }
         );
-        // channels.toml and the admin token live next to the config file.
         let data_dir = match args.config.parent() {
             Some(dir) if !dir.as_os_str().is_empty() => dir.to_owned(),
             _ => PathBuf::from("."),

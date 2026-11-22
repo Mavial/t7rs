@@ -35,7 +35,6 @@ async fn main() {
     let (tls, fingerprint) = tls::connect(tcp, None).await.expect("TLS handshake");
     let version = tls.get_ref().1.protocol_version().expect("handshake is done");
     println!("{version:?} to {server}, server certificate {fingerprint}");
-    // A new identity each run.
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed).expect("system randomness");
     let identity = identity::IdentityKey::from_seed(seed).prove(&tls::exporter(tls.get_ref().1));
@@ -108,7 +107,6 @@ async fn main() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         return;
     }
-    // Keep the control connection drained.
     tokio::spawn(async move { while read_frame::<_, S2C>(&mut r, &mut buf).await.is_ok() {} });
 
     let udp = UdpSocket::bind("0.0.0.0:0").await.unwrap();
@@ -127,7 +125,6 @@ async fn main() {
         let mut seq = 0u32;
         while Instant::now() < deadline {
             tick.tick().await;
-            // Alternate two notes every half second, quietly.
             let hz = if (seq / 25).is_multiple_of(2) { 440.0 } else { 554.0 };
             let pcm: Vec<f32> = (0..FRAME_SAMPLES)
                 .map(|i| {

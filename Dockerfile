@@ -1,4 +1,3 @@
-# T7 server image. Builds only the server crate; the GUI client is not included.
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -7,8 +6,6 @@ RUN cargo build --release --locked -p t7-server
 
 FROM gcr.io/distroless/cc-debian12
 COPY --from=build /src/target/release/t7-server /usr/local/bin/t7-server
-# Config, channel tree, admin token and TLS certificate live in this volume;
-# a default t7-server.toml and a new certificate are made on first start.
 VOLUME /data
 WORKDIR /data
 EXPOSE 9988/tcp

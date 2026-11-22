@@ -45,7 +45,6 @@ impl ChannelTree for HashMap<ChannelId, ChannelInfo> {
 pub fn allowed(actor: &ClientInfo, action: Action<'_>, tree: &impl ChannelTree) -> bool {
     match action {
         Action::Kick { target, .. } | Action::Ban(target) if same_person(actor, target) => false,
-        // There is nowhere to kick them to.
         Action::Kick { target, from_server: false } if tree.channel(target.channel).is_none_or(|c| c.default) => false,
         _ if actor.admin => true,
         Action::EditChannel(id) => created(actor, id, tree) || moderated_from(actor.identity, id, tree).is_some(),
@@ -53,7 +52,6 @@ pub fn allowed(actor: &ClientInfo, action: Action<'_>, tree: &impl ChannelTree) 
         Action::Kick { target, from_server: false } => {
             let Some(mine) = moderated_from(actor.identity, target.channel, tree) else { return false };
             let theirs = moderated_from(target.identity, target.channel, tree);
-            // A moderator outranks only moderators of channels below their own.
             !target.admin && theirs.is_none_or(|theirs| theirs > mine)
         }
         _ => false,
@@ -69,16 +67,13 @@ pub fn moderated_from(identity: Identity, channel: ChannelId, tree: &impl Channe
         path.push(c);
         at = c.parent.and_then(|p| tree.channel(p));
     }
-    // `path` runs from `channel` up to the top level.
     path.iter().rev().position(|c| c.moderators.contains(&identity)).map(|i| i + 1)
 }
 
-/// The creator of a temporary channel keeps managing it.
 fn created(actor: &ClientInfo, channel: ChannelId, tree: &impl ChannelTree) -> bool {
     tree.channel(channel).is_some_and(|c| c.temporary && c.creator == Some(actor.id))
 }
 
-/// One person may be connected twice with the same identity.
 fn same_person(a: &ClientInfo, b: &ClientInfo) -> bool {
     a.id == b.id || a.identity == b.identity
 }
@@ -88,12 +83,6 @@ mod tests {
     use super::*;
     use crate::ClientStatus;
 
-    // Lobby (default)
-    // Gaming            moderated by G and G2
-    //   Squad           moderated by S
-    //     Deep
-    // AFK               moderated by A
-    // Raid (temporary, made by client 9)
     const LOBBY: ChannelId = 1;
     const GAMING: ChannelId = 2;
     const SQUAD: ChannelId = 3;
@@ -197,19 +186,16 @@ mod tests {
     fn who_a_moderator_may_kick() {
         let g = client(1, G, GAMING);
         let s = client(2, S, SQUAD);
-        // Everyone in the moderated channels, from the top channel down.
         for channel in [GAMING, SQUAD, DEEP] {
             assert!(can(&g, kick(&user(3, channel))), "user in channel {channel}");
         }
         assert!(!can(&g, kick(&user(3, AFK))), "outside their channels");
         assert!(!can(&g, kick(&user(3, LOBBY))));
-        // A moderator of a lower channel, but not of an equal or higher one.
         assert!(can(&g, kick(&s)));
         assert!(!can(&s, kick(&g)), "g moderates a higher channel");
         assert!(!can(&s, kick(&client(4, G, SQUAD))), "g moderates Squad from higher up");
         assert!(!can(&s, kick(&client(4, S, DEEP))), "same identity, other connection");
         assert!(!can(&g, kick(&client(5, G2, GAMING))), "another moderator of Gaming");
-        // A moderator elsewhere is an ordinary user here.
         assert!(can(&g, kick(&client(4, A, GAMING))));
         assert!(!can(&g, kick(&admin(6, GAMING))), "admins");
         assert!(!can(&g, kick(&g)), "themselves");

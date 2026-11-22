@@ -1,10 +1,3 @@
-//! Networking runs on its own thread with a small single-threaded tokio
-//! runtime, so the UI thread never blocks on I/O. The UI talks to it through
-//! channels and gets woken up (`request_repaint`) only when something arrives.
-//!
-//! Each session has a TLS control connection and, once welcomed, a UDP voice
-//! link to the same server address.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -23,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::audio::{Playback, VoiceSink};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+const DISCONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 /// Also keeps NAT mappings alive, so it must stay well under typical UDP timeouts.
 const VOICE_PING_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -31,48 +25,36 @@ enum Command {
     Send(C2S),
     Voice { seq: u32, payload: Vec<u8> },
     Disconnect,
+    Shutdown(std_mpsc::Sender<()>),
 }
 
-/// What a session connects to and with.
 struct Attempt {
     address: String,
     nickname: String,
     password: Option<String>,
-    /// The certificate fingerprint seen here before, if any.
     pinned: Option<Fingerprint>,
     key: IdentityKey,
 }
 
-/// What a session sends.
 enum Out {
     Control(C2S),
     Voice { seq: u32, payload: Vec<u8> },
 }
 
-/// Each connection attempt gets a fresh session id; the UI ignores events
-/// from stale sessions.
 pub type SessionId = u64;
 
 pub enum NetEvent {
     Message(SessionId, S2C),
     Ping(SessionId, Duration),
-    /// Round trip of a voice datagram: proof that UDP gets through.
     VoicePing(SessionId, Duration),
-    /// TLS is up, and this is the server's certificate.
     Secured(SessionId, Fingerprint),
     Closed(SessionId, Ended),
 }
 
-/// Why a session ended.
 pub enum Ended {
-    /// The user disconnected on purpose.
     ByUser,
     Failed(String),
-    /// The server's certificate is not the one pinned for its address.
-    CertChanged {
-        pinned: Fingerprint,
-        presented: Fingerprint,
-    },
+    CertChanged { pinned: Fingerprint, presented: Fingerprint },
 }
 
 pub struct Net {
@@ -98,8 +80,6 @@ impl Net {
         Self { tx, rx, session: 0 }
     }
 
-    /// Starts a new connection and returns its session id. `pinned` is the
-    /// certificate fingerprint to insist on; with `None` the server's is trusted.
     pub fn connect(
         &mut self,
         address: String,
@@ -121,7 +101,13 @@ impl Net {
         let _ = self.tx.send(Command::Disconnect);
     }
 
-    /// Where the capture thread sends encoded frames.
+    pub fn shutdown(&self) {
+        let (done, finished) = std_mpsc::channel();
+        if self.tx.send(Command::Shutdown(done)).is_ok() {
+            let _ = finished.recv();
+        }
+    }
+
     pub fn voice_sink(&self) -> VoiceSink {
         let tx = self.tx.clone();
         Arc::new(move |seq, payload: &[u8]| {
@@ -144,40 +130,55 @@ impl Events {
     }
 }
 
+struct ActiveSession {
+    tx: mpsc::UnboundedSender<Out>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ActiveSession {
+    async fn disconnect(mut self) -> Result<(), tokio::task::JoinError> {
+        let _ = self.tx.send(Out::Control(C2S::Goodbye));
+        if let Ok(result) = tokio::time::timeout(DISCONNECT_TIMEOUT, &mut self.task).await {
+            return result;
+        }
+        self.task.abort();
+        self.task.await
+    }
+}
+
 async fn command_loop(mut cmds: mpsc::UnboundedReceiver<Command>, events: Events, playback: Arc<Playback>) {
     let mut session: SessionId = 0;
-    let mut current: Option<(mpsc::UnboundedSender<Out>, tokio::task::JoinHandle<()>)> = None;
+    let mut current: Option<ActiveSession> = None;
 
     while let Some(cmd) = cmds.recv().await {
+        if matches!(cmd, Command::Connect(_) | Command::Disconnect | Command::Shutdown(_))
+            && let Some(previous) = current.take()
+            && previous.disconnect().await.is_err()
+        {
+            playback.clear();
+            events.emit(NetEvent::Closed(session, Ended::ByUser));
+        }
         match cmd {
             Command::Connect(attempt) => {
-                if let Some((tx, task)) = current.take() {
-                    let _ = tx.send(Out::Control(C2S::Goodbye));
-                    // Give the goodbye a moment to flush, then stop the old session.
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        task.abort();
-                    });
-                }
                 session += 1;
                 let (tx, rx) = mpsc::unbounded_channel();
                 let task = tokio::spawn(run_session(session, attempt, rx, events.clone(), playback.clone()));
-                current = Some((tx, task));
+                current = Some(ActiveSession { tx, task });
             }
             Command::Send(msg) => {
-                if let Some((tx, _)) = &current {
-                    let _ = tx.send(Out::Control(msg));
+                if let Some(active) = &current {
+                    let _ = active.tx.send(Out::Control(msg));
                 }
             }
             Command::Voice { seq, payload } => {
-                if let Some((tx, _)) = &current {
-                    let _ = tx.send(Out::Voice { seq, payload });
+                if let Some(active) = &current {
+                    let _ = active.tx.send(Out::Voice { seq, payload });
                 }
             }
-            Command::Disconnect => {
-                if let Some((tx, _)) = current.take() {
-                    let _ = tx.send(Out::Control(C2S::Goodbye));
-                }
+            Command::Disconnect => {}
+            Command::Shutdown(done) => {
+                let _ = done.send(());
+                break;
             }
         }
     }
@@ -195,12 +196,10 @@ async fn run_session(
     events.emit(NetEvent::Closed(id, ended));
 }
 
-/// The key under which a server's certificate is pinned: one per host and port.
 pub fn canonical_address(address: &str) -> String {
     with_default_port(address).to_ascii_lowercase()
 }
 
-/// Adds the default port when the user typed just a host name.
 pub fn with_default_port(address: &str) -> String {
     let a = address.trim();
     let has_port = match a.rsplit_once(':') {
@@ -217,7 +216,6 @@ pub fn with_default_port(address: &str) -> String {
     }
 }
 
-/// The UDP side of a session, available once the server has welcomed us.
 struct VoiceLink {
     sock: Arc<UdpSocket>,
     crypto: voice::ClientSide,
@@ -235,12 +233,10 @@ impl VoiceLink {
 
     async fn send(&mut self, msg: ToServer<'_>) {
         self.crypto.seal(msg, &mut self.buf);
-        // Voice is best effort: a failed send is just a lost frame.
         let _ = self.sock.send(&self.buf).await;
     }
 }
 
-/// Runs one connection to completion and says why it ended.
 async fn session(
     id: SessionId,
     attempt: Attempt,
@@ -279,7 +275,6 @@ async fn session(
         return Ended::Failed(format!("Connection lost: {e}"));
     }
 
-    // Reading happens in its own task: `read_frame` must not be cancelled mid-frame.
     let (in_tx, mut incoming) = mpsc::unbounded_channel::<Result<S2C, FrameError>>();
     let read_task = tokio::spawn(async move {
         let mut scratch = Vec::with_capacity(1024);
@@ -391,7 +386,23 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_address, with_default_port};
+    use super::*;
+
+    #[tokio::test]
+    async fn disconnect_waits_for_goodbye() {
+        let (tx, mut outgoing) = mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            assert!(matches!(outgoing.recv().await, Some(Out::Control(C2S::Goodbye))));
+        });
+        ActiveSession { tx, task }.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_a_stalled_session() {
+        let (tx, _outgoing) = mpsc::unbounded_channel();
+        let task = tokio::spawn(std::future::pending());
+        assert!((ActiveSession { tx, task }).disconnect().await.unwrap_err().is_cancelled());
+    }
 
     #[test]
     fn default_port() {

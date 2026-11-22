@@ -1,5 +1,3 @@
-//! Per-connection I/O: one reader loop and one writer task per TLS connection.
-
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -12,7 +10,6 @@ use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::state::{Event, Frame, OUTBOX_CAPACITY};
 
-/// For the TLS handshake and the Hello together.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn handle(stream: TcpStream, addr: SocketAddr, acceptor: TlsAcceptor, core: mpsc::Sender<Event>) {
@@ -36,7 +33,6 @@ pub async fn handle(stream: TcpStream, addr: SocketAddr, acceptor: TlsAcceptor, 
     let (outbox, rx) = mpsc::channel::<Frame>(OUTBOX_CAPACITY);
     let mut writer = tokio::spawn(write_loop(write, rx));
 
-    // Handshake: the first frame must be Hello.
     let hello = timeout_at(deadline, read_frame::<_, C2S>(&mut reader, &mut scratch)).await;
     let (protocol, nickname, password, proof) = match hello {
         Ok(Ok(C2S::Hello { protocol, nickname, password, identity })) => (protocol, nickname, password, identity),
@@ -52,7 +48,6 @@ pub async fn handle(stream: TcpStream, addr: SocketAddr, acceptor: TlsAcceptor, 
         return;
     }
     let Ok(Some(id)) = id.await else {
-        // Rejected: let the writer flush the rejection before we close.
         let _ = timeout(Duration::from_secs(2), writer).await;
         return;
     };
@@ -96,7 +91,6 @@ async fn starts_with_tls(stream: &TcpStream) -> std::io::Result<bool> {
         match stream.peek(&mut head).await? {
             0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
             1 if head[0] == tls::HANDSHAKE_RECORD => {
-                // Only half of the record header has arrived; wait for the rest.
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             _ => return Ok(head == [tls::HANDSHAKE_RECORD, 3]),
@@ -104,7 +98,6 @@ async fn starts_with_tls(stream: &TcpStream) -> std::io::Result<bool> {
     }
 }
 
-/// Tells a client too old for TLS why it can't connect, in the plain frame it understands.
 async fn reject_plaintext(mut stream: TcpStream, addr: SocketAddr) {
     let reason = format!("this server needs T7 protocol {MIN_PROTOCOL_VERSION} or newer; please update your T7");
     tracing::info!(%addr, reason, "rejected connection without TLS");
@@ -116,8 +109,6 @@ async fn reject_plaintext(mut stream: TcpStream, addr: SocketAddr) {
     }
 }
 
-/// Drains the outbox into the socket, batching everything that is already
-/// queued into a single flush (one syscall for a burst of messages).
 async fn write_loop(write: impl AsyncWrite + Unpin, mut rx: mpsc::Receiver<Frame>) {
     let mut w = BufWriter::with_capacity(16 * 1024, write);
     while let Some(frame) = rx.recv().await {

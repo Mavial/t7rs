@@ -1,21 +1,8 @@
-//! Microphone cleanup, 10 ms at a time, before encoding:
-//!
-//! 1. High-pass filter and echo cancellation (WebRTC AEC3): removes what the
-//!    speakers play from what the microphone hears.
-//! 2. `RNNoise`: a small neural network that removes background noise (fans,
-//!    hum, traffic) and reports how likely the frame is speech.
-//! 3. Adaptive gain (WebRTC AGC2): brings quiet microphones up to a normal level.
-//!
-//! The order matches WebRTC's own pipeline, with `RNNoise` in place of WebRTC's
-//! noise suppressor: in an offline comparison it removed ~20 dB more fan noise
-//! while distorting speech less. The whole chain costs ~0.1 ms per 10 ms on a desktop CPU.
-
 use nnnoiseless::DenoiseState;
 use serde::{Deserialize, Serialize};
 use sonora::config::{AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter};
 use sonora::{AudioProcessing, Config, StreamConfig};
 
-/// Samples per processing frame: 10 ms at 48 kHz.
 pub const FRAME: usize = 480;
 
 /// `RNNoise` works on 16-bit-scaled samples.
@@ -37,7 +24,6 @@ impl Default for Cleanup {
 
 pub struct Processor {
     cleanup: Cleanup,
-    /// High-pass filter, plus echo cancellation when enabled.
     front: AudioProcessing,
     denoise: Box<DenoiseState<'static>>,
     gain: Option<AudioProcessing>,
@@ -71,23 +57,18 @@ impl Processor {
         self.cleanup
     }
 
-    /// Feeds 10 ms of what the speakers are playing (the echo reference).
     pub fn render(&mut self, frame: &[f32; FRAME]) {
         if self.cleanup.echo_cancellation {
-            let _ = self.front.process_render_f32(&[frame], &mut [&mut self.scratch]);
+            let result = self.front.process_render_f32(&[frame], &mut [&mut self.scratch]);
+            debug_assert!(result.is_ok(), "invalid echo reference format: {result:?}");
         }
     }
 
-    /// Cleans 10 ms of microphone audio in place. Returns the probability
-    /// (0..1) that the frame contains speech.
     pub fn capture(&mut self, frame: &mut [f32; FRAME]) -> f32 {
-        // Fixed 10 ms mono frames match the configured stream, so processing
-        // can't fail; on error `frame` would simply stay unprocessed.
         self.scratch.copy_from_slice(frame);
-        let _ = self.front.process_capture_f32(&[&self.scratch], &mut [frame]);
+        let result = self.front.process_capture_f32(&[&self.scratch], &mut [frame]);
+        debug_assert!(result.is_ok(), "invalid capture format: {result:?}");
 
-        // RNNoise always runs: its speech probability drives voice activation
-        // even when its denoised output isn't used.
         for (s, v) in self.scratch.iter_mut().zip(frame.iter()) {
             *s = v * I16_SCALE;
         }
@@ -101,7 +82,8 @@ impl Processor {
 
         if let Some(gain) = &mut self.gain {
             self.scratch.copy_from_slice(frame);
-            let _ = gain.process_capture_f32(&[&self.scratch], &mut [frame]);
+            let result = gain.process_capture_f32(&[&self.scratch], &mut [frame]);
+            debug_assert!(result.is_ok(), "invalid gain control format: {result:?}");
         }
         speech
     }
@@ -124,7 +106,6 @@ mod tests {
         10.0 * e.max(1e-12).log10()
     }
 
-    /// Deterministic white noise in -1..1.
     fn white(n: usize, seed: u64) -> Vec<f32> {
         let mut s = seed;
         (0..n)
@@ -135,7 +116,6 @@ mod tests {
             .collect()
     }
 
-    /// Fan-like noise: most energy low and mid, like real room noise.
     fn fan(n: usize, seed: u64) -> Vec<f32> {
         let (mut a, mut b) = (0f32, 0f32);
         white(n, seed)
@@ -148,8 +128,6 @@ mod tests {
             .collect()
     }
 
-    /// Runs `mic` through a processor. Like the real app, the echo reference is
-    /// always fed: `speakers`, or silence.
     fn run(p: &mut Processor, mic: &[f32], speakers: Option<&[f32]>) -> (Vec<f32>, usize) {
         let mut out = Vec::with_capacity(mic.len());
         let mut speech_frames = 0;
@@ -167,14 +145,13 @@ mod tests {
 
     #[test]
     fn removes_speaker_echo() {
-        // The far end plays noise; the mic hears it 60 ms later at -6 dB.
         let n = 48_000 * 8;
         let far: Vec<f32> = white(n, 1).iter().map(|v| v * 0.1).collect();
         let delay = 48 * 60;
         let mic: Vec<f32> = (0..n).map(|i| if i >= delay { far[i - delay] * 0.5 } else { 0.0 }).collect();
         let only_aec = Cleanup { noise_suppression: false, echo_cancellation: true, auto_gain: false };
         let (out, _) = run(&mut Processor::new(only_aec), &mic, Some(&far));
-        let tail = 48_000 * 4..n; // after the canceller converged
+        let tail = 48_000 * 4..n;
         let removed = rms_db(&mic[tail.clone()]) - rms_db(&out[tail]);
         assert!(removed > 20.0, "echo only reduced by {removed:.1} dB");
     }

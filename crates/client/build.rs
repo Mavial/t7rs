@@ -1,9 +1,5 @@
-//! Embeds the T7 mark as the Windows executable's icon, so Explorer, shortcuts
-//! and the taskbar show it before the window even opens.
-
 use std::path::PathBuf;
 
-#[allow(dead_code)]
 mod mark {
     include!("src/brand_mark.rs");
 }
@@ -21,7 +17,6 @@ fn main() {
     embed_resource::compile(&rc, embed_resource::NONE).manifest_optional().unwrap();
 }
 
-/// A .ico holding one 32-bit BMP image per size.
 fn ico_file(sizes: &[u32]) -> Vec<u8> {
     let images: Vec<Vec<u8>> = sizes.iter().map(|&s| bmp_image(s)).collect();
     let mut f = Vec::new();

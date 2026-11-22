@@ -153,8 +153,6 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(ring::default_provider())
 }
 
-/// Checks the certificate against the pin and the handshake signatures
-/// against the certificate's key.
 #[derive(Debug)]
 struct PinnedCert {
     pinned: Option<Fingerprint>,
@@ -216,7 +214,6 @@ mod tests {
         (pair.cert.der().to_vec(), pair.signing_key.serialize_der())
     }
 
-    /// Handshakes over an in-memory pipe; returns both exporters and the fingerprint seen.
     async fn handshake(
         acceptor: TlsAcceptor,
         pinned: Option<Fingerprint>,
@@ -270,8 +267,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_pinned_certificate_without_its_key_is_refused() {
-        // An impostor replays the real server's certificate but has to sign
-        // the handshake with a key of its own.
         let real = new_cert();
         let impostor_key =
             provider().key_provider.load_private_key(PrivatePkcs8KeyDer::from(new_cert().1).into()).unwrap();

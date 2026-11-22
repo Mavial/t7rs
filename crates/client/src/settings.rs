@@ -1,5 +1,3 @@
-//! Client settings, stored as TOML in the user's config directory.
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -16,18 +14,12 @@ pub struct Settings {
     pub status: ClientStatus,
     pub audio: AudioSettings,
     pub recent: Vec<Recent>,
-    /// Per-person volume by nickname; only values other than 100% are kept.
     pub user_volumes: std::collections::BTreeMap<String, f32>,
-    /// Admin token per server address, sent automatically on connect.
     pub admin_tokens: std::collections::BTreeMap<String, String>,
-    /// Certificate fingerprint per `net::canonical_address`, pinned on first connect.
     pub server_certs: std::collections::BTreeMap<String, Fingerprint>,
-    /// Who this user is on every server: bans and moderator rights follow it.
-    /// Made on the first connect.
     pub identity_key: Option<IdentityKey>,
 }
 
-/// A new identity, from the system's randomness.
 pub fn new_identity_key() -> IdentityKey {
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed).expect("no system randomness");
@@ -40,14 +32,12 @@ pub struct Recent {
     pub server_name: String,
 }
 
-/// Remembers what is on disk so `save` only writes when something changed.
 pub struct Store {
     path: Option<PathBuf>,
     saved: Settings,
 }
 
 impl Store {
-    /// `profile` selects a separate settings file, e.g. to run two clients on one machine.
     pub fn open(profile: Option<&str>) -> (Self, Settings) {
         let file = match profile {
             Some(p) => format!("settings-{p}.toml"),
@@ -78,7 +68,6 @@ impl Store {
                 std::fs::create_dir_all(dir)?;
             }
             let text = toml::to_string(settings).map_err(std::io::Error::other)?;
-            // Write-then-rename, so a crash mid-write never leaves a truncated file.
             let tmp = path.with_extension("toml.tmp");
             std::fs::write(&tmp, text)?;
             std::fs::rename(&tmp, path)
@@ -90,7 +79,6 @@ impl Store {
     }
 }
 
-/// T7's folder in the user's config directory.
 pub fn data_dir() -> Option<PathBuf> {
     config_dir().map(|d| d.join("T7"))
 }

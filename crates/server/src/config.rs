@@ -129,7 +129,6 @@ mod tests {
         let squad = all.iter().find(|c| c.name == "Squad 2").unwrap();
         assert_eq!(channels.get(squad.parent.unwrap()).unwrap().name, "Gaming");
         assert_eq!(squad.max_clients, Some(5));
-        // Saving and reloading keeps the tree.
         assert_eq!(Channels::from_config(&channels.to_config()).to_config(), channels.to_config());
     }
 }

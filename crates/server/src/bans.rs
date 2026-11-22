@@ -1,13 +1,9 @@
-//! The ban list and its saved format. Pure state, no networking, and no
-//! clock: callers pass the time, in Unix seconds.
-
 use std::net::IpAddr;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use t7_proto::{BanId, BanInfo, Identity};
 
-/// `bans.toml`.
 #[derive(Default, Serialize, Deserialize)]
 struct BansFile {
     /// The id the next ban gets. Files from before it was saved lack it.
@@ -17,20 +13,17 @@ struct BansFile {
     bans: Vec<BanInfo>,
 }
 
-/// Who is banned, as the admin asked for it.
 pub struct NewBan {
     pub identity: Identity,
     pub ip: Option<IpAddr>,
     pub nickname: String,
     pub reason: String,
     pub banned_by: String,
-    /// `None`: for good.
     pub duration_secs: Option<u64>,
 }
 
 pub struct Bans {
     list: Vec<BanInfo>,
-    /// Ids only count up, so a stale ban list can't lift someone else's ban.
     next_id: BanId,
 }
 
@@ -44,14 +37,12 @@ impl Bans {
     pub fn load(path: &Path, now: u64) -> std::io::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let file: BansFile = toml::from_str(&text).map_err(std::io::Error::other)?;
-        // Counted before pruning: an expired ban's id stays used.
         let highest = file.bans.iter().map(|b| b.id).max().unwrap_or(0);
         let mut bans = Self { next_id: file.next_id.max(highest + 1), list: file.bans };
         bans.prune(now);
         Ok(bans)
     }
 
-    /// Write-then-rename, so a crash never truncates the file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let header = "# Banned identities and IP addresses, kept up to date by the server as\n\
                       # admins ban and unban people in T7. Edit it only while the server is stopped.\n\n";
@@ -83,12 +74,10 @@ impl Bans {
         Some(self.list.remove(at))
     }
 
-    /// The ban that keeps this identity, or anyone at this address, out right now.
     pub fn find(&self, identity: Identity, ip: IpAddr, now: u64) -> Option<&BanInfo> {
         self.list.iter().find(|b| active(b, now) && covers(b, identity, ip))
     }
 
-    /// The bans still in force. Expired ones are dropped; returns whether any were.
     pub fn prune(&mut self, now: u64) -> bool {
         let before = self.list.len();
         self.list.retain(|b| active(b, now));
@@ -104,12 +93,10 @@ fn active(ban: &BanInfo, now: u64) -> bool {
     ban.expires_unix.is_none_or(|end| now < end)
 }
 
-/// Whether the ban is on this identity, or on everyone at this address.
 pub fn covers(ban: &BanInfo, identity: Identity, ip: IpAddr) -> bool {
     ban.identity == identity || ban.ip == Some(ip.to_canonical())
 }
 
-/// Rounded down to the largest whole unit: "3 days", "1 hour", "less than a minute".
 pub fn describe_duration(secs: u64) -> String {
     let (n, unit) = match secs {
         s if s >= 86_400 => (s / 86_400, "day"),
@@ -190,13 +177,11 @@ mod tests {
         let after_unban = bans.add(ban(BOB, None, Some(10)), 100).id;
         assert!(after_unban > newest, "the newest ban's id came back after an unban");
 
-        // The newest ban expires and is pruned on load; a restart keeps counting.
         bans.save(&file).unwrap();
         let mut back = Bans::load(&file, 200).unwrap();
         assert_eq!(back.list().len(), 1);
         assert!(back.add(ban(BOB, None, None), 200).id > after_unban, "an id came back after a restart");
 
-        // A file from before the next id was saved continues after its highest id, expired or not.
         let saved = std::fs::read_to_string(&file).unwrap();
         let old: String = saved.lines().filter(|l| !l.starts_with("next_id")).flat_map(|l| [l, "\n"]).collect();
         assert_ne!(old, saved, "the next id is saved");

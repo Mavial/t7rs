@@ -28,10 +28,8 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub const FRAME_SAMPLES: usize = 960;
 /// Keeps datagrams under typical path MTUs.
 pub const MAX_DATAGRAM: usize = 1200;
-/// Both directions spend 33 bytes around the payload: a 13- or 9-byte header,
-/// 4 or 8 sealed bytes before the payload, and the 16-byte tag.
-pub const MAX_OPUS_PAYLOAD: usize = MAX_DATAGRAM - CLIENT_HEADER - 4 - TAG_LEN;
-const _: () = assert!(SERVER_HEADER + 8 + MAX_OPUS_PAYLOAD + TAG_LEN <= MAX_DATAGRAM);
+pub const MAX_OPUS_PAYLOAD: usize = MAX_DATAGRAM - CLIENT_HEADER - CLIENT_AUDIO_PREFIX - TAG_LEN;
+const _: () = assert!(SERVER_HEADER + SERVER_AUDIO_PREFIX + MAX_OPUS_PAYLOAD + TAG_LEN <= MAX_DATAGRAM);
 
 /// The secret for one client's voice datagrams, sent in `Welcome` inside TLS.
 pub type VoiceKey = [u8; 32];
@@ -42,6 +40,8 @@ const PONG: u8 = 0x81;
 const AUDIO_OUT: u8 = 0x82;
 const CLIENT_HEADER: usize = 1 + 4 + 8;
 const SERVER_HEADER: usize = 1 + 8;
+const CLIENT_AUDIO_PREFIX: usize = size_of::<u32>();
+const SERVER_AUDIO_PREFIX: usize = size_of::<ClientId>() + size_of::<u32>();
 const TAG_LEN: usize = 16;
 const TO_SERVER: u8 = 0;
 const TO_CLIENT: u8 = 1;
@@ -99,9 +99,10 @@ impl ClientSide {
         if kind == PONG {
             return Some(ToClient::Pong { nonce: u64::from_le_bytes(body.try_into().ok()?) });
         }
-        let (head, payload) = body.split_at_checked(8)?;
-        let from = u32::from_le_bytes(head[..4].try_into().ok()?);
-        let seq = u32::from_le_bytes(head[4..].try_into().ok()?);
+        let (head, payload) = body.split_at_checked(SERVER_AUDIO_PREFIX)?;
+        let (from, seq) = head.split_at(size_of::<ClientId>());
+        let from = ClientId::from_le_bytes(from.try_into().ok()?);
+        let seq = u32::from_le_bytes(seq.try_into().ok()?);
         valid_payload(payload).then_some(ToClient::Audio { from, seq, payload })
     }
 }
@@ -147,7 +148,7 @@ impl ServerSide {
         if kind == PING {
             return Some(ToServer::Ping { nonce: u64::from_le_bytes(body.try_into().ok()?) });
         }
-        let (seq, payload) = body.split_at_checked(4)?;
+        let (seq, payload) = body.split_at_checked(CLIENT_AUDIO_PREFIX)?;
         let seq = u32::from_le_bytes(seq.try_into().ok()?);
         valid_payload(payload).then_some(ToServer::Audio { seq, payload })
     }
@@ -162,7 +163,6 @@ fn valid_payload(payload: &[u8]) -> bool {
     !payload.is_empty() && payload.len() <= MAX_OPUS_PAYLOAD
 }
 
-/// Key, send counter and replay window of one end of a voice link.
 struct Link {
     cipher: ChaCha20Poly1305,
     sent: u64,
@@ -179,7 +179,6 @@ impl Link {
         self.sent - 1
     }
 
-    /// Encrypts `out[header..]` in place and appends the tag; `out[..header]` is the associated data.
     fn seal(&self, direction: u8, counter: u64, header: usize, out: &mut Vec<u8>) {
         let (aad, body) = out.split_at_mut(header);
         let tag = self
@@ -189,7 +188,6 @@ impl Link {
         out.extend_from_slice(&tag);
     }
 
-    /// Decrypts the body in place if it authenticates and its counter is new.
     fn open<'a>(&mut self, direction: u8, counter: u64, header: usize, datagram: &'a mut [u8]) -> Option<&'a [u8]> {
         if !self.received.is_new(counter) {
             return None;
@@ -211,11 +209,9 @@ fn nonce(direction: u8, counter: u64) -> Nonce {
     nonce.into()
 }
 
-/// Which of the 64 newest counters have arrived. Older ones count as replays.
 #[derive(Default)]
 struct ReplayWindow {
     newest: u64,
-    /// Bit `i` is set once counter `newest - i` has arrived.
     seen: u64,
 }
 
@@ -227,7 +223,6 @@ impl ReplayWindow {
         }
     }
 
-    /// Records a counter that [`Self::is_new`] accepted.
     fn insert(&mut self, counter: u64) {
         if counter > self.newest {
             let ahead = counter - self.newest;
@@ -245,7 +240,6 @@ mod tests {
 
     const KEY: VoiceKey = [7; 32];
 
-    /// `n` pings sealed by a client, in sending order (counters 0, 1, ...).
     fn pings(n: u64) -> Vec<Vec<u8>> {
         let mut client = ClientSide::new(3, &KEY);
         (0..n)
@@ -257,7 +251,6 @@ mod tests {
             .collect()
     }
 
-    /// Delivers `datagrams[i]` for each `i` in order; returns which ones opened.
     fn deliver(server: &mut ServerSide, datagrams: &[Vec<u8>], order: &[usize]) -> Vec<bool> {
         order.iter().map(|&i| server.open(&mut datagrams[i].clone()).is_some()).collect()
     }
@@ -295,7 +288,6 @@ mod tests {
             tampered[byte] ^= 1;
             assert_eq!(ServerSide::new(&KEY).open(&mut tampered), None, "flipped byte {byte}");
         }
-        // A server-to-client datagram is not accepted by the server, nor the reverse.
         let mut pong = Vec::new();
         ServerSide::new(&KEY).seal(ToClient::Pong { nonce: 1 }, &mut pong);
         assert_eq!(ServerSide::new(&KEY).open(&mut pong.clone()), None);
@@ -334,7 +326,6 @@ mod tests {
     fn window_covers_the_64_newest_counters() {
         let d = pings(70);
         let mut server = ServerSide::new(&KEY);
-        // 69 is the newest: 6 is 63 behind and still accepted, 5 is 64 behind and dropped.
         assert_eq!(deliver(&mut server, &d, &[69, 6, 5, 6, 68]), [true, true, false, false, true]);
     }
 

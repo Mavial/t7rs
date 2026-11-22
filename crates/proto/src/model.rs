@@ -1,6 +1,5 @@
 //! A client-side mirror of the server state, kept in sync by applying
-//! [`S2C`] events. Lives in the protocol crate so the semantics of each
-//! event are defined in exactly one place.
+//! [`S2C`] events.
 
 use std::collections::HashMap;
 

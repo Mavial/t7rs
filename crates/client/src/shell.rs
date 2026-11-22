@@ -1,11 +1,3 @@
-//! The native window: winit for the window and input, egui for the UI, and a
-//! CPU rasterizer drawing into a plain pixel buffer (softbuffer).
-//!
-//! No GPU driver is loaded. On a typical desktop the OpenGL driver alone
-//! commits ~65 MB, several times what this whole client needs, while drawing
-//! a mostly static UI on the CPU costs a few milliseconds per repaint, and
-//! the UI only repaints on input or network events.
-
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -20,7 +12,6 @@ use winit::window::{Theme, Window, WindowId};
 use crate::app::App;
 use crate::settings::Store;
 
-/// Sent by egui, from any thread, when it wants a repaint after the given delay.
 struct RepaintAfter(Duration);
 
 struct Gfx {
@@ -39,8 +30,6 @@ struct Shell {
     title: String,
 }
 
-/// Runs the UI until the window closes. `make_app` runs after the repaint
-/// wakeup is wired, so nothing the app starts can miss a repaint.
 pub fn run(
     ctx: egui::Context,
     store: Store,

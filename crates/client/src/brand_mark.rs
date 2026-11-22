@@ -1,8 +1,3 @@
-// The T7 mark as data, shared by the client (`brand.rs`) and `build.rs`,
-// which `include!` it. Plain std only: build.rs compiles it on its own.
-// Keep in sync with assets/icon.svg.
-
-/// An axis-aligned block on the mark's 64-unit grid, painted in order.
 pub struct Block {
     pub x: u8,
     pub y: u8,
@@ -17,15 +12,12 @@ const fn b(x: u8, y: u8, w: u8, h: u8, rgb: u32) -> Block {
     Block { x, y, w, h, rgb }
 }
 
-/// A "T7" monogram on a stepped tile, after assets/icon.svg.
 pub const MARK: &[Block] = &[
-    // Tile: border, then fill.
     b(8, 0, 48, 64, 0x3a3a3a),
     b(4, 4, 56, 56, 0x3a3a3a),
     b(0, 8, 64, 48, 0x3a3a3a),
     b(8, 4, 48, 56, 0x161616),
     b(4, 8, 56, 48, 0x161616),
-    // T in blue, 7 in white.
     b(8, 16, 24, 8, 0x2580c3),
     b(16, 24, 8, 24, 0x2580c3),
     b(36, 16, 20, 8, 0xededed),
@@ -34,7 +26,6 @@ pub const MARK: &[Block] = &[
     b(40, 40, 8, 8, 0xededed),
 ];
 
-/// Rasterizes the mark to `size`×`size` straight RGBA, 8×8 samples per pixel.
 pub fn rasterize(size: u32) -> Vec<u8> {
     const SS: u32 = 8;
     let mut out = Vec::with_capacity((size * size * 4) as usize);
@@ -43,7 +34,6 @@ pub fn rasterize(size: u32) -> Vec<u8> {
             let (mut r, mut g, mut bl, mut a) = (0u32, 0u32, 0u32, 0u32);
             for sy in 0..SS {
                 for sx in 0..SS {
-                    // Sample point in grid units, scaled by size*SS to stay integral.
                     let gx = (px * SS + sx) * 2 + 1;
                     let gy = (py * SS + sy) * 2 + 1;
                     let scale = size * SS * 2;
@@ -61,7 +51,6 @@ pub fn rasterize(size: u32) -> Vec<u8> {
                     }
                 }
             }
-            // Color averaged over covered samples; alpha is the coverage.
             let avg = |sum: u32| sum.checked_div(a).unwrap_or(0) as u8;
             out.extend_from_slice(&[avg(r), avg(g), avg(bl), (a * 255 / (SS * SS)) as u8]);
         }

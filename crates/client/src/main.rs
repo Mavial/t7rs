@@ -20,7 +20,6 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
         .init();
 
-    // Separate settings per profile, e.g. to run two clients on one machine.
     let profile = std::env::var("T7_PROFILE").ok().filter(|p| !p.trim().is_empty());
     let (store, settings) = settings::Store::open(profile.as_deref().map(str::trim));
     let launch = parse_args();
