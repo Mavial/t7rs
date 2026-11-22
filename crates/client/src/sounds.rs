@@ -239,7 +239,7 @@ pub fn installed_packs() -> Vec<(String, PathBuf)> {
                 .is_ok_and(|ini| ini.contains("play(") || !ini.contains("say("))
         })
         .map(|dir| {
-            let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = dir.file_name().map_or_default(|n| n.to_string_lossy().into_owned());
             (format!("Installed · {name}"), dir)
         })
         .collect();
