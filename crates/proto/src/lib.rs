@@ -1,14 +1,16 @@
 //! Wire protocol shared by the T7 server and client.
 //!
-//! Every message travels over TCP as a frame: a little-endian `u32` payload
-//! length followed by a [postcard]-encoded message. Postcard is a compact
-//! varint-based binary format, so typical control messages are only a few
-//! bytes on the wire and (de)serialisation is extremely cheap.
+//! Every message travels over TLS 1.3 on TCP (see [`tls`]) as a frame: a
+//! little-endian `u32` payload length followed by a [postcard]-encoded
+//! message. Postcard is a compact varint-based binary format, so typical
+//! control messages are only a few bytes on the wire and (de)serialisation is
+//! extremely cheap.
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub mod model;
+pub mod tls;
 pub mod update;
 pub mod voice;
 
@@ -243,12 +245,14 @@ where
     postcard::from_bytes(scratch).map_err(FrameError::Decode)
 }
 
+/// Writes one frame and flushes it, so it doesn't wait in a TLS or write buffer.
 pub async fn write_frame<W, T>(writer: &mut W, msg: &T) -> Result<(), FrameError>
 where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
     writer.write_all(&encode_frame(msg)).await?;
+    writer.flush().await?;
     Ok(())
 }
 
