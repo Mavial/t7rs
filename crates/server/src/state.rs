@@ -72,11 +72,19 @@ struct Client {
     permissions: Permissions,
     /// Where it was last told each person it sees is, itself included.
     known: HashMap<ClientId, ChannelId>,
+    /// When it came into its channel.
+    arrived: Instant,
 }
 
 impl Client {
     fn subject(&self) -> Subject {
         Subject { client: self.info.id, identity: self.info.identity }
+    }
+
+    /// Puts it in `channel`, as of now.
+    fn place(&mut self, channel: ChannelId) {
+        self.info.channel = channel;
+        self.arrived = Instant::now();
     }
 }
 
@@ -303,6 +311,7 @@ impl Server {
                 voice_bucket: TokenBucket::voice(),
                 permissions,
                 known,
+                arrived: Instant::now(),
             },
         );
         if renamed {
@@ -526,11 +535,11 @@ impl Server {
             return self.error(id, "channel is full");
         }
         self.move_to(id, channel);
-        self.remove_abandoned_channels();
+        self.tidy_rooms();
     }
 
     fn move_to(&mut self, id: ClientId, channel: ChannelId) {
-        self.clients.get_mut(&id).expect("exists").info.channel = channel;
+        self.clients.get_mut(&id).expect("exists").place(channel);
         self.sync_about(id);
     }
 
@@ -605,7 +614,7 @@ impl Server {
         let default = self.channels.default_id();
         let mut evicted = Vec::new();
         for c in self.clients.values_mut().filter(|c| !c.permissions.may_in(c.info.channel, Perm::View)) {
-            c.info.channel = default;
+            c.place(default);
             evicted.push(c.info.id);
         }
 
@@ -626,7 +635,7 @@ impl Server {
             self.broadcast(&S2C::ClientRole { id, role }, |c| c.known.contains_key(&id));
         }
         if !evicted.is_empty() {
-            self.remove_abandoned_channels();
+            self.tidy_rooms();
         }
     }
 
@@ -677,7 +686,7 @@ impl Server {
                 if kind == ChannelKind::Voice && self.clients[&id].permissions.may_in(channel, Perm::View) {
                     self.move_to(id, channel);
                 }
-                self.remove_abandoned_channels();
+                self.tidy_rooms();
             }
             Err(e) => self.error(id, &e.message()),
         }
@@ -716,6 +725,7 @@ impl Server {
             self.move_to(client, default);
         }
         self.channels_changed(permanent);
+        self.tidy_rooms();
     }
 
     fn claim(&mut self, id: ClientId, token: &str) {
@@ -786,7 +796,7 @@ impl Server {
             let t = &self.clients[&target];
             let landing = self.landing_channel(&t.permissions, Some(t.info.channel));
             self.move_to(target, landing);
-            self.remove_abandoned_channels();
+            self.tidy_rooms();
         }
     }
 
@@ -903,17 +913,32 @@ impl Server {
         }
     }
 
-    /// Temporary channels disappear once nobody is in them (or below them).
-    fn remove_abandoned_channels(&mut self) {
+    /// After people moved or left: temporary channels disappear once nobody
+    /// is in them (or below them), and one whose owner left passes to
+    /// whoever has been in it longest.
+    fn tidy_rooms(&mut self) {
         let occupied: HashSet<ChannelId> = self.clients.values().map(|c| c.info.channel).collect();
         let abandoned = self.channels.abandoned_temporaries(&occupied);
-        if abandoned.is_empty() {
-            return;
-        }
-        for channel in abandoned {
+        for &channel in &abandoned {
             let _ = self.channels.delete(channel);
         }
-        self.channels_changed(false);
+        let mut handed = false;
+        for room in self.channels.temporaries() {
+            let owner = self.channels.get(room).and_then(|c| c.owner);
+            let inside = |c: &&Client| c.info.channel == room;
+            if owner.is_some_and(|o| self.clients.get(&o).is_some_and(|c| inside(&c))) {
+                continue;
+            }
+            let next = self.clients.values().filter(inside).min_by_key(|c| (c.arrived, c.info.id)).map(|c| c.info.id);
+            if next != owner {
+                tracing::info!(room, ?owner, ?next, "room handed over");
+                self.channels.set_owner(room, next);
+                handed = true;
+            }
+        }
+        if handed || !abandoned.is_empty() {
+            self.channels_changed(false);
+        }
     }
 
     fn poke(&mut self, id: ClientId, target: ClientId, message: String) {
@@ -985,7 +1010,7 @@ impl Server {
             for c in self.clients.values_mut() {
                 c.known.remove(&id);
             }
-            self.remove_abandoned_channels();
+            self.tidy_rooms();
         }
     }
 

@@ -1412,3 +1412,43 @@ async fn listed_moderators_rename_their_channels_and_do_nothing_more() {
     holder.send(C2S::EditChannel { id: gaming, settings: settings("Holder's") }).await;
     assert_eq!(error(&mut holder).await, "you can't edit this channel");
 }
+
+/// Who owns `channel` as of the next channel list that says so.
+async fn owned_by(c: &mut TestClient, channel: ChannelId, owner: Option<ClientId>) {
+    c.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|ch| ch.id == channel && ch.owner == owner))).await;
+}
+
+#[tokio::test]
+async fn a_room_passes_to_whoever_has_been_in_it_longest() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut a, wa) = TestClient::connect(addr, "a", None).await;
+    let (mut b, wb) = TestClient::connect(addr, "b", None).await;
+    let (mut c, wc) = TestClient::connect(addr, "c", None).await;
+    let (a_id, b_id, c_id) = (welcomed_id(&wa), welcomed_id(&wb), welcomed_id(&wc));
+    let S2C::Welcome { channels, .. } = &wa else { unreachable!() };
+    let lobby = id_of(channels, "Lobby");
+    let raid =
+        C2S::CreateChannel { parent: None, settings: settings("Raid"), temporary: true, kind: ChannelKind::Voice };
+    a.send(raid).await;
+    let raid = id_of(&a.channels().await, "Raid");
+    for (t, id) in [(&mut b, b_id), (&mut c, c_id)] {
+        t.send(C2S::JoinChannel { channel: raid, password: None }).await;
+        a.until(|m| *m == S2C::ClientMoved { id, channel: raid }).await;
+    }
+
+    // b came in before c, so b gets it, and with it the room's powers.
+    a.send(C2S::JoinChannel { channel: lobby, password: None }).await;
+    owned_by(&mut c, raid, Some(b_id)).await;
+    let powers = |m: &S2C| matches!(m, S2C::Permissions(p) if p.may_in(raid, Perm::Kick));
+    let S2C::Permissions(p) = b.until(powers).await else { unreachable!() };
+    assert!(p.may_in(raid, Perm::ManageChannels) && !p.may_in(lobby, Perm::Kick));
+    // Coming back doesn't take it back.
+    a.send(C2S::JoinChannel { channel: raid, password: None }).await;
+    c.until(|m| *m == S2C::ClientMoved { id: a_id, channel: raid }).await;
+    let heard = c.drain().await;
+    assert!(heard.iter().all(|m| !matches!(m, S2C::Channels(_))), "{heard:?}");
+
+    // Disconnecting is leaving too: c has now been there longest.
+    drop(b);
+    owned_by(&mut a, raid, Some(c_id)).await;
+}

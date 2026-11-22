@@ -24,6 +24,7 @@ pub enum Icon {
     Check,
     Cross,
     Dash,
+    Crown,
 }
 
 struct Pen<'a> {
@@ -145,6 +146,8 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line((17.5, 6.5), (6.5, 17.5));
         }
         Icon::Dash => pen.line((6.5, 12.0), (17.5, 12.0)),
+        Icon::Crown => pen
+            .poly(&[(3.0, 18.5), (3.0, 7.5), (8.0, 12.0), (12.0, 5.0), (16.0, 12.0), (21.0, 7.5), (21.0, 18.5)], true),
         Icon::Moon => {
             // Crescent: big circle arc from (21,12) round to (12,3), back along a smaller arc.
             let mut pts = Pen::arc_points(12.0, 12.0, 9.0, 0.0, 270.0);

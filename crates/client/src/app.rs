@@ -1494,7 +1494,9 @@ impl App {
                             } else {
                                 None
                             };
-                            if let Some((icon, color)) = badge {
+                            let owns_room = ch.temporary && ch.owner == Some(c.id);
+                            let room_badge = owns_room.then_some((Icon::Crown, theme::AMBER));
+                            for (icon, color) in badge.into_iter().chain(room_badge) {
                                 let r = egui::Rect::from_center_size(
                                     egui::pos2(name_end + 11.0, rect.center().y),
                                     vec2(12.0, 12.0),
@@ -1537,10 +1539,9 @@ impl App {
                                 }
                             }
 
-                            let resp = match &c.role {
-                                Some(role) => resp.on_hover_text(role),
-                                None => resp,
-                            };
+                            let titles: Vec<&str> =
+                                c.role.as_deref().into_iter().chain(owns_room.then_some("Owns this room")).collect();
+                            let resp = if titles.is_empty() { resp } else { resp.on_hover_text(titles.join("\n")) };
                             if is_me {
                                 if resp.drag_started() {
                                     resp.dnd_set_drag_payload(DragSelf);

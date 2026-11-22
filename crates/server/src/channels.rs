@@ -436,6 +436,18 @@ impl Channels {
         out
     }
 
+    /// Every temporary channel.
+    pub fn temporaries(&self) -> Vec<ChannelId> {
+        self.map.values().filter(|c| c.info.temporary).map(|c| c.info.id).collect()
+    }
+
+    /// Hands a temporary channel to someone else, or to nobody.
+    pub fn set_owner(&mut self, id: ChannelId, owner: Option<ClientId>) {
+        if let Some(c) = self.map.get_mut(&id).filter(|c| c.info.temporary) {
+            c.info.owner = owner;
+        }
+    }
+
     /// Top-most temporary channels with nobody in them or below them.
     pub fn abandoned_temporaries(&self, occupied: &HashSet<ChannelId>) -> Vec<ChannelId> {
         self.map

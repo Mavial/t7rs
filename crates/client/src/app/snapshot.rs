@@ -46,6 +46,7 @@ fn view() -> ServerView {
     duo.has_password = true;
     let mut afk = channel(5, None, "AFK", 2);
     afk.temporary = true;
+    afk.owner = Some(7);
     let music = channel(6, None, "Music", 3);
     // Only moderators see it.
     let mut staff = channel(7, None, "Staff", 4);
