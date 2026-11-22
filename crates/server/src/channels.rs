@@ -6,8 +6,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use t7_proto::perms::ChannelTree;
 use t7_proto::{
-    ChannelId, ChannelInfo, ChannelSettings, ClientId, MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN,
+    ChannelId, ChannelInfo, ChannelSettings, ClientId, Identity, MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN,
     MAX_CHANNEL_TOPIC_LEN, MAX_CHANNELS, PasswordChange,
 };
 
@@ -74,7 +75,8 @@ impl Channels {
             let lobby = ChannelConfig { name: "Lobby".into(), ..Default::default() };
             channels.add_config(&[lobby], None, &mut default);
         }
-        channels.default = default.unwrap_or_else(|| *channels.map.keys().next().expect("at least one"));
+        let default = default.unwrap_or_else(|| *channels.map.keys().next().expect("at least one"));
+        channels.set_default(default).expect("a permanent channel");
         channels
     }
 
@@ -94,6 +96,7 @@ impl Channels {
                 has_password: password.is_some(),
                 default: false,
                 creator: None,
+                moderators: c.moderators.clone(),
             };
             self.map.insert(id, Channel { info, password });
             if c.default && default.is_none() {
@@ -137,17 +140,15 @@ impl Channels {
             topic: c.info.topic.clone(),
             max_clients: c.info.max_clients,
             password: c.password.clone(),
-            default: id == self.default,
+            default: c.info.default,
+            moderators: c.info.moderators.clone(),
             children: self.children_of(Some(id)).into_iter().filter_map(|k| self.config_of(k)).collect(),
         })
     }
 
     /// Everything clients need to draw the tree.
     pub fn snapshot(&self) -> Vec<ChannelInfo> {
-        self.map
-            .values()
-            .map(|c| ChannelInfo { default: c.info.id == self.default, ..c.info.clone() })
-            .collect()
+        self.map.values().map(|c| c.info.clone()).collect()
     }
 
     pub fn default_id(&self) -> ChannelId {
@@ -213,6 +214,7 @@ impl Channels {
             has_password: password.is_some(),
             default: false,
             creator: temporary.then_some(creator),
+            moderators: Vec::new(),
         };
         self.map.insert(id, Channel { info, password });
         Ok(id)
@@ -289,8 +291,24 @@ impl Channels {
         if c.info.temporary {
             return Err(ChannelError::DefaultChannel);
         }
+        if let Some(old) = self.map.get_mut(&self.default) {
+            old.info.default = false;
+        }
+        self.map.get_mut(&id).expect("checked").info.default = true;
         self.default = id;
         Ok(())
+    }
+
+    /// Adds or removes a moderator. Returns whether anything changed.
+    pub fn set_moderator(&mut self, id: ChannelId, identity: Identity, moderator: bool) -> Result<bool, ChannelError> {
+        let list = &mut self.map.get_mut(&id).ok_or(ChannelError::NotFound)?.info.moderators;
+        let had = list.contains(&identity);
+        match (had, moderator) {
+            (false, true) => list.push(identity),
+            (true, false) => list.retain(|m| *m != identity),
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 
     /// `id` and all channels below it.
@@ -376,6 +394,12 @@ impl Channels {
     }
 }
 
+impl ChannelTree for Channels {
+    fn channel(&self, id: ChannelId) -> Option<&ChannelInfo> {
+        self.get(id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +431,37 @@ mod tests {
         assert!(ch.get(1).unwrap().has_password);
         assert_eq!(ch.to_config(), list);
         assert_eq!(names(&Channels::from_config(&[])), ["Lobby"]);
+    }
+
+    #[test]
+    fn moderators_are_kept_with_their_channel() {
+        let mut ch = three();
+        let (a, b) = (Identity([1; 32]), Identity([2; 32]));
+        assert_eq!(ch.set_moderator(3, a, true), Ok(true));
+        assert_eq!(ch.set_moderator(3, a, true), Ok(false), "already a moderator");
+        ch.set_moderator(3, b, true).unwrap();
+        assert_eq!(ch.set_moderator(99, a, true), Err(ChannelError::NotFound));
+        let saved = ch.to_config();
+        assert_eq!(saved[1].children[0].moderators, [a, b]);
+        assert!(saved[0].moderators.is_empty());
+        assert!(!toml::to_string(&ChannelsFile { channels: vec![saved[0].clone()] }).unwrap().contains("moderators"));
+        let text = toml::to_string(&ChannelsFile { channels: saved }).unwrap();
+        let back = Channels::from_config(&toml::from_str::<ChannelsFile>(&text).unwrap().channels);
+        assert_eq!(back.get(3).unwrap().moderators, [a, b]);
+
+        assert_eq!(ch.set_moderator(3, a, false), Ok(true));
+        assert_eq!(ch.get(3).unwrap().moderators, [b]);
+    }
+
+    #[test]
+    fn the_default_channel_is_flagged() {
+        let mut ch = three();
+        let flagged = |ch: &Channels| ch.snapshot().iter().filter(|c| c.default).map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(flagged(&ch), [1]);
+        assert!(ch.get(1).unwrap().default);
+        ch.set_default(4).unwrap();
+        assert_eq!(flagged(&ch), [4]);
+        assert!(!ch.get(1).unwrap().default);
     }
 
     #[test]

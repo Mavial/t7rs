@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub mod identity;
 pub mod model;
+pub mod perms;
 pub mod tls;
 pub mod update;
 pub mod voice;
@@ -78,6 +79,8 @@ pub struct ChannelInfo {
     pub default: bool,
     /// Who made a temporary channel; they may edit and delete it.
     pub creator: Option<ClientId>,
+    /// They moderate this channel and every channel below it.
+    pub moderators: Vec<Identity>,
 }
 
 /// The editable part of a channel.
@@ -157,6 +160,8 @@ pub enum C2S {
     SetDefaultChannel { id: ChannelId },
     /// Become admin with the server's admin token.
     Authenticate { token: String },
+    /// Admins only. By identity, so someone offline can be removed too.
+    SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
 }
 
 /// Server → client.

@@ -1,6 +1,7 @@
 //! Spins up a real server on localhost and drives it with raw protocol clients.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use t7_proto::identity::IdentityKey;
@@ -38,6 +39,12 @@ impl TestClient {
         let proof = key(nick).prove(&c.exporter);
         c.hello(nick, pw, protocol, proof).await
     }
+    /// From another loopback address, with any key.
+    async fn connect_from(addr: SocketAddr, from: Ipv4Addr, nick: &str, key: &IdentityKey) -> (Self, S2C) {
+        let c = Self::open(addr, from).await;
+        let proof = key.prove(&c.exporter);
+        c.hello(nick, None, PROTOCOL_VERSION, proof).await
+    }
     /// A TLS connection that hasn't said Hello yet.
     async fn open(addr: SocketAddr, from: Ipv4Addr) -> Self {
         let sock = TcpSocket::new_v4().unwrap();
@@ -63,7 +70,12 @@ impl TestClient {
     }
 }
 
-async fn start(cfg_text: &str) -> std::net::SocketAddr {
+async fn start(cfg_text: &str) -> SocketAddr {
+    start_in(cfg_text, None).await.0
+}
+
+/// A server keeping its files in `dir`; abort the task to stop it.
+async fn start_in(cfg_text: &str, dir: Option<PathBuf>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let cfg: Config = toml::from_str(cfg_text).unwrap();
     // The server also binds UDP on the TCP port's number, so pick a port free for both.
     let listener = loop {
@@ -73,12 +85,12 @@ async fn start(cfg_text: &str) -> std::net::SocketAddr {
         }
     };
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        if let Err(e) = t7_server::serve(listener, &cfg, None).await {
+    let task = tokio::spawn(async move {
+        if let Err(e) = t7_server::serve(listener, &cfg, dir.as_deref()).await {
             panic!("test server failed: {e}");
         }
     });
-    addr
+    (addr, task)
 }
 
 #[tokio::test]
@@ -396,26 +408,20 @@ async fn channels_are_managed_with_permissions() {
     assert!(list.iter().all(|c| c.id != raid), "empty temporary channel should be gone");
 }
 
+/// An empty directory of its own for a test's server files.
+fn data_dir(test: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("t7-e2e-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 #[tokio::test]
 async fn channel_edits_and_the_certificate_survive_a_restart() {
-    let dir = std::env::temp_dir().join(format!("t7-e2e-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = data_dir("restart");
     let cfg: Config = toml::from_str(&with_admin_token("t")).unwrap();
-
-    let run =|dir: std::path::PathBuf, cfg_text: String| async move {
-        let cfg: Config = toml::from_str(&cfg_text).unwrap();
-        let listener = loop {
-            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            if std::net::UdpSocket::bind(l.local_addr().unwrap()).is_ok() {
-                break l;
-            }
-        };
-        let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move { t7_server::serve(listener, &cfg, Some(&dir)).await });
-        (addr, task)
-    };
     let cfg_text = with_admin_token("t");
-    let (addr, task) = run(dir.clone(), cfg_text.clone()).await;
+    let (addr, task) = start_in(&cfg_text, Some(dir.clone())).await;
     let first = fingerprint(addr).await;
     let cert = std::fs::read(dir.join("tls_cert.der")).expect("certificate saved");
     assert_eq!(tls::Fingerprint::of(&cert), first);
@@ -426,7 +432,7 @@ async fn channel_edits_and_the_certificate_survive_a_restart() {
     task.abort();
     drop(admin);
 
-    let (addr, task) = run(dir.clone(), cfg_text).await;
+    let (addr, task) = start_in(&cfg_text, Some(dir.clone())).await;
     assert_eq!(fingerprint(addr).await, first, "a restart must keep the certificate");
     let (_, welcome) = TestClient::connect(addr, "later", None).await;
     let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed") };
@@ -445,6 +451,15 @@ impl Channels {
         }
         walk(&cfg.channels)
     }
+}
+
+/// Connects and logs in as admin.
+async fn admin_login(addr: SocketAddr, from: Ipv4Addr) -> (TestClient, ClientId, Vec<ChannelInfo>) {
+    let (mut admin, welcome) = TestClient::connect_from(addr, from, "admin", &key("admin")).await;
+    let S2C::Welcome { your_id, channels, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
+    admin.send(C2S::Authenticate { token: "t".into() }).await;
+    admin.until(|m| matches!(m, S2C::ClientAdmin { .. })).await;
+    (admin, your_id, channels)
 }
 
 fn rejected(reply: &S2C) -> &str {
@@ -477,4 +492,40 @@ async fn identities_are_proven_on_each_connection() {
     let (_, again) = TestClient::connect(addr, "alice", None).await;
     let S2C::Welcome { your_id, clients, .. } = &again else { panic!("not welcomed: {again:?}") };
     assert_eq!(clients.iter().find(|c| c.id == *your_id).unwrap().identity, key("alice").identity());
+}
+
+#[tokio::test]
+async fn moderators_survive_a_restart() {
+    let dir = data_dir("moderation");
+    let cfg = with_admin_token("t");
+    let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
+    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    let gaming = id_of(&channels, "Gaming");
+    // Only admins choose moderators.
+    let (mut user, _) = TestClient::connect(addr, "user", None).await;
+    user.send(C2S::SetModerator { channel: gaming, identity: key("user").identity(), moderator: true }).await;
+    let refused = user.until(|m| matches!(m, S2C::Error { .. })).await;
+    assert!(matches!(refused, S2C::Error { ref message } if message.contains("only admins")), "{refused:?}");
+    admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: true }).await;
+    let list = admin.channels().await;
+    assert_eq!(list.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
+    // The server saves after it broadcasts; a round trip waits for that.
+    admin.send(C2S::Ping { nonce: 1 }).await;
+    admin.until(|m| matches!(m, S2C::Pong { .. })).await;
+    task.abort();
+    drop(admin);
+
+    let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
+    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    assert_eq!(channels.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
+
+    // Removing the moderator by identity works while they are offline, and sticks.
+    admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: false }).await;
+    assert!(admin.channels().await.iter().all(|c| c.moderators.is_empty()));
+    admin.send(C2S::Ping { nonce: 2 }).await;
+    admin.until(|m| matches!(m, S2C::Pong { .. })).await;
+    let saved = std::fs::read_to_string(dir.join("channels.toml")).unwrap();
+    assert!(!saved.contains("moderators"), "{saved}");
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
 }

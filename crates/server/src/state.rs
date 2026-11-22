@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use t7_proto::perms::{self, Action};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason, MAX_POKE_LEN,
@@ -316,7 +317,7 @@ impl Server {
             C2S::CreateChannel { parent, settings, temporary } => self.create_channel(id, parent, settings, temporary),
             C2S::EditChannel { id: channel, settings } => self.edit_channel(id, channel, &settings),
             C2S::MoveChannel { id: channel, parent, position } => {
-                if !self.is_admin(id) {
+                if !self.allowed(id, Action::RearrangeChannels) {
                     return self.error(id, "only admins can rearrange channels");
                 }
                 match self.channels.move_to(channel, parent, position) {
@@ -326,7 +327,7 @@ impl Server {
             }
             C2S::DeleteChannel { id: channel } => self.delete_channel(id, channel),
             C2S::SetDefaultChannel { id: channel } => {
-                if !self.is_admin(id) {
+                if !self.allowed(id, Action::RearrangeChannels) {
                     return self.error(id, "only admins can change the default channel");
                 }
                 match self.channels.set_default(channel) {
@@ -335,6 +336,17 @@ impl Server {
                 }
             }
             C2S::Authenticate { token } => self.authenticate(id, &token),
+            C2S::SetModerator { channel, identity, moderator } => {
+                if !self.allowed(id, Action::SetModerator) {
+                    return self.error(id, "only admins can choose moderators");
+                }
+                let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
+                match self.channels.set_moderator(channel, identity, moderator) {
+                    Ok(true) => self.channels_changed(permanent),
+                    Ok(false) => {}
+                    Err(e) => self.error(id, &e.message()),
+                }
+            }
         }
     }
 
@@ -345,7 +357,7 @@ impl Server {
         if self.clients[&id].info.channel == channel {
             return;
         }
-        if !self.is_admin(id) && !self.channels.password_ok(channel, password) {
+        if !self.allowed(id, Action::SkipChannelPassword) && !self.channels.password_ok(channel, password) {
             let msg = if password.is_some() { "wrong channel password" } else { "this channel needs a password" };
             return self.error(id, msg);
         }
@@ -361,17 +373,12 @@ impl Server {
         self.broadcast(&S2C::ClientMoved { id, channel }, |_| true);
     }
 
-    fn is_admin(&self, id: ClientId) -> bool {
-        self.clients.get(&id).is_some_and(|c| c.info.admin)
-    }
-
-    /// Admins manage every channel; anyone manages the temporary channels they made.
-    fn may_manage(&self, id: ClientId, channel: ChannelId) -> bool {
-        self.is_admin(id) || self.channels.get(channel).is_some_and(|c| c.temporary && c.creator == Some(id))
+    fn allowed(&self, id: ClientId, action: Action<'_>) -> bool {
+        perms::allowed(&self.clients[&id].info, action, &self.channels)
     }
 
     fn create_channel(&mut self, id: ClientId, parent: Option<ChannelId>, settings: ChannelSettings, temporary: bool) {
-        if !temporary && !self.is_admin(id) {
+        if !temporary && !self.allowed(id, Action::CreatePermanentChannel) {
             return self.error(id, "only admins can create permanent channels");
         }
         if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
@@ -388,7 +395,7 @@ impl Server {
     }
 
     fn edit_channel(&mut self, id: ClientId, channel: ChannelId, settings: &ChannelSettings) {
-        if !self.may_manage(id, channel) {
+        if !self.allowed(id, Action::EditChannel(channel)) {
             return self.error(id, "you can't edit this channel");
         }
         let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
@@ -399,7 +406,7 @@ impl Server {
     }
 
     fn delete_channel(&mut self, id: ClientId, channel: ChannelId) {
-        if !self.may_manage(id, channel) {
+        if !self.allowed(id, Action::DeleteChannel(channel)) {
             return self.error(id, "you can't delete this channel");
         }
         let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);

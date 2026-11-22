@@ -6,10 +6,11 @@ use egui::{
     text::LayoutJob, vec2,
 };
 use t7_proto::model::ServerView;
+use t7_proto::perms::{self, Action};
 use t7_proto::tls::Fingerprint;
 use t7_proto::{
-    C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, LeaveReason, MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN,
-    MAX_CHANNEL_TOPIC_LEN, PasswordChange, S2C, TextTarget,
+    C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason, MAX_CHANNEL_DEPTH,
+    MAX_CHANNEL_NAME_LEN, MAX_CHANNEL_TOPIC_LEN, PasswordChange, S2C, TextTarget,
 };
 
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
@@ -80,6 +81,7 @@ enum TreeAction {
     MakeDefault(ChannelId),
     Delete(ChannelId),
     AdminLogin,
+    SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
 }
 
 /// Payload while dragging yourself onto another channel.
@@ -319,7 +321,7 @@ impl App {
         if view.my_channel() == Some(channel) {
             return;
         }
-        if ch.has_password && !self.am_admin() {
+        if ch.has_password && !view.allowed(Action::SkipChannelPassword) {
             let name = ch.name.clone();
             self.channel_dialog = Some(ChannelDialog::Password { channel, name, password: String::new(), focused: false });
         } else {
@@ -327,8 +329,8 @@ impl App {
         }
     }
 
-    fn am_admin(&self) -> bool {
-        self.view.as_ref().and_then(|v| v.me()).is_some_and(|c| c.admin)
+    fn allowed(&self, action: Action<'_>) -> bool {
+        self.view.as_ref().is_some_and(|v| v.allowed(action))
     }
 
     fn open_create_channel(&mut self, parent: Option<ChannelId>) {
@@ -344,7 +346,7 @@ impl App {
             had_password: false,
             protected: false,
             password: String::new(),
-            temporary: !self.am_admin() || parent_temporary,
+            temporary: !self.allowed(Action::CreatePermanentChannel) || parent_temporary,
             focused: false,
         }));
     }
@@ -921,8 +923,6 @@ impl App {
                 let mut poke = None;
                 let mut action: Option<TreeAction> = None;
                 let admin = view.me().is_some_and(|c| c.admin);
-                // Mirrors the server's rule: admins, or the creator of a temporary channel.
-                let may_manage = |ch: &t7_proto::ChannelInfo| admin || (ch.temporary && ch.creator == Some(view.my_id));
 
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("CHANNELS").size(11.0).color(theme::TEXT_FAINT).strong());
@@ -934,7 +934,8 @@ impl App {
                         }
                         icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), Icon::Dots, color);
                         egui::Popup::menu(&resp).show(|ui| {
-                            let label = if admin { "Create channel…" } else { "Create temporary channel…" };
+                            let permanent = view.allowed(Action::CreatePermanentChannel);
+                            let label = if permanent { "Create channel…" } else { "Create temporary channel…" };
                             if ui.button(label).clicked() {
                                 action = Some(TreeAction::Create(None));
                             }
@@ -1025,11 +1026,11 @@ impl App {
                                 action = Some(TreeAction::Create(Some(ch_id)));
                                 ui.close();
                             }
-                            if may_manage(ch) && ui.button("Edit channel…").clicked() {
+                            if view.allowed(Action::EditChannel(ch_id)) && ui.button("Edit channel…").clicked() {
                                 action = Some(TreeAction::Edit(ch_id));
                                 ui.close();
                             }
-                            if admin {
+                            if view.allowed(Action::RearrangeChannels) {
                                 if ui.button("Move up").clicked() {
                                     action = Some(TreeAction::Shift(ch_id, -1));
                                 }
@@ -1041,7 +1042,7 @@ impl App {
                                     ui.close();
                                 }
                             }
-                            if may_manage(ch) && !ch.default && ui.button("Delete channel…").clicked() {
+                            if view.allowed(Action::DeleteChannel(ch_id)) && !ch.default && ui.button("Delete channel…").clicked() {
                                 action = Some(TreeAction::Delete(ch_id));
                                 ui.close();
                             }
@@ -1064,9 +1065,16 @@ impl App {
                             let color = if c.status.away { theme::TEXT_FAINT } else { theme::TEXT };
                             let name_rect = p.text(egui::pos2(ax + 18.0, rect.center().y), Align2::LEFT_CENTER, &c.nickname, FontId::proportional(13.5), color);
                             let mut name_end = name_rect.right();
-                            if c.admin {
+                            let badge = if c.admin {
+                                Some((Icon::Shield, theme::ACCENT_TEXT))
+                            } else if perms::moderated_from(c.identity, ch_id, &view.channels).is_some() {
+                                Some((Icon::Star, theme::TEXT_DIM))
+                            } else {
+                                None
+                            };
+                            if let Some((icon, color)) = badge {
                                 let r = egui::Rect::from_center_size(egui::pos2(name_end + 11.0, rect.center().y), vec2(12.0, 12.0));
-                                icons::paint(p, r, Icon::Shield, theme::ACCENT_TEXT);
+                                icons::paint(p, r, icon, color);
                                 name_end += 16.0;
                             }
                             let name_rect = egui::Rect::from_min_max(name_rect.min, egui::pos2(name_end, name_rect.max.y));
@@ -1117,6 +1125,16 @@ impl App {
                                         poke = Some(c.id);
                                         ui.close();
                                     }
+                                    if view.allowed(Action::SetModerator) {
+                                        ui.separator();
+                                        let moderator = ch.moderators.contains(&c.identity);
+                                        let label =
+                                            if moderator { "Remove as moderator".to_owned() } else { format!("Make moderator of {}", ch.name) };
+                                        if ui.button(label).clicked() {
+                                            action = Some(TreeAction::SetModerator { channel: ch_id, identity: c.identity, moderator: !moderator });
+                                            ui.close();
+                                        }
+                                    }
                                     ui.separator();
                                     ui.label(RichText::new("Volume").size(12.0).color(theme::TEXT_DIM));
                                     let mut v = volume;
@@ -1158,6 +1176,9 @@ impl App {
                     Some(TreeAction::Delete(ch)) => self.open_delete_channel(ch),
                     Some(TreeAction::AdminLogin) => {
                         self.channel_dialog = Some(ChannelDialog::AdminLogin { token: String::new(), focused: false });
+                    }
+                    Some(TreeAction::SetModerator { channel, identity, moderator }) => {
+                        self.net.send(C2S::SetModerator { channel, identity, moderator });
                     }
                     None => {}
                 }
@@ -1717,7 +1738,22 @@ impl App {
             self.channel_dialog = None;
         }
         let Some(dialog) = &mut self.channel_dialog else { return };
-        let admin = self.view.as_ref().and_then(|v| v.me()).is_some_and(|c| c.admin);
+        let view = self.view.as_ref();
+        let may_create_permanent = view.is_some_and(|v| v.allowed(Action::CreatePermanentChannel));
+        // Admins see who moderates the channel they edit: by nickname when online.
+        let editing = match dialog {
+            ChannelDialog::Form(f) => f.editing,
+            _ => None,
+        };
+        let moderators: Option<Vec<(Identity, Option<String>)>> = view
+            .filter(|v| v.allowed(Action::SetModerator))
+            .zip(editing)
+            .and_then(|(v, id)| v.channels.get(&id).map(|ch| (v, ch)))
+            .map(|(v, ch)| {
+                let online = |m: &Identity| v.clients.values().find(|c| c.identity == *m).map(|c| c.nickname.clone());
+                ch.moderators.iter().map(|m| (*m, online(m))).collect()
+            });
+        let mut unmoderate: Option<Identity> = None;
         let channel_name = |id: Option<ChannelId>| {
             id.and_then(|id| self.view.as_ref()?.channels.get(&id).map(|c| c.name.clone()))
         };
@@ -1784,9 +1820,35 @@ impl App {
                                 .margin(Margin::symmetric(10, 7)),
                         );
                     }
+                    if let Some(list) = &moderators {
+                        section(ui, "Moderators");
+                        if list.is_empty() {
+                            ui.label(
+                                RichText::new("Nobody yet. Right-click someone in this channel to make them a moderator.")
+                                    .size(12.0)
+                                    .color(theme::TEXT_FAINT),
+                            );
+                        }
+                        for (identity, nickname) in list {
+                            ui.horizontal(|ui| {
+                                match nickname {
+                                    Some(name) => ui.label(RichText::new(name).color(theme::TEXT)),
+                                    None => {
+                                        ui.label(RichText::new(identity.to_string()).font(FontId::monospace(12.5)).color(theme::TEXT_DIM));
+                                        ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT))
+                                    }
+                                };
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.small_button("Remove").clicked() {
+                                        unmoderate = Some(*identity);
+                                    }
+                                });
+                            });
+                        }
+                    }
                     if form.editing.is_none() {
                         ui.add_space(6.0);
-                        if admin {
+                        if may_create_permanent {
                             ui.checkbox(&mut form.temporary, "Temporary: removed once everyone has left");
                         } else {
                             ui.label(
@@ -1894,6 +1956,9 @@ impl App {
                 }
             }
         });
+        if let (Some(identity), Some(channel)) = (unmoderate, editing) {
+            self.net.send(C2S::SetModerator { channel, identity, moderator: false });
+        }
         if let Some(msg) = send {
             self.net.send(msg);
             close = true;

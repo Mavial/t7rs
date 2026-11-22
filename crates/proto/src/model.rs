@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::perms::{self, Action};
 use crate::{ChannelId, ChannelInfo, ClientId, ClientInfo, S2C, ServerInfo};
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,11 @@ impl ServerView {
         self.me().map(|c| c.channel)
     }
 
+    /// Whether the rules let this client do it: what the UI offers.
+    pub fn allowed(&self, action: Action<'_>) -> bool {
+        self.me().is_some_and(|me| perms::allowed(me, action, &self.channels))
+    }
+
     pub fn tree(&self) -> &[(usize, ChannelId)] {
         &self.tree
     }
@@ -134,6 +140,7 @@ mod tests {
             has_password: false,
             default: false,
             creator: None,
+            moderators: Vec::new(),
         }
     }
 
