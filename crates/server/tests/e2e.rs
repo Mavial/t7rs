@@ -193,9 +193,14 @@ async fn voice_is_routed_encrypted_within_the_channel() {
     va.sock.send(&va.sent).await.unwrap();
     assert_eq!(vb.recv_owned().await, None, "replay was forwarded");
 
-    // So is one sealed with another key, even with a's id on it.
+    // So is one sealed with another key, even with a's id on it. a's counters
+    // stay below 10 in this test, so the forger skips past them: only the key
+    // check can drop its datagram, not the replay window.
     let mut forger = voice::ClientSide::new(va.id, &[0x42; 32]);
     let mut forged = Vec::new();
+    for _ in 0..10 {
+        forger.seal(voice::ToServer::Ping { nonce: 0 }, &mut forged);
+    }
     forger.seal(voice::ToServer::Audio { seq: 2, payload: &[1] }, &mut forged);
     va.sock.send(&forged).await.unwrap();
     assert_eq!(vb.recv_owned().await, None, "forgery was forwarded");
