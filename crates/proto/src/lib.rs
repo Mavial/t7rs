@@ -11,8 +11,13 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub mod model;
 pub mod voice;
 
-/// Bumped whenever the wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// This build's protocol. New messages are only ever appended to the enums
+/// below, so older clients keep working for everything they know about.
+pub const PROTOCOL_VERSION: u16 = 3;
+/// Oldest client protocol a server still accepts.
+pub const MIN_PROTOCOL_VERSION: u16 = 2;
+/// First protocol that understands [`S2C::Poked`].
+pub const POKE_PROTOCOL: u16 = 3;
 /// Default port of a T7 server (TCP for control, UDP for voice).
 pub const DEFAULT_PORT: u16 = 9988;
 /// Upper bound for a single frame. Protects both sides from memory abuse.
@@ -20,6 +25,7 @@ pub const MAX_FRAME_LEN: usize = 256 * 1024;
 
 pub const MAX_NICKNAME_LEN: usize = 32;
 pub const MAX_TEXT_LEN: usize = 2000;
+pub const MAX_POKE_LEN: usize = 100;
 
 /// How often the client sends a ping, and how long the server waits for
 /// any traffic before considering the connection dead.
@@ -97,6 +103,8 @@ pub enum C2S {
     SetStatus(ClientStatus),
     Ping { nonce: u64 },
     Goodbye,
+    /// Get someone's attention: a popup and a sound on their side (protocol 3).
+    Poke { target: ClientId, message: String },
 }
 
 /// Server → client.
@@ -128,6 +136,8 @@ pub enum S2C {
     /// A non-fatal error caused by the last request (e.g. channel full).
     Error { message: String },
     Pong { nonce: u64 },
+    /// Someone poked you (protocol 3).
+    Poked { from: ClientId, message: String },
 }
 
 #[derive(Debug)]

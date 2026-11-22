@@ -13,7 +13,8 @@ use std::time::Instant;
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     C2S, ChannelId, ChannelInfo, ClientId, ClientInfo, ClientStatus, LeaveReason,
-    MAX_TEXT_LEN, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget, encode_frame, validate_nickname,
+    MAX_POKE_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, POKE_PROTOCOL, PROTOCOL_VERSION, S2C, ServerInfo,
+    TextTarget, encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -42,6 +43,8 @@ pub enum Event {
 
 struct Client {
     info: ClientInfo,
+    /// The client's protocol version: decides which newer messages it understands.
+    protocol: u16,
     addr: SocketAddr,
     outbox: mpsc::Sender<Frame>,
     text_bucket: TokenBucket,
@@ -189,9 +192,14 @@ impl Server {
             let _ = outbox.try_send(encode(&S2C::Rejected { reason: reason.into() }));
             None
         };
-        if protocol != PROTOCOL_VERSION {
+        if protocol < MIN_PROTOCOL_VERSION {
             return reject(&format!(
-                "protocol mismatch (server {PROTOCOL_VERSION}, client {protocol}); please update"
+                "protocol mismatch (server {PROTOCOL_VERSION}, client {protocol}); please update your T7"
+            ));
+        }
+        if protocol > PROTOCOL_VERSION {
+            return reject(&format!(
+                "protocol mismatch (server {PROTOCOL_VERSION}, client {protocol}); this server needs an update"
             ));
         }
         if let Some(pw) = &self.password
@@ -238,6 +246,7 @@ impl Server {
             id,
             Client {
                 info,
+                protocol,
                 addr,
                 outbox,
                 text_bucket: TokenBucket::text(),
@@ -297,6 +306,7 @@ impl Server {
             }
             C2S::Ping { nonce } => self.send(id, &S2C::Pong { nonce }),
             C2S::Goodbye => self.remove(id, LeaveReason::Disconnected),
+            C2S::Poke { target, message } => self.poke(id, target, message),
         }
     }
 
@@ -312,6 +322,24 @@ impl Server {
         }
         self.clients.get_mut(&id).expect("exists").info.channel = channel;
         self.broadcast(&S2C::ClientMoved { id, channel }, |_| true);
+    }
+
+    fn poke(&mut self, id: ClientId, target: ClientId, message: String) {
+        let message = message.trim();
+        if message.chars().count() > MAX_POKE_LEN {
+            return self.error(id, "poke message is too long");
+        }
+        let Some(to) = self.clients.get(&target).filter(|_| target != id) else {
+            return self.error(id, "that user is no longer online");
+        };
+        if to.protocol < POKE_PROTOCOL {
+            let name = to.info.nickname.clone();
+            return self.error(id, &format!("{name} can't be poked: their T7 is out of date"));
+        }
+        if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
+            return self.error(id, "you are poking too fast");
+        }
+        self.send(target, &S2C::Poked { from: id, message: message.to_owned() });
     }
 
     fn text(&mut self, id: ClientId, target: TextTarget, text: String) {

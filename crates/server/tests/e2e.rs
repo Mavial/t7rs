@@ -16,10 +16,13 @@ struct TestClient {
 
 impl TestClient {
     async fn connect(addr: std::net::SocketAddr, nick: &str, pw: Option<&str>) -> (Self, S2C) {
+        Self::connect_as(addr, nick, pw, PROTOCOL_VERSION).await
+    }
+    async fn connect_as(addr: std::net::SocketAddr, nick: &str, pw: Option<&str>, protocol: u16) -> (Self, S2C) {
         let (r, w) = TcpStream::connect(addr).await.unwrap().into_split();
         let mut c = Self { r: BufReader::new(r), w, buf: Vec::new() };
         c.send(C2S::Hello {
-            protocol: PROTOCOL_VERSION,
+            protocol,
             nickname: nick.into(),
             password: pw.map(Into::into),
         })
@@ -40,9 +43,19 @@ impl TestClient {
 
 async fn start(cfg_text: &str) -> std::net::SocketAddr {
     let cfg: Config = toml::from_str(cfg_text).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // The server also binds UDP on the TCP port's number, so pick a port free for both.
+    let listener = loop {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        if std::net::UdpSocket::bind(l.local_addr().unwrap()).is_ok() {
+            break l;
+        }
+    };
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { t7_server::serve(listener, &cfg).await });
+    tokio::spawn(async move {
+        if let Err(e) = t7_server::serve(listener, &cfg).await {
+            panic!("test server failed: {e}");
+        }
+    });
     addr
 }
 
@@ -194,4 +207,37 @@ async fn voice_is_routed_within_the_channel() {
     }
     va.send(voice::ToServer::Audio { seq: 4, payload: &[1] }).await;
     assert_eq!(vb.recv_owned().await, None);
+}
+
+#[tokio::test]
+async fn pokes_reach_new_clients_and_old_clients_still_connect() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut a, wa) = TestClient::connect(addr, "a", None).await;
+    let (mut b, wb) = TestClient::connect(addr, "b", None).await;
+    // A client from before pokes existed is still welcome.
+    let (_old, wold) = TestClient::connect_as(addr, "old", None, MIN_PROTOCOL_VERSION).await;
+    let (S2C::Welcome { your_id: a_id, .. }, S2C::Welcome { your_id: b_id, .. }, S2C::Welcome { your_id: old_id, .. }) =
+        (&wa, &wb, &wold)
+    else {
+        panic!("not welcomed: {wold:?}");
+    };
+    for _ in 0..2 {
+        a.recv().await; // b, old joined
+    }
+    b.recv().await; // old joined
+
+    a.send(C2S::Poke { target: *b_id, message: "  over here  ".into() }).await;
+    assert_eq!(b.recv().await, S2C::Poked { from: *a_id, message: "over here".into() });
+
+    a.send(C2S::Poke { target: *old_id, message: String::new() }).await;
+    assert!(matches!(a.recv().await, S2C::Error { ref message } if message.contains("out of date")));
+
+    a.send(C2S::Poke { target: *a_id, message: String::new() }).await;
+    assert!(matches!(a.recv().await, S2C::Error { .. }), "can't poke yourself");
+
+    a.send(C2S::Poke { target: *b_id, message: "x".repeat(MAX_POKE_LEN + 1) }).await;
+    assert!(matches!(a.recv().await, S2C::Error { .. }));
+
+    let (_, too_new) = TestClient::connect_as(addr, "future", None, PROTOCOL_VERSION + 1).await;
+    assert!(matches!(too_new, S2C::Rejected { ref reason } if reason.contains("server needs an update")));
 }
