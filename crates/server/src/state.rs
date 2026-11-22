@@ -15,9 +15,9 @@ use std::time::{Instant, SystemTime};
 use t7_proto::perms::{Perm, Permissions, Rank, RoleChange, RoleId, Standing, Subject};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
-    BanId, BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason,
-    MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget,
-    encode_frame, validate_nickname,
+    BanId, BanInfo, C2S, ChannelId, ChannelKind, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity,
+    LeaveReason, MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo,
+    TextTarget, encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -320,7 +320,10 @@ impl Server {
         let default = self.channels.default_id();
         std::iter::once(default)
             .chain(self.channels.ids_in_order())
-            .find(|&ch| Some(ch) != leaving && self.has_room(ch) && self.channels.password_ok(ch, None))
+            .find(|&ch| {
+                let joinable = self.channels.get(ch).is_some_and(|c| c.kind == ChannelKind::Voice);
+                Some(ch) != leaving && joinable && self.has_room(ch) && self.channels.password_ok(ch, None)
+            })
             .unwrap_or(default)
     }
 
@@ -353,7 +356,9 @@ impl Server {
             C2S::Ping { nonce } => self.send(id, &S2C::Pong { nonce }),
             C2S::Goodbye => self.remove(id, LeaveReason::Disconnected),
             C2S::Poke { target, message } => self.poke(id, target, message),
-            C2S::CreateChannel { parent, settings, temporary } => self.create_channel(id, parent, settings, temporary),
+            C2S::CreateChannel { parent, settings, temporary, kind } => {
+                self.create_channel(id, parent, &settings, temporary, kind);
+            }
             C2S::EditChannel { id: channel, settings } => self.edit_channel(id, channel, &settings),
             C2S::MoveChannel { id: channel, parent, position } => {
                 let old_parent = self.channels.get(channel).and_then(|c| c.parent);
@@ -428,7 +433,11 @@ impl Server {
             RoleChange::Rename { id, name } => self.roles.rename(id, &name),
             RoleChange::SetPermissions { id, perms } => self.roles.set_perms(id, perms),
             RoleChange::Move { id, position } => self.roles.move_to(id, position as usize),
-            RoleChange::Delete { id } => self.roles.delete(id),
+            RoleChange::Delete { id } => self.roles.delete(id).map(|()| {
+                if self.channels.forget_role(id) {
+                    self.save_channels();
+                }
+            }),
             RoleChange::Assign { identity, role, held: false } => self.roles.revoke(identity, role).map(drop),
             RoleChange::Assign { identity, role, held: true } => {
                 let online = self.clients.values().find(|c| c.info.identity == identity);
@@ -448,8 +457,9 @@ impl Server {
     }
 
     fn join_channel(&mut self, id: ClientId, channel: ChannelId, password: Option<&str>) {
-        if self.channels.get(channel).is_none() {
-            return self.error(id, "channel does not exist");
+        let Some(info) = self.channels.get(channel) else { return self.error(id, "channel does not exist") };
+        if info.kind == ChannelKind::Category {
+            return self.error(id, "a category can't be joined; join a channel in it");
         }
         if self.clients[&id].info.channel == channel {
             return;
@@ -484,12 +494,7 @@ impl Server {
     }
 
     fn permissions_of(&self, who: Subject) -> Permissions {
-        let roles = self.roles.roles();
-        let in_channel = |c| (c, roles.resolve(who, Some(c), &self.channels).perms);
-        Permissions {
-            server: roles.resolve(who, None, &self.channels).perms,
-            channels: self.channels.ids().map(in_channel).collect(),
-        }
+        self.roles.roles().permissions(who, &self.channels)
     }
 
     /// Tells each client what changed about what it may do and the role shown
@@ -525,8 +530,15 @@ impl Server {
         }
     }
 
-    fn create_channel(&mut self, id: ClientId, parent: Option<ChannelId>, settings: ChannelSettings, temporary: bool) {
-        let (needed, refusal) = if temporary {
+    fn create_channel(
+        &mut self,
+        id: ClientId,
+        parent: Option<ChannelId>,
+        settings: &ChannelSettings,
+        temporary: bool,
+        kind: ChannelKind,
+    ) {
+        let (needed, refusal) = if temporary && kind == ChannelKind::Voice {
             (Perm::CreateTemporary, "you can't create channels here")
         } else {
             (Perm::ManageChannels, "you can't create permanent channels here")
@@ -537,11 +549,13 @@ impl Server {
         if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
             return self.error(id, "you are creating channels too fast");
         }
-        match self.channels.create(parent, &settings, temporary, id) {
+        match self.channels.create(parent, settings, temporary, kind, id) {
             Ok(channel) => {
                 self.channels_changed(!temporary);
-                self.move_to(id, channel);
-                self.remove_abandoned_channels();
+                if kind == ChannelKind::Voice {
+                    self.move_to(id, channel);
+                    self.remove_abandoned_channels();
+                }
             }
             Err(e) => self.error(id, &e.message()),
         }
@@ -743,8 +757,13 @@ impl Server {
     fn channels_changed(&mut self, save: bool) {
         self.broadcast(&S2C::Channels(self.channels.snapshot()), |_| true);
         self.refresh(false);
-        if save
-            && let Some(path) = self.data_dir.as_ref().map(|d| d.join("channels.toml"))
+        if save {
+            self.save_channels();
+        }
+    }
+
+    fn save_channels(&self) {
+        if let Some(path) = self.data_dir.as_ref().map(|d| d.join("channels.toml"))
             && let Err(e) = self.channels.save(&path)
         {
             tracing::error!("cannot save channels to {}: {e}", path.display());

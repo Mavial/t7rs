@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use t7_proto::perms::{Member, Permissions, Perms, RoleId, Roles};
-use t7_proto::{ChannelInfo, ClientInfo, ClientStatus, Identity, ServerInfo};
+use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo};
 
 use super::*;
 
@@ -25,6 +25,8 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
         default: false,
         creator: None,
         moderators: Vec::new(),
+        kind: ChannelKind::Voice,
+        overrides: Vec::new(),
     }
 }
 

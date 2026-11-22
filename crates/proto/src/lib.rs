@@ -89,6 +89,21 @@ pub struct ChannelInfo {
     pub creator: Option<ClientId>,
     /// They hold the Moderator role in this channel and every channel below it.
     pub moderators: Vec<Identity>,
+    pub kind: ChannelKind,
+    /// What it sets for each role, over the channel above it. Only clients
+    /// that may edit permissions get them.
+    pub overrides: Vec<perms::Override>,
+}
+
+/// What a channel is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChannelKind {
+    /// People join it to talk.
+    #[default]
+    Voice,
+    /// Groups the channels under it, at the top level. Nobody joins it.
+    Category,
 }
 
 /// The editable part of a channel.
@@ -183,11 +198,12 @@ pub enum C2S {
         target: ClientId,
         message: String,
     },
-    /// The creator moves into the new channel.
+    /// The creator moves into the new channel, unless it is a category.
     CreateChannel {
         parent: Option<ChannelId>,
         settings: ChannelSettings,
         temporary: bool,
+        kind: ChannelKind,
     },
     EditChannel {
         id: ChannelId,

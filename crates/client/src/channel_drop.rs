@@ -170,6 +170,8 @@ mod tests {
             default: false,
             creator: None,
             moderators: Vec::new(),
+            kind: t7_proto::ChannelKind::Voice,
+            overrides: Vec::new(),
         }
     }
 

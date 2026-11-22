@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::perms::{Perm, Permissions, Perms, Roles};
+use crate::perms::{ChannelTree, Perm, Permissions, Roles};
 use crate::{ChannelId, ChannelInfo, ClientId, ClientInfo, Identity, S2C, ServerInfo};
 
 #[derive(Debug, Clone)]
@@ -13,12 +13,11 @@ pub struct ServerView {
     pub info: ServerInfo,
     pub channels: HashMap<ChannelId, ChannelInfo>,
     pub clients: HashMap<ClientId, ClientInfo>,
-    /// Every role and who holds them, while this client may manage roles.
+    /// Every role and who holds them, while this client may edit them or
+    /// channel permissions.
     pub roles: Option<Roles>,
-    /// What the server lets this client do on the server as a whole.
-    may: Perms,
-    /// What it lets this client do in each channel.
-    may_in: HashMap<ChannelId, Perms>,
+    /// What the server lets this client do, and where.
+    permissions: Permissions,
     /// Channel tree in display order: (depth, channel id).
     tree: Vec<(usize, ChannelId)>,
 }
@@ -37,8 +36,7 @@ impl ServerView {
             channels: channels.into_iter().map(|c| (c.id, c)).collect(),
             clients: clients.into_iter().map(|c| (c.id, c)).collect(),
             roles: None,
-            may: Perms::NONE,
-            may_in: HashMap::new(),
+            permissions: Permissions::default(),
             tree: Vec::new(),
         };
         view.set_permissions(permissions);
@@ -47,11 +45,10 @@ impl ServerView {
     }
 
     fn set_permissions(&mut self, permissions: Permissions) {
-        self.may = permissions.server;
-        self.may_in = permissions.channels.into_iter().collect();
-        if !self.may.has(Perm::ManageRoles) {
+        if !permissions.edits_permissions() {
             self.roles = None;
         }
+        self.permissions = permissions;
     }
 
     /// Applies an event. Returns `false` for events that don't touch state.
@@ -100,12 +97,12 @@ impl ServerView {
     /// Whether the server lets this client do it on the server as a whole:
     /// what the UI offers. The server checks again.
     pub fn may(&self, perm: Perm) -> bool {
-        self.may.has(perm)
+        self.permissions.server.has(perm)
     }
 
     /// Whether the server lets this client do it in `channel`.
     pub fn may_in(&self, channel: ChannelId, perm: Perm) -> bool {
-        self.may_in.get(&channel).is_some_and(|p| p.has(perm))
+        self.permissions.may_in(channel, perm)
     }
 
     pub fn is_owner(&self) -> bool {
@@ -140,6 +137,18 @@ impl ServerView {
         self.clients.get(&id).map(|c| c.nickname.as_str())
     }
 
+    /// Whether a channel is hidden where the one above it is not: from
+    /// people without a role, as far as the roles this client has show, or
+    /// from this client itself, which sees it only because it manages it.
+    pub fn hidden(&self, channel: ChannelId) -> bool {
+        let hidden = |id| {
+            let everyone = self.roles.as_ref().is_some_and(|r| !r.everyone_in(id, self).has(Perm::View));
+            everyone || !self.may_in(id, Perm::View)
+        };
+        let parent = self.channels.get(&channel).and_then(|c| c.parent);
+        hidden(channel) && !parent.is_some_and(hidden)
+    }
+
     fn rebuild_tree(&mut self) {
         let mut children: HashMap<Option<ChannelId>, Vec<&ChannelInfo>> = HashMap::new();
         for c in self.channels.values() {
@@ -161,9 +170,20 @@ impl ServerView {
     }
 }
 
+impl ChannelTree for ServerView {
+    fn channel(&self, id: ChannelId) -> Option<&ChannelInfo> {
+        self.channels.get(&id)
+    }
+
+    fn channels(&self) -> impl Iterator<Item = &ChannelInfo> {
+        self.channels.values()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perms::Perms;
     use crate::{ClientStatus, LeaveReason};
 
     fn chan(id: u32, parent: Option<u32>, order: u32) -> ChannelInfo {
@@ -179,6 +199,8 @@ mod tests {
             default: false,
             creator: None,
             moderators: Vec::new(),
+            kind: crate::ChannelKind::Voice,
+            overrides: Vec::new(),
         }
     }
 
@@ -193,7 +215,8 @@ mod tests {
             role: None,
             identity: Identity([1; 32]),
         };
-        let permissions = Permissions { server: Perms::NONE, channels: vec![(2, Perms::of(&[Perm::Kick]))] };
+        let channels = [1, 3].map(|c| (c, Perms::NONE)).into_iter().chain([(2, Perms::of(&[Perm::Kick]))]).collect();
+        let permissions = Permissions { server: Perms::NONE, channels };
         let channels = vec![chan(3, None, 1), chan(1, None, 0), chan(2, Some(1), 0)];
         let mut v = ServerView::new(1, info, channels, vec![me], permissions);
         assert_eq!(v.tree(), &[(0, 1), (1, 2), (0, 3)]);
@@ -202,7 +225,7 @@ mod tests {
         v.apply(&S2C::Channels(vec![chan(1, None, 1), chan(3, None, 0)]));
         assert_eq!(v.tree(), &[(0, 3), (0, 1)], "channel list replaced and re-sorted");
 
-        v.apply(&S2C::Permissions(Permissions { server: Perms::ALL, channels: Vec::new() }));
+        v.apply(&S2C::Permissions(Permissions { server: Perms::ALL, channels: std::collections::BTreeMap::new() }));
         v.apply(&S2C::Roles(Roles::default()));
         assert!(v.may(Perm::Kick) && !v.may_in(2, Perm::Kick) && v.roles.is_some());
         v.apply(&S2C::Permissions(Permissions::default()));

@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use t7_proto::DEFAULT_PORT;
+use t7_proto::perms::Override;
+use t7_proto::{ChannelKind, DEFAULT_PORT};
 
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -36,8 +37,19 @@ pub struct ChannelConfig {
     /// Identities (hex) that hold the Moderator role in this channel and the ones below it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub moderators: Vec<t7_proto::Identity>,
+    /// `"category"`: a heading at the top level for the channels under it, which nobody joins.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub kind: ChannelKind,
+    /// Per role (0 is Everyone), the permissions this channel allows and
+    /// denies over the channel above it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<Override>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChannelConfig>,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 impl Default for Config {
@@ -122,7 +134,7 @@ mod tests {
     fn default_config_builds_a_channel_tree() {
         let cfg: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
         assert_eq!(cfg.bind, "0.0.0.0:9988");
-        let channels = Channels::from_config(&cfg.channels);
+        let channels = Channels::from_config(&cfg.channels).unwrap();
         let all = channels.snapshot();
         assert_eq!(all.len(), 6);
         assert_eq!(channels.get(channels.default_id()).unwrap().name, "Lobby");
@@ -130,6 +142,6 @@ mod tests {
         assert_eq!(channels.get(squad.parent.unwrap()).unwrap().name, "Gaming");
         assert_eq!(squad.max_clients, Some(5));
         // Saving and reloading keeps the tree.
-        assert_eq!(Channels::from_config(&channels.to_config()).to_config(), channels.to_config());
+        assert_eq!(Channels::from_config(&channels.to_config()).unwrap().to_config(), channels.to_config());
     }
 }

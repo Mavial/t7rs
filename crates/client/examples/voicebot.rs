@@ -70,7 +70,7 @@ async fn main() {
                 max_clients: Some(4),
                 password: if password.is_empty() { PasswordChange::Keep } else { PasswordChange::Set(password) },
             };
-            C2S::CreateChannel { parent: None, settings, temporary: true }
+            C2S::CreateChannel { parent: None, settings, temporary: true, kind: t7_proto::ChannelKind::Voice }
         };
         write_frame(&mut w, &msg).await.unwrap();
         let stay: u64 = rest.last().and_then(|s| s.parse().ok()).unwrap_or(10);

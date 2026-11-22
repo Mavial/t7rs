@@ -9,8 +9,9 @@ use t7_proto::model::ServerView;
 use t7_proto::perms::{Perm, Perms, Rank, RoleChange, RoleId, Roles};
 use t7_proto::tls::Fingerprint;
 use t7_proto::{
-    BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason, MAX_CHANNEL_DEPTH,
-    MAX_CHANNEL_NAME_LEN, MAX_CHANNEL_TOPIC_LEN, MAX_REASON_LEN, MAX_ROLE_NAME_LEN, PasswordChange, S2C, TextTarget,
+    BanInfo, C2S, ChannelId, ChannelKind, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason,
+    MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN, MAX_CHANNEL_TOPIC_LEN, MAX_REASON_LEN, MAX_ROLE_NAME_LEN, PasswordChange,
+    S2C, TextTarget,
 };
 
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
@@ -2272,7 +2273,12 @@ impl App {
                             let settings = form.settings();
                             send = Some(match form.editing {
                                 Some(id) => C2S::EditChannel { id, settings },
-                                None => C2S::CreateChannel { parent: form.parent, settings, temporary: form.temporary },
+                                None => C2S::CreateChannel {
+                                    parent: form.parent,
+                                    settings,
+                                    temporary: form.temporary,
+                                    kind: ChannelKind::Voice,
+                                },
                             });
                         }
                         if ui.add(Btn::secondary("Cancel")).clicked() {

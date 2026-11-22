@@ -409,7 +409,7 @@ async fn error(c: &mut TestClient) -> String {
 /// What a welcomed client may do in `channel`.
 fn may_in(welcome: &S2C, channel: ChannelId) -> Perms {
     let S2C::Welcome { permissions, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
-    permissions.channels.iter().find(|(c, _)| *c == channel).unwrap_or_else(|| panic!("no channel {channel}")).1
+    *permissions.channels.get(&channel).unwrap_or_else(|| panic!("no channel {channel}"))
 }
 
 #[tokio::test]
@@ -516,7 +516,13 @@ async fn channels_are_managed_with_permissions() {
     let lobby = id_of(channels, "Lobby");
 
     // Anyone can make a temporary channel and is moved into it.
-    user.send(C2S::CreateChannel { parent: None, settings: settings("Raid"), temporary: true }).await;
+    user.send(C2S::CreateChannel {
+        parent: None,
+        settings: settings("Raid"),
+        temporary: true,
+        kind: ChannelKind::Voice,
+    })
+    .await;
     let list = user.channels().await;
     let raid = id_of(&list, "Raid");
     assert!(list.iter().find(|c| c.id == raid).unwrap().temporary);
@@ -526,7 +532,13 @@ async fn channels_are_managed_with_permissions() {
     );
 
     // ...but not a permanent one, and not edit channels they didn't make.
-    user.send(C2S::CreateChannel { parent: None, settings: settings("Mine"), temporary: false }).await;
+    user.send(C2S::CreateChannel {
+        parent: None,
+        settings: settings("Mine"),
+        temporary: false,
+        kind: ChannelKind::Voice,
+    })
+    .await;
     assert!(error(&mut user).await.contains("can't create permanent channels"));
     user.send(C2S::DeleteChannel { id: lobby }).await;
     assert!(error(&mut user).await.contains("can't delete"));
@@ -546,7 +558,14 @@ async fn channels_are_managed_with_permissions() {
     );
 
     // The owner makes permanent channels, rearranges them and picks the default.
-    admin.send(C2S::CreateChannel { parent: None, settings: settings("Music"), temporary: false }).await;
+    admin
+        .send(C2S::CreateChannel {
+            parent: None,
+            settings: settings("Music"),
+            temporary: false,
+            kind: ChannelKind::Voice,
+        })
+        .await;
     let music = id_of(&admin.channels().await, "Music");
     admin.send(C2S::MoveChannel { id: music, parent: None, position: 0 }).await;
     let list = admin.channels().await;
@@ -579,7 +598,14 @@ async fn channel_edits_and_the_certificate_survive_a_restart() {
     let cert = std::fs::read(dir.join("tls_cert.der")).expect("certificate saved");
     assert_eq!(tls::Fingerprint::of(&cert), first);
     let (mut admin, _, _) = claim(addr, &dir, HOME).await;
-    admin.send(C2S::CreateChannel { parent: None, settings: settings("Saved"), temporary: false }).await;
+    admin
+        .send(C2S::CreateChannel {
+            parent: None,
+            settings: settings("Saved"),
+            temporary: false,
+            kind: ChannelKind::Voice,
+        })
+        .await;
     admin.channels().await;
     task.abort();
     drop(admin);
