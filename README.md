@@ -96,7 +96,7 @@ name = "Gaming"
   max_clients = 5
 ```
 
-The server keeps two more files next to its config:
+The server keeps more files next to its config:
 
 - `channels.toml`: the live channel tree. On first start it is copied from the
   config's `[[channels]]`; after that admins edit channels in T7 and the server
@@ -105,12 +105,46 @@ The server keeps two more files next to its config:
 - `admin_token.txt`: the admin token, generated on first start (unless
   `admin_token` is set) and printed in the log at every start. Anyone with it
   can manage all channels, so share it only with your admins.
+- `tls_cert.der` and `tls_key.der`: the server's TLS certificate and private
+  key, made on first start. See [Security](#security).
 
 Limits: channel names up to 40 characters, topics up to 200, nesting up to 3
 levels, 200 channels per server. The default channel can't be deleted; deleting
 a channel moves the people inside to the default channel.
 
 Set log verbosity with `RUST_LOG=debug`.
+
+## Security
+
+- **Control connection:** TLS 1.3 (rustls on ring), so nicknames, passwords,
+  chat, admin tokens and voice keys never cross the network in the clear.
+- **Voice:** each client gets a random 32-byte key over TLS when it joins.
+  Every voice datagram, in both directions and pings included, is sealed with
+  ChaCha20-Poly1305. The server opens each frame with the speaker's key and
+  seals it again for each listener with theirs, and receivers drop replayed
+  datagrams. This protects voice on the network, not from the server: whoever
+  runs the server can hear it. The network still sees who talks to the server,
+  when and how much.
+- **Server certificate:** on first start the server makes a self-signed
+  certificate, keeps it in `tls_cert.der` and `tls_key.der` next to its
+  config, and logs its SHA-256 fingerprint at every start:
+
+  ```
+  TLS certificate fingerprint (SHA-256): 3F:A1:…:9C
+  ```
+
+  `openssl x509 -inform der -in tls_cert.der -noout -fingerprint -sha256`
+  prints the same. Keep `tls_key.der` private, and back both files up with
+  the config when moving a server. Deleting them makes a new certificate.
+- **Trust on first use:** the first time T7 connects to an address it pins the
+  certificate's fingerprint (`server_certs` in its `settings.toml`). If the
+  server later presents a different certificate, T7 stops before logging in
+  and shows the saved and the new fingerprint. Check the new one against the
+  server's log, or ask its admin, before choosing "Trust new certificate and
+  connect". The very first connection is only as trustworthy as the network
+  it runs over; compare the fingerprint with the admin if that matters to you.
+- Clients from before TLS (protocol 4 and older) can't connect. The server
+  tells them to update.
 
 ## Architecture
 
@@ -121,15 +155,15 @@ crates/
   client/   t7-client: egui UI, CPU-rendered, + background network thread
 ```
 
-- **Protocol:** length-prefixed [postcard](https://docs.rs/postcard) frames over TCP.
+- **Protocol:** length-prefixed [postcard](https://docs.rs/postcard) frames over TLS 1.3 on TCP.
   Compact varint binary, so most messages are a handful of bytes. Versioned handshake.
 - **Voice:** 48 kHz mono Opus (pure-Rust `opus1`) in 20 ms frames at 32 kbps, sent
-  as UDP datagrams on the same port. Each datagram carries the sender's id and a
-  random token from the handshake. The server forwards frames to everyone else in
-  the speaker's channel without decoding them, skips listeners with sound off, and
-  rate-limits senders. Clients keep a ~60 ms jitter buffer per speaker. Each packet
-  carries a low-bitrate copy of the previous frame (Opus in-band FEC), so a single
-  lost packet is rebuilt; longer gaps are concealed.
+  as UDP datagrams on the same port, each encrypted with the sender's or the
+  listener's key (see [Security](#security)). The server forwards frames to
+  everyone else in the speaker's channel without decoding the audio, skips
+  listeners with sound off, and rate-limits senders. Clients keep a ~60 ms jitter
+  buffer per speaker. Each packet carries a low-bitrate copy of the previous frame
+  (Opus in-band FEC), so a single lost packet is rebuilt; longer gaps are concealed.
 - **Sound cleanup** (`crates/client/src/dsp.rs`), on the microphone, 10 ms at a time:
   high-pass filter and WebRTC AEC3 echo cancellation (pure-Rust `sonora`), then
   RNNoise noise suppression (`nnnoiseless`), then WebRTC AGC2 adaptive gain. Voice
@@ -198,8 +232,7 @@ are refused, so changing keys means one manual download for everyone.
 ## Roadmap
 
 1. Permissions beyond admin: kick/ban, channel moderators.
-2. TLS for the control connection plus encrypted voice.
-3. Drag-and-drop to rearrange channels.
+2. Drag-and-drop to rearrange channels.
 
 ## License
 
