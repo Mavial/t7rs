@@ -1381,7 +1381,6 @@ async fn listed_moderators_rename_their_channels_and_do_nothing_more() {
     owner.channels().await;
     owner.change_roles(assign("holder", RoleId::MODERATOR, true)).await;
 
-    // Where they are listed, and below it, they change the name and topic.
     let games = ChannelSettings { topic: "Squad up, again".into(), ..settings("Games") };
     listed.send(C2S::EditChannel { id: gaming, settings: games }).await;
     let renamed = owner.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.name == "Games"))).await;
@@ -1391,7 +1390,6 @@ async fn listed_moderators_rename_their_channels_and_do_nothing_more() {
     listed.send(C2S::EditChannel { id: squad, settings: squad_a }).await;
     owner.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.name == "Squad A"))).await;
 
-    // Not its limit or password, nor anything else a channel manager does.
     let limited = ChannelSettings { max_clients: Some(3), ..settings("Games") };
     listed.send(C2S::EditChannel { id: gaming, settings: limited }).await;
     assert!(error(&mut listed).await.contains("only change this channel's name and topic"));
@@ -1409,12 +1407,10 @@ async fn listed_moderators_rename_their_channels_and_do_nothing_more() {
     listed.send(C2S::EditChannel { id: hangout, settings: settings("Mine") }).await;
     assert_eq!(error(&mut listed).await, "you can't edit this channel", "elsewhere");
 
-    // Holding the Moderator role isn't being on the list.
     holder.send(C2S::EditChannel { id: gaming, settings: settings("Holder's") }).await;
     assert_eq!(error(&mut holder).await, "you can't edit this channel");
 }
 
-/// Who owns `channel` as of the next channel list that says so.
 async fn owned_by(c: &mut TestClient, channel: ChannelId, owner: Option<ClientId>) {
     c.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|ch| ch.id == channel && ch.owner == owner))).await;
 }
@@ -1437,19 +1433,16 @@ async fn a_room_passes_to_whoever_has_been_in_it_longest() {
         a.until(|m| *m == S2C::ClientMoved { id, channel: raid }).await;
     }
 
-    // b came in before c, so b gets it, and with it the room's powers.
     a.send(C2S::JoinChannel { channel: lobby, password: None }).await;
     owned_by(&mut c, raid, Some(b_id)).await;
     let powers = |m: &S2C| matches!(m, S2C::Permissions(p) if p.may_in(raid, Perm::Kick));
     let S2C::Permissions(p) = b.until(powers).await else { unreachable!() };
     assert!(p.may_in(raid, Perm::ManageChannels) && !p.may_in(lobby, Perm::Kick));
-    // Coming back doesn't take it back.
     a.send(C2S::JoinChannel { channel: raid, password: None }).await;
     c.until(|m| *m == S2C::ClientMoved { id: a_id, channel: raid }).await;
     let heard = c.drain().await;
     assert!(heard.iter().all(|m| !matches!(m, S2C::Channels(_))), "{heard:?}");
 
-    // Disconnecting is leaving too: c has now been there longest.
     drop(b);
     owned_by(&mut a, raid, Some(c_id)).await;
 }
@@ -1463,7 +1456,6 @@ async fn joining_a_lobby_opens_a_room_of_your_own() {
     let S2C::Welcome { channels, .. } = &wa else { unreachable!() };
     let [lobby, rooms] = ["Lobby", "Create a room"].map(|name| id_of(channels, name));
 
-    // Ana gets a room under the lobby, moves in, and owns it.
     ana.send(C2S::JoinChannel { channel: rooms, password: None }).await;
     let list = ben.channels().await;
     let room = list.iter().find(|c| c.parent == Some(rooms)).expect("a room in the lobby");
@@ -1478,7 +1470,6 @@ async fn joining_a_lobby_opens_a_room_of_your_own() {
     };
     assert!(p.may_in(room, Perm::Kick) && p.may_in(room, Perm::ManageChannels) && !p.may_in(rooms, Perm::Kick));
 
-    // Ben gets one of his own, and the lobby itself stays empty.
     ben.send(C2S::JoinChannel { channel: rooms, password: None }).await;
     let S2C::ClientMoved { channel: bens, .. } =
         ana.until(|m| matches!(m, S2C::ClientMoved { id, .. } if *id == ben_id)).await
@@ -1490,7 +1481,6 @@ async fn joining_a_lobby_opens_a_room_of_your_own() {
     assert!(clients.iter().all(|c| c.channel != rooms), "{clients:?}");
     assert_eq!(channels.iter().find(|c| c.id == bens).unwrap().name, "ben's room");
 
-    // Once Ana leaves hers, it goes.
     ana.send(C2S::JoinChannel { channel: lobby, password: None }).await;
     let gone = |m: &S2C| matches!(m, S2C::Channels(l) if l.iter().all(|c| c.id != room));
     let S2C::Channels(list) = ben.until(gone).await else { unreachable!() };
@@ -1531,8 +1521,6 @@ async fn voice_is_dropped_from_those_who_may_not_speak_or_are_server_muted() {
     vq.send(voice::ToServer::Audio { seq: 1, payload: &[1] }).await;
     assert_eq!(ve.recv_owned().await, Some(Got::Audio(vq.id, 1, vec![1])), "everyone may speak at first");
 
-    // The Lobby keeps Everyone from speaking, but not the Moderator role,
-    // which the talker and the loud one hold.
     owner.change_roles(assign("talker", RoleId::MODERATOR, true)).await;
     owner.change_roles(assign("loud", RoleId::MODERATOR, true)).await;
     owner.send(set(lobby, RoleId::MODERATOR, &[Perm::Speak], &[])).await;
@@ -1548,7 +1536,6 @@ async fn voice_is_dropped_from_those_who_may_not_speak_or_are_server_muted() {
     let S2C::Welcome { clients, .. } = TestClient::connect(addr, "late", None).await.1 else { unreachable!() };
     assert_eq!(clients.iter().find(|c| c.id == quiet_id).unwrap().speech, Speech::NotHere);
 
-    // A server mute drops the voice of someone who may speak there.
     vl.send(voice::ToServer::Audio { seq: 1, payload: &[4] }).await;
     assert_eq!(ve.recv_owned().await, Some(Got::Audio(vl.id, 1, vec![4])));
     owner.send(C2S::ServerMute { target: loud_id, muted: true }).await;
@@ -1558,7 +1545,6 @@ async fn voice_is_dropped_from_those_who_may_not_speak_or_are_server_muted() {
     vt.send(voice::ToServer::Audio { seq: 2, payload: &[6] }).await;
     assert_eq!(ve.recv_owned().await, Some(Got::Audio(vt.id, 2, vec![6])));
 
-    // Elsewhere the quiet one may speak again.
     quiet.send(C2S::JoinChannel { channel: hangout, password: None }).await;
     ear.until(|m| *m == S2C::ClientSpeech { id: quiet_id, speech: Speech::Allowed }).await;
 }
@@ -1574,13 +1560,11 @@ async fn a_server_mute_holds_across_reconnects_until_lifted_or_a_restart() {
     owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
     moder.until(|m| matches!(m, S2C::Permissions(p) if p.server.has(Perm::MuteMembers))).await;
 
-    // A moderator mutes those below them, and not the owner.
     moder.send(C2S::ServerMute { target: owner_id, muted: true }).await;
     assert!(error(&mut moder).await.contains("their role isn't below yours"));
     moder.send(C2S::ServerMute { target: user_id, muted: true }).await;
     owner.until(|m| *m == S2C::ClientSpeech { id: user_id, speech: Speech::ServerMuted }).await;
 
-    // Reconnecting doesn't shake it off.
     drop(user);
     owner.until(|m| matches!(m, S2C::ClientLeft { id, .. } if *id == user_id)).await;
     let (mut user, wu) = TestClient::connect(addr, "user", None).await;
@@ -1591,7 +1575,6 @@ async fn a_server_mute_holds_across_reconnects_until_lifted_or_a_restart() {
     vu.send(voice::ToServer::Audio { seq: 1, payload: &[1] }).await;
     assert_eq!(vm.recv_owned().await, None, "server-muted voice was forwarded");
 
-    // They can't lift it themselves; a moderator can.
     user.send(C2S::ServerMute { target: user_id, muted: false }).await;
     assert!(error(&mut user).await.contains("can't unmute"));
     moder.send(C2S::ServerMute { target: user_id, muted: false }).await;
@@ -1599,7 +1582,6 @@ async fn a_server_mute_holds_across_reconnects_until_lifted_or_a_restart() {
     vu.send(voice::ToServer::Audio { seq: 2, payload: &[2] }).await;
     assert_eq!(vm.recv_owned().await, Some(Got::Audio(user_id, 2, vec![2])));
 
-    // A restart forgets it.
     moder.send(C2S::ServerMute { target: user_id, muted: true }).await;
     user.until(|m| *m == S2C::ClientSpeech { id: user_id, speech: Speech::ServerMuted }).await;
     task.abort();
@@ -1626,7 +1608,6 @@ async fn people_move_only_those_below_them_into_channels_they_can_see() {
     let (boss_id, user_id) = (welcomed_id(&wb), welcomed_id(&wu));
     owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
     owner.change_roles(assign("boss", RoleId::ADMIN, true)).await;
-    // A mover may move people, but not past a password.
     let roles = owner.change_roles(RoleChange::Create { name: "Mover".into() }).await;
     let movers = roles.ranked.last().unwrap().id;
     let perms = Perms::of(&[Perm::View, Perm::Join, Perm::MoveMembers]);
@@ -1634,21 +1615,16 @@ async fn people_move_only_those_below_them_into_channels_they_can_see() {
     owner.change_roles(assign("mover", movers, true)).await;
     moder.until(|m| matches!(m, S2C::Permissions(p) if p.sees(office))).await;
 
-    // A moderator moves someone without a role, who hears of it.
     moder.send(C2S::MoveMember { target: user_id, channel: afk }).await;
     user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: afk }).await;
 
-    // Not into a channel they can't see, though the moderator can.
     moder.send(C2S::MoveMember { target: user_id, channel: office }).await;
     assert_eq!(error(&mut moder).await, "user can't see Office");
-    // Nor anyone whose role isn't below the mover's.
     moder.send(C2S::MoveMember { target: boss_id, channel: afk }).await;
     assert!(error(&mut moder).await.contains("can't move boss: their role isn't below yours"));
-    // Nor without Move members.
     user.send(C2S::MoveMember { target: boss_id, channel: afk }).await;
     assert_eq!(error(&mut user).await, "you can't move boss");
 
-    // A password needs the mover's Bypass, which the moderator has.
     let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Lobby") };
     owner.send(C2S::EditChannel { id: lobby, settings: locked }).await;
     mover.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.id == lobby && c.has_password))).await;
@@ -1657,7 +1633,6 @@ async fn people_move_only_those_below_them_into_channels_they_can_see() {
     moder.send(C2S::MoveMember { target: user_id, channel: lobby }).await;
     user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: lobby }).await;
 
-    // Owning a room puts nobody beyond a moderator's reach in it.
     let den = C2S::CreateChannel { parent: None, settings: settings("Den"), temporary: true, kind: ChannelKind::Voice };
     user.send(den).await;
     moder.until(|m| matches!(m, S2C::ClientMoved { id, channel } if *id == user_id && *channel != lobby)).await;

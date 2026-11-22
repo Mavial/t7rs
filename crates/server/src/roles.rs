@@ -168,7 +168,6 @@ impl RoleStore {
     }
 
     pub fn set_perms(&mut self, id: RoleId, perms: Perms) -> Result<(), RoleError> {
-        // Only what a role can hold.
         let perms = perms & Perms::ALL;
         if id == RoleId::EVERYONE && !perms.has(Perm::View) {
             return Err(RoleError::EveryoneViews);

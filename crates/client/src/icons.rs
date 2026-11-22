@@ -10,7 +10,6 @@ pub enum Icon {
     Speaker,
     Mic,
     MicOff,
-    /// Muted on the server: a microphone with a padlock.
     MicLocked,
     Headphones,
     HeadphonesOff,
@@ -27,7 +26,6 @@ pub enum Icon {
     Cross,
     Dash,
     Crown,
-    /// A lobby: a speaker with a plus, for the room joining it opens.
     SpeakerPlus,
 }
 

@@ -153,7 +153,6 @@ enum TreeAction {
 /// Payload while dragging yourself onto another channel.
 struct DragSelf;
 
-/// Payload while dragging someone else onto another channel, to move them.
 struct DragMember(ClientId);
 
 /// Payload while dragging a channel to rearrange the tree.
@@ -564,7 +563,6 @@ impl App {
         }
     }
 
-    /// Whether the server passes our voice on.
     fn my_speech(&self) -> Speech {
         self.view.as_ref().and_then(ServerView::me).map_or(Speech::Allowed, |me| me.speech)
     }
@@ -1171,7 +1169,6 @@ impl App {
                                 theme::RED,
                                 "Mute microphone (Ctrl+Shift+M)",
                             ),
-                            // The server drops our voice: there is nothing to unmute here.
                             Speech::NotHere => {
                                 let tip = "You can't speak in this channel";
                                 mic_held(ui, Icon::MicOff, theme::TEXT_FAINT, tip);
@@ -1296,7 +1293,6 @@ impl App {
                             }
                             _ => None,
                         };
-                        // Someone dragged here would move: not where they are, and only where we may move people.
                         let member_drop = dragging_member.filter(|m| {
                             let elsewhere = view.clients.get(m).is_some_and(|c| c.channel != ch_id);
                             elsewhere && resp.contains_pointer() && !category && view.may_in(ch_id, Perm::MoveMembers)
@@ -1587,7 +1583,6 @@ impl App {
                                 );
                             }
                             let mut x = rect.right() - TREE_RIGHT_PAD - 7.0;
-                            // One microphone: muted by themselves, or kept from speaking here.
                             let (mic, why) = match (c.status.muted, c.speech) {
                                 (_, Speech::ServerMuted) => {
                                     (Some((Icon::MicLocked, theme::RED)), Some("Muted on the server"))
@@ -1978,7 +1973,6 @@ impl App {
     /// Keeps the audio engine and its shared state in line with the app state.
     fn drive_audio(&mut self, ctx: &egui::Context) {
         let s = self.settings.status;
-        // The mic stays shut while the server wouldn't pass our voice on.
         let silenced = self.my_speech() != Speech::Allowed;
         let v = &mut self.voice;
         v.shared.set_status(s.muted || silenced, s.deafened);
@@ -2474,7 +2468,6 @@ impl App {
             _ => None,
         };
         let may = |perm| editing.is_none_or(|id| view.is_some_and(|v| v.may_in(id, perm)));
-        // Listed moderators may change only the name and topic.
         let (may_edit, may_manage) = (may(Perm::Rename), may(Perm::ManageChannels));
         let saved_overrides = view.zip(editing).and_then(|(v, id)| v.channels.get(&id)).map(|c| c.overrides.clone());
         let moderators: Option<Vec<(Identity, Option<String>)>> = view
@@ -2497,8 +2490,6 @@ impl App {
             .as_ref()
             .and_then(|v| v.channels.values().find(|c| c.default).map(|c| c.name.clone()))
             .unwrap_or_else(|| "the default channel".into());
-        // What a new channel may be: a lobby keeps a level below it for its
-        // rooms and is permanent, and a category is a top-level heading.
         let kinds: Vec<(ChannelKind, &str)> = match (view, editing) {
             (Some(v), None) if may_create_permanent => {
                 let above = parent.and_then(|p| v.tree().iter().find(|(_, id)| *id == p));
@@ -3140,9 +3131,6 @@ fn tab_button(ui: &mut egui::Ui, label: &str, active: bool, unread: u32) -> egui
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// An icon toggle button, tinted with `on_color` while on (muted, deafened...).
-/// The microphone button while the server drops our voice: it shows why,
-/// and does nothing.
 fn mic_held(ui: &mut egui::Ui, icon: Icon, color: Color32, tip: &str) {
     let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), theme::SURFACE);
@@ -3150,6 +3138,7 @@ fn mic_held(ui: &mut egui::Ui, icon: Icon, color: Color32, tip: &str) {
     resp.on_hover_text(tip);
 }
 
+/// An icon toggle button, tinted with `on_color` while on (muted, deafened...).
 fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color: Color32, tip: &str) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     let (fill, color, icon) = match (*on, resp.hovered()) {

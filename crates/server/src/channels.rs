@@ -36,9 +36,7 @@ pub enum ChannelError {
     IntoItself,
     /// Categories only go at the top level.
     CategoryPlacement,
-    /// Only voice channels are temporary or have a password or a limit.
     KindSettings(ChannelKind),
-    /// Only a voice channel can be where people land.
     DefaultKind(ChannelKind),
     /// Everyone must be able to see the default channel, where people land.
     HidesDefault,
@@ -439,8 +437,6 @@ impl Channels {
         out
     }
 
-    /// A name for `nickname`'s room under `lobby` that no channel there has:
-    /// "Alice's room", else "Alice's room 2", and so on.
     pub fn room_name(&self, lobby: ChannelId, nickname: &str) -> String {
         (1..)
             .map(|n| {
@@ -452,12 +448,10 @@ impl Channels {
             .expect("some number is free")
     }
 
-    /// Every temporary channel.
     pub fn temporaries(&self) -> Vec<ChannelId> {
         self.map.values().filter(|c| c.info.temporary).map(|c| c.info.id).collect()
     }
 
-    /// Hands a temporary channel to someone else, or to nobody.
     pub fn set_owner(&mut self, id: ChannelId, owner: Option<ClientId>) {
         if let Some(c) = self.map.get_mut(&id).filter(|c| c.info.temporary) {
             c.info.owner = owner;
@@ -500,8 +494,6 @@ impl Channels {
         depth
     }
 
-    /// Levels in the subtree under and including `id`, counting the rooms
-    /// an empty lobby will have.
     fn height(&self, id: ChannelId) -> usize {
         let below = self.children_of(Some(id)).into_iter().map(|k| self.height(k)).max().unwrap_or(0);
         (1 + below).max(levels(self.map[&id].info.kind))
@@ -537,7 +529,6 @@ impl Channels {
     }
 }
 
-/// Levels a new channel of `kind` takes: a lobby's rooms go below it.
 fn levels(kind: ChannelKind) -> usize {
     if kind == ChannelKind::Lobby { 2 } else { 1 }
 }
@@ -770,7 +761,6 @@ mod tests {
 
     #[test]
     fn lobbies_keep_a_level_for_their_rooms_and_nobody_lands_in_them() {
-        // Lobby, Gaming > Squad, AFK
         let mut ch = three();
         let lobby = |name: &str, limit| ChannelSettings { max_clients: limit, ..settings(name) };
         let rooms = ch.create(Some(2), &lobby("Rooms", None), false, ChannelKind::Lobby, 1).unwrap();
@@ -784,7 +774,6 @@ mod tests {
         assert_eq!(ch.room_name(rooms, &long).chars().count(), MAX_CHANNEL_NAME_LEN);
         ch.validate(&settings(&ch.room_name(rooms, &long)), Some(rooms), None).unwrap();
 
-        // Even empty, it doesn't move where its rooms wouldn't fit.
         ch.delete(rooms).unwrap();
         let rooms = ch.create(Some(2), &lobby("Rooms", None), false, ChannelKind::Lobby, 1).unwrap();
         assert_eq!(ch.move_to(rooms, Some(3), 0), Err(ChannelError::TooDeep));
@@ -797,7 +786,6 @@ mod tests {
         assert_eq!(ch.edit(rooms, &lobby("Rooms", Some(3))), Err(lobbies));
         assert_eq!(ch.set_default(rooms), Err(ChannelError::DefaultKind(ChannelKind::Lobby)));
 
-        // Saved as a lobby, and a file can't put one where its rooms wouldn't fit.
         let back = Channels::from_config(&ch.to_config()).unwrap();
         assert_eq!(back.to_config(), ch.to_config());
         let deep = ChannelConfig { kind: ChannelKind::Lobby, ..cfg("Deep", vec![]) };

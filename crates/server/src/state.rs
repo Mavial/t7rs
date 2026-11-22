@@ -72,7 +72,6 @@ struct Client {
     permissions: Permissions,
     /// Where it was last told each person it sees is, itself included.
     known: HashMap<ClientId, ChannelId>,
-    /// When it came into its channel.
     arrived: Instant,
 }
 
@@ -81,7 +80,6 @@ impl Client {
         Subject { client: self.info.id, identity: self.info.identity }
     }
 
-    /// Puts it in `channel`, as of now.
     fn place(&mut self, channel: ChannelId) {
         self.info.channel = channel;
         self.arrived = Instant::now();
@@ -139,7 +137,6 @@ pub struct Server {
     dead: Vec<ClientId>,
     udp: Arc<UdpSocket>,
     datagram: Vec<u8>,
-    /// Muted on the server, whether connected or not, until unmuted. Not saved.
     mutes: HashSet<Identity>,
 }
 
@@ -457,10 +454,6 @@ impl Server {
         }
     }
 
-    /// Moves `target` into `channel` for someone who may move people out of
-    /// where `target` is and into `channel`, and stands above them where they
-    /// are. They must be able to see it, and only a mover who may bypass
-    /// limits and passwords puts them in a full or locked channel.
     fn move_member(&mut self, id: ClientId, target: ClientId, channel: ChannelId) {
         let Some(t) = self.clients.get(&target).filter(|_| self.knows(id, target)) else {
             return self.error(id, "that user is no longer online");
@@ -499,9 +492,6 @@ impl Server {
         }
     }
 
-    /// Mutes `target` on the server, or lifts it, for someone who may mute
-    /// people where `target` is and stands above them there. It holds for
-    /// every connection with their identity until lifted.
     fn server_mute(&mut self, id: ClientId, target: ClientId, muted: bool) {
         let Some(t) = self.clients.get(&target).filter(|_| self.knows(id, target)) else {
             return self.error(id, "that user is no longer online");
@@ -622,8 +612,6 @@ impl Server {
         }
     }
 
-    /// Puts `id` in `channel`, or for a lobby, in a new room of its own
-    /// under it, which it owns.
     fn enter(&mut self, id: ClientId, channel: ChannelId) -> Result<(), ChannelError> {
         let lobby = self.channels.get(channel).is_some_and(|c| c.kind == ChannelKind::Lobby);
         let channel = if lobby {
@@ -676,7 +664,6 @@ impl Server {
             }
         }
         if now != was {
-            // Those it just came into view of heard with it.
             let msg = S2C::ClientSpeech { id: subject, speech: now };
             self.broadcast(&msg, |c| c.known.contains_key(&subject) && !told[1].contains(&c.info.id));
         }
@@ -1026,9 +1013,6 @@ impl Server {
         }
     }
 
-    /// After people moved or left: temporary channels disappear once nobody
-    /// is in them (or below them), and one whose owner left passes to
-    /// whoever has been in it longest.
     fn tidy_rooms(&mut self) {
         let occupied: HashSet<ChannelId> = self.clients.values().map(|c| c.info.channel).collect();
         let abandoned = self.channels.abandoned_temporaries(&occupied);
@@ -1150,8 +1134,6 @@ impl Server {
     }
 }
 
-/// Whether the server passes on the voice of someone who may do
-/// `permissions`, where they are in `channel`.
 fn speech(server_muted: bool, permissions: &Permissions, channel: ChannelId) -> Speech {
     if server_muted {
         Speech::ServerMuted

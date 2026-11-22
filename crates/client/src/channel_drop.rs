@@ -153,8 +153,6 @@ fn depth(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
     depth
 }
 
-/// Levels in the subtree under and including `id`, counting the rooms an
-/// empty lobby will have.
 fn height(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
     let below = children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0);
     let lobby = channels.get(&id).is_some_and(|c| c.kind == ChannelKind::Lobby);

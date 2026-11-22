@@ -43,7 +43,6 @@ pub enum Perm {
 }
 
 impl Perm {
-    /// Every permission a role or a channel can hold.
     pub const ALL: [Perm; 13] = [
         Perm::View,
         Perm::Join,
@@ -95,7 +94,6 @@ impl Perms {
     /// The ones a channel can set: those that mean something in one place.
     /// Banning and managing roles are only ever server-wide.
     pub const CHANNEL: Perms = Perms(Perms::ALL.0 & !Perms::of(&[Perm::Ban, Perm::ManageRoles]).0);
-    /// What a client may be told it may do somewhere.
     const KNOWN: Perms = Perms::ALL.union(Perms::of(&[Perm::Rename]));
 
     pub const fn of(list: &[Perm]) -> Perms {
@@ -423,7 +421,6 @@ impl Roles {
     /// one moved there.
     pub fn height_at(&self, position: usize) -> Rank {
         let len = self.ranked.len();
-        // Even, leaving room for room owners just above Everyone.
         Rank(2 * (len - position.min(len.saturating_sub(1))) as u32)
     }
 
@@ -731,7 +728,6 @@ mod tests {
         assert!(!renames(ADMIN, None), "only a channel is renamed");
         let room_owner = Subject { client: 9, identity: NOBODY };
         assert!(roles.resolve(room_owner, Some(RAID), &t).perms.has(Perm::Rename), "a room's owner manages it");
-        // No role can hold it, and no file can name it.
         assert!(toml::from_str::<Role>("id = 7\nname = \"x\"\nperms = [\"rename\"]").is_err());
     }
 
@@ -742,7 +738,6 @@ mod tests {
         let room = roles.resolve(room_owner, Some(RAID), &t);
         assert!(room.perms.has(Perm::Kick) && room.perms.has(Perm::ManageChannels));
         assert!(!room.perms.has(Perm::Ban));
-        // Above people without a role there, below anyone with one.
         assert!(room.rank > Rank::EVERYONE && room.rank < roles.height(RoleId::MODERATOR));
         let mut lowest = roles.clone();
         lowest.ranked.push(Role { id: RoleId(7), name: "DJ".into(), perms: Perms::NONE });

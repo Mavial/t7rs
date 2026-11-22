@@ -291,7 +291,6 @@ const SCENES: &[Scene] = &[
     }),
     ("26-cant-speak", (1100, 720), |ctx| {
         let mut app = connected(ctx);
-        // Games keeps everyone without a role from speaking: Santi too, here.
         for id in [1, 5] {
             app.apply(&S2C::ClientSpeech { id, speech: Speech::NotHere });
         }
@@ -310,7 +309,6 @@ const SCENES: &[Scene] = &[
     }),
     ("28-server-muted", (1100, 720), |ctx| {
         let mut app = connected(ctx);
-        // Santi and Priya were muted on the server; Ines may not speak in the Lobby.
         for (id, speech) in [(1, Speech::ServerMuted), (5, Speech::ServerMuted), (8, Speech::NotHere)] {
             app.apply(&S2C::ClientSpeech { id, speech });
         }
@@ -318,7 +316,6 @@ const SCENES: &[Scene] = &[
     }),
     ("24-moderator-edit", (1100, 720), |ctx| {
         let mut app = connected(ctx);
-        // A listed moderator, who may rename the channel but not manage it.
         let view = app.view.as_mut().unwrap();
         let moderator = Perms::of(&[Perm::View, Perm::Join, Perm::Speak, Perm::Kick, Perm::Rename]);
         let channels = view.channels.keys().map(|&c| (c, moderator)).collect();
