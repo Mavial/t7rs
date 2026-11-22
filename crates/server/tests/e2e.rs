@@ -1344,7 +1344,7 @@ async fn listed_moderators_rename_their_channels_and_do_nothing_more() {
     assert_eq!(error(&mut holder).await, "you can't edit this channel");
 }
 
-async fn owned_by(c: &mut TestClient, channel: ChannelId, owner: Option<ClientId>) {
+async fn until_owned_by(c: &mut TestClient, channel: ChannelId, owner: Option<ClientId>) {
     c.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|ch| ch.id == channel && ch.owner == owner))).await;
 }
 
@@ -1367,7 +1367,7 @@ async fn a_room_passes_to_whoever_has_been_in_it_longest() {
     }
 
     a.send(C2S::JoinChannel { channel: lobby, password: None }).await;
-    owned_by(&mut c, raid, Some(b_id)).await;
+    until_owned_by(&mut c, raid, Some(b_id)).await;
     let powers = |m: &S2C| matches!(m, S2C::Permissions(p) if p.may_in(raid, Perm::Kick));
     let S2C::Permissions(p) = b.until(powers).await else { unreachable!() };
     assert!(p.may_in(raid, Perm::ManageChannels) && !p.may_in(lobby, Perm::Kick));
@@ -1377,7 +1377,7 @@ async fn a_room_passes_to_whoever_has_been_in_it_longest() {
     assert!(heard.iter().all(|m| !matches!(m, S2C::Channels(_))), "{heard:?}");
 
     drop(b);
-    owned_by(&mut a, raid, Some(c_id)).await;
+    until_owned_by(&mut a, raid, Some(c_id)).await;
 }
 
 #[tokio::test]
