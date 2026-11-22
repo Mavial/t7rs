@@ -43,7 +43,6 @@ fn main() {
         .init();
 
     let args = Args::parse();
-    // channels.toml, roles.toml and the rest live next to the config file.
     let data_dir = data_dir(&args.config);
     if let Some(Command::Owner { action: OwnerAction::Reset }) = args.command {
         let token =

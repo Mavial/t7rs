@@ -1,6 +1,3 @@
-//! The roles, who holds them and the pending ownership claim, and their saved
-//! format. Pure state, no networking: who may change what is decided by the caller.
-
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
@@ -14,9 +11,7 @@ pub enum RoleError {
     BadName,
     NameTaken,
     TooMany,
-    /// Everyone can't be renamed, moved, deleted, given or taken.
     Everyone,
-    /// Channel moderators hold it.
     Moderator,
 }
 
@@ -33,17 +28,14 @@ impl RoleError {
     }
 }
 
-/// `roles.toml`.
 #[derive(Serialize, Deserialize)]
 struct RolesFile {
-    /// Makes whoever redeems it first the owner. Gone once redeemed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claim_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     owner: Option<Identity>,
     next_id: u32,
     everyone: Perms,
-    /// Highest first.
     roles: Vec<Role>,
     #[serde(default)]
     members: BTreeMap<Identity, Member>,
@@ -52,7 +44,6 @@ struct RolesFile {
 pub struct RoleStore {
     roles: Roles,
     claim_token: Option<String>,
-    /// Ids only count up, so a stale role list can't change a newer role.
     next_id: u32,
 }
 
@@ -84,7 +75,6 @@ impl RoleStore {
         let highest = ids.iter().map(|r| r.0).max().unwrap_or(0);
         let owner = file.owner;
         let mut members = file.members;
-        // Roles that no longer exist are dropped, and so is anyone left with none.
         for member in members.values_mut() {
             member.roles.retain(|r| ids.contains(r));
             member.roles.sort_unstable();
@@ -95,7 +85,6 @@ impl RoleStore {
         Ok(Self { roles, claim_token: file.claim_token, next_id: file.next_id.max(highest + 1) })
     }
 
-    /// Write-then-rename, so a crash never truncates the file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let header = "# Roles, who holds them, and the owner, kept up to date by the server as\n\
                       # they change in T7. Edit it only while the server is stopped.\n\n";
@@ -121,13 +110,10 @@ impl RoleStore {
         self.claim_token.as_deref()
     }
 
-    /// Replaces any pending claim token. The owner stays until it is redeemed.
     pub fn set_claim_token(&mut self, token: String) {
         self.claim_token = Some(token);
     }
 
-    /// Makes `identity` the owner if `token` is the pending claim token, which
-    /// it uses up. A previous owner is no longer one.
     pub fn claim(&mut self, token: &str, identity: Identity, nickname: &str) -> bool {
         if self.claim_token.as_deref() != Some(token.trim()) {
             return false;
@@ -143,7 +129,6 @@ impl RoleStore {
         true
     }
 
-    /// A new role without permissions, at the bottom.
     pub fn create(&mut self, name: &str) -> Result<RoleId, RoleError> {
         if self.roles.ranked.len() >= MAX_ROLES {
             return Err(RoleError::TooMany);
@@ -170,7 +155,6 @@ impl RoleStore {
         Ok(())
     }
 
-    /// To `position` among the roles, highest first.
     pub fn move_to(&mut self, id: RoleId, position: usize) -> Result<(), RoleError> {
         let at = self.index(id)?;
         let role = self.roles.ranked.remove(at);
@@ -179,7 +163,6 @@ impl RoleStore {
         Ok(())
     }
 
-    /// Whoever holds it loses it.
     pub fn delete(&mut self, id: RoleId) -> Result<(), RoleError> {
         if id == RoleId::MODERATOR {
             return Err(RoleError::Moderator);
@@ -194,7 +177,6 @@ impl RoleStore {
         Ok(())
     }
 
-    /// Gives someone online, known as `nickname`, a role. Returns whether they lacked it.
     pub fn grant(&mut self, identity: Identity, nickname: &str, role: RoleId) -> Result<bool, RoleError> {
         self.index(role)?;
         let member =
@@ -208,7 +190,6 @@ impl RoleStore {
         Ok(true)
     }
 
-    /// Returns whether they held it.
     pub fn revoke(&mut self, identity: Identity, role: RoleId) -> Result<bool, RoleError> {
         self.index(role)?;
         let Some(member) = self.roles.members.get_mut(&identity) else { return Ok(false) };
@@ -222,7 +203,6 @@ impl RoleStore {
         Ok(true)
     }
 
-    /// Where the role is among them, highest first.
     fn index(&self, id: RoleId) -> Result<usize, RoleError> {
         if id == RoleId::EVERYONE {
             return Err(RoleError::Everyone);
@@ -235,8 +215,6 @@ impl RoleStore {
         Ok(&mut self.roles.ranked[at])
     }
 
-    /// Trimmed, without control characters, and unlike any other role's,
-    /// Everyone's and Owner's included.
     fn valid_name(&self, raw: &str, except: Option<RoleId>) -> Result<String, RoleError> {
         let name: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
         if name.is_empty() || name.chars().count() > MAX_ROLE_NAME_LEN {
@@ -250,7 +228,6 @@ impl RoleStore {
         Ok(name)
     }
 
-    /// Remembers the nickname of someone who holds roles. Returns whether it changed.
     pub fn seen(&mut self, identity: Identity, nickname: &str) -> bool {
         match self.roles.members.get_mut(&identity) {
             Some(m) if m.nickname != nickname => {
@@ -285,7 +262,6 @@ mod tests {
         assert_eq!((store.roles().owner, store.claim_token()), (Some(ALICE), None));
         assert!(!store.claim("abc", BOB, "bob"), "used up");
 
-        // A reset token hands it to someone else.
         store.set_claim_token("def".into());
         assert_eq!(store.roles().owner, Some(ALICE), "until it is redeemed");
         assert!(store.claim("def", BOB, "bob"));
@@ -345,7 +321,6 @@ mod tests {
         store.revoke(ALICE, RoleId::MODERATOR).unwrap();
         assert!(store.roles().members.is_empty(), "forgotten with no roles left");
 
-        // The owner is remembered without roles.
         store.set_claim_token("t".into());
         store.claim("t", BOB, "bob");
         store.grant(BOB, "bob", RoleId::ADMIN).unwrap();

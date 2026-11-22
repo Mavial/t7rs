@@ -107,10 +107,8 @@ enum TreeAction {
 /// Payload while dragging yourself onto another channel.
 struct DragSelf;
 
-/// Payload while dragging a channel to rearrange the tree.
 struct DragChannel(ChannelId);
 
-/// Payload while dragging a role to reorder the roles.
 struct DragRole(RoleId);
 
 /// Voice is considered blocked when no UDP pong arrived for this long.
@@ -152,16 +150,12 @@ enum Moderation {
     Ban { target: ClientId, name: String, reason: String, length: Option<u64>, include_ip: bool, focused: bool },
 }
 
-/// The Server settings dialog.
 struct ServerSettings {
     tab: SettingsTab,
     /// The ban list; `None` until the server sends it.
     bans: Option<Vec<BanInfo>>,
-    /// The role shown in the Roles tab.
     picked: Pick,
-    /// The picked role's name as typed, saved when the field loses focus.
     name: String,
-    /// A new role's name as typed.
     new_role: String,
 }
 
@@ -1102,7 +1096,6 @@ impl App {
                     for &(depth, ch_id) in view.tree() {
                         let ch = &view.channels[&ch_id];
                         let manages_it = manages(view, Some(ch_id));
-                        // Moving it renumbers its siblings.
                         let may_rearrange = manages_it && manages(view, ch.parent);
                         let clients = view.clients_in(ch_id);
                         let indent = depth as f32 * 18.0;
@@ -2022,7 +2015,6 @@ impl App {
                 .map(|(tab, label, _)| (tab, label))
                 .collect();
         let Some(&(first, _)) = tabs.first() else {
-            // They may no longer do either.
             self.server_settings = None;
             return;
         };
@@ -2162,8 +2154,6 @@ impl App {
             _ => None,
         };
         let may_create_permanent = view.is_some_and(|v| manages(v, parent));
-        // Who moderates the channel being edited, by nickname when online, for
-        // those who may change that.
         let editing = match dialog {
             ChannelDialog::Form(f) => f.editing,
             _ => None,
@@ -2350,8 +2340,6 @@ impl App {
     }
 }
 
-/// Whether the server lets this client manage channels in `place`: a channel
-/// and those below it, or the top level with `None`.
 fn manages(view: &ServerView, place: Option<ChannelId>) -> bool {
     match place {
         Some(p) => view.may_in(p, Perm::ManageChannels),
@@ -2672,7 +2660,6 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color:
     clicked
 }
 
-/// The Bans tab: everyone banned, each with Unban. The server answers an unban with the new list.
 fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
     match bans {
         None => {
@@ -2694,9 +2681,6 @@ fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
     }
 }
 
-/// The Roles tab: the roles in order on the left, highest first, and what the
-/// picked one may do and who holds it on the right. Only roles below your
-/// own can be changed.
 fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut ServerSettings, send: &mut Vec<C2S>) {
     let mine = view.me().map_or(Rank::EVERYONE, |me| roles.rank(me.identity));
     let below = |role: RoleId| mine > roles.height(role);
@@ -2726,7 +2710,6 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
                 if below(role.id) {
                     resp.dnd_set_drag_payload(DragRole(role.id));
                 }
-                // Dropped here, it takes this row's place, if that is below their own role.
                 let fits = mine > roles.height_at(position);
                 if let Some(dragged) = dragging.filter(|d| *d != role.id && fits && resp.contains_pointer()) {
                     let y = if roles.height(dragged) > roles.height(role.id) {
@@ -2836,8 +2819,6 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
     });
 }
 
-/// A row in the role list: the name, a faint note on the right, and a grip
-/// cursor when it can be dragged.
 fn role_row(ui: &mut egui::Ui, name: &str, note: &str, picked: bool, draggable: bool) -> egui::Response {
     let sense = if draggable { Sense::click_and_drag() } else { Sense::click() };
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), sense);
@@ -2865,7 +2846,6 @@ fn role_row(ui: &mut egui::Ui, name: &str, note: &str, picked: bool, draggable: 
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A switch per permission, in two columns; `changed` gets the new set when one flips.
 fn perm_switches(ui: &mut egui::Ui, perms: Perms, enabled: bool, mut changed: impl FnMut(Perms)) {
     ui.add_enabled_ui(enabled, |ui| {
         ui.columns(2, |columns| {

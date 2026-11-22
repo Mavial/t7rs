@@ -15,9 +15,7 @@ pub struct ServerView {
     pub clients: HashMap<ClientId, ClientInfo>,
     /// Every role and who holds them, while this client may manage roles.
     pub roles: Option<Roles>,
-    /// What the server lets this client do on the server as a whole.
     may: Perms,
-    /// What it lets this client do in each channel.
     may_in: HashMap<ChannelId, Perms>,
     /// Channel tree in display order: (depth, channel id).
     tree: Vec<(usize, ChannelId)>,

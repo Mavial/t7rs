@@ -68,7 +68,6 @@ struct Client {
     /// Learned from the first authenticated datagram (works behind NAT).
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
-    /// What it was last told it may do.
     permissions: Permissions,
 }
 
@@ -121,7 +120,6 @@ pub struct Server {
     channels: Channels,
     bans: Bans,
     roles: RoleStore,
-    /// Holds `channels.toml`, `bans.toml` and `roles.toml` (`None`: changes are not saved).
     data_dir: Option<PathBuf>,
     clients: HashMap<ClientId, Client>,
     next_id: ClientId,
@@ -403,8 +401,6 @@ impl Server {
         }
     }
 
-    /// Applies a change to roles below `id`'s own, and to people below it, if
-    /// it may manage roles.
     fn change_roles(&mut self, id: ClientId, change: RoleChange) {
         let mine = self.standing(id, None);
         if !mine.perms.has(Perm::ManageRoles) {
@@ -412,7 +408,6 @@ impl Server {
         }
         let roles = self.roles.roles();
         let highest = match &change {
-            // It starts at the bottom, below theirs if they hold any.
             RoleChange::Create { .. } => Rank::EVERYONE,
             RoleChange::Rename { id, .. } | RoleChange::SetPermissions { id, .. } | RoleChange::Delete { id } => {
                 roles.height(*id)
@@ -474,7 +469,6 @@ impl Server {
         self.broadcast(&S2C::ClientMoved { id, channel }, |_| true);
     }
 
-    /// What a client may do in `channel`, or on the server as a whole with `None`.
     fn standing(&self, id: ClientId, channel: Option<ChannelId>) -> Standing {
         self.roles.roles().resolve(self.clients[&id].subject(), channel, &self.channels)
     }
@@ -492,9 +486,6 @@ impl Server {
         }
     }
 
-    /// Tells each client what changed about what it may do and the role shown
-    /// next to it, and sends the roles to those who may manage them: all of
-    /// them when `roles_changed`, else only those who just became able to.
     fn refresh(&mut self, roles_changed: bool) {
         let mut managers = Vec::new();
         let mut retitled = Vec::new();
@@ -590,8 +581,6 @@ impl Server {
         self.refresh(true);
     }
 
-    /// Why `id` may not do `perm`, which `verb` names, to `target` in
-    /// `channel` (on the server as a whole with `None`), if it may not.
     fn refusal(
         &self,
         id: ClientId,
@@ -738,8 +727,6 @@ impl Server {
         }
     }
 
-    /// Sends everyone the new channel list and what they may do in it; saves
-    /// it when permanent channels changed.
     fn channels_changed(&mut self, save: bool) {
         self.broadcast(&S2C::Channels(self.channels.snapshot()), |_| true);
         self.refresh(false);
