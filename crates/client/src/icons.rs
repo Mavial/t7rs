@@ -15,6 +15,9 @@ pub enum Icon {
     Moon,
     ChevronRight,
     Sliders,
+    Lock,
+    Shield,
+    Dots,
 }
 
 struct Pen<'a> {
@@ -100,6 +103,19 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 pen.line((3.0, y), (knob - 2.5, y));
                 pen.line((knob + 2.5, y), (21.0, y));
                 pen.poly(&Pen::arc_points(knob, y, 2.5, 0.0, 360.0), true);
+            }
+        }
+        Icon::Lock => {
+            pen.rrect(5.0, 11.0, 19.0, 21.0, 2.0);
+            pen.arc(12.0, 11.0, 4.0, 180.0, 360.0);
+        }
+        Icon::Shield => pen.poly(
+            &[(12.0, 2.5), (20.0, 5.5), (20.0, 11.0), (17.5, 17.0), (12.0, 21.5), (6.5, 17.0), (4.0, 11.0), (4.0, 5.5)],
+            true,
+        ),
+        Icon::Dots => {
+            for x in [5.0, 12.0, 19.0] {
+                pen.poly(&Pen::arc_points(x, 12.0, 1.5, 0.0, 360.0), true);
             }
         }
         Icon::ChevronRight => pen.poly(&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)], false),

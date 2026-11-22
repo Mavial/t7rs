@@ -6,7 +6,10 @@ use egui::{
     text::LayoutJob, vec2,
 };
 use t7_proto::model::ServerView;
-use t7_proto::{C2S, ChannelId, ClientId, ClientStatus, LeaveReason, S2C, TextTarget};
+use t7_proto::{
+    C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, LeaveReason, MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN,
+    MAX_CHANNEL_TOPIC_LEN, PasswordChange, S2C, TextTarget,
+};
 
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
 use crate::icons::{self, Icon};
@@ -67,6 +70,16 @@ pub struct Launch {
     pub nickname: Option<String>,
 }
 
+/// Something picked in the channel tree, applied after drawing it.
+enum TreeAction {
+    Create(Option<ChannelId>),
+    Edit(ChannelId),
+    Shift(ChannelId, i32),
+    MakeDefault(ChannelId),
+    Delete(ChannelId),
+    AdminLogin,
+}
+
 /// Payload while dragging yourself onto another channel.
 struct DragSelf;
 
@@ -110,6 +123,48 @@ struct PokeAlert {
     time: String,
 }
 
+/// The channel-related dialog on screen, if any (one at a time).
+enum ChannelDialog {
+    Form(ChannelForm),
+    Password { channel: ChannelId, name: String, password: String, focused: bool },
+    Delete { channel: ChannelId, name: String, occupants: usize },
+    AdminLogin { token: String, focused: bool },
+}
+
+/// Creating (`editing: None`) or editing a channel.
+struct ChannelForm {
+    editing: Option<ChannelId>,
+    parent: Option<ChannelId>,
+    name: String,
+    topic: String,
+    limited: bool,
+    limit: u32,
+    /// Editing a channel that already has a password: keep protection on?
+    had_password: bool,
+    protected: bool,
+    password: String,
+    temporary: bool,
+    focused: bool,
+}
+
+impl ChannelForm {
+    fn settings(&self) -> ChannelSettings {
+        let password = if self.had_password && !self.protected {
+            PasswordChange::Remove
+        } else if self.password.is_empty() {
+            PasswordChange::Keep
+        } else {
+            PasswordChange::Set(self.password.clone())
+        };
+        ChannelSettings {
+            name: self.name.trim().to_owned(),
+            topic: self.topic.trim().to_owned(),
+            max_clients: self.limited.then_some(self.limit),
+            password,
+        }
+    }
+}
+
 struct AudioDialog {
     /// (label, folder) of every selectable sound pack except the built-in one.
     packs: Vec<(String, std::path::PathBuf)>,
@@ -138,6 +193,11 @@ pub struct App {
     poke_form: Option<PokeForm>,
     pokes: std::collections::VecDeque<PokeAlert>,
     sound_pack: Pack,
+    channel_dialog: Option<ChannelDialog>,
+    /// Address of the connected server, for per-server admin tokens.
+    server_address: String,
+    /// Token sent but not yet confirmed; saved once the server accepts it.
+    pending_admin_token: Option<String>,
     /// Ask the window manager to flash the taskbar entry.
     attention: bool,
 }
@@ -179,6 +239,9 @@ impl App {
             poke_form: None,
             pokes: Default::default(),
             sound_pack: Pack::BuiltIn,
+            channel_dialog: None,
+            server_address: String::new(),
+            pending_admin_token: None,
             attention: false,
         };
         app.sound_pack = Pack::open(app.settings.audio.sound_pack.as_deref());
@@ -232,9 +295,87 @@ impl App {
     }
 
     fn join_channel(&mut self, channel: ChannelId) {
-        if self.view.as_ref().and_then(|v| v.my_channel()) != Some(channel) {
-            self.net.send(C2S::JoinChannel { channel });
+        let Some(view) = &self.view else { return };
+        let Some(ch) = view.channels.get(&channel) else { return };
+        if view.my_channel() == Some(channel) {
+            return;
         }
+        if ch.has_password && !self.am_admin() {
+            let name = ch.name.clone();
+            self.channel_dialog = Some(ChannelDialog::Password { channel, name, password: String::new(), focused: false });
+        } else {
+            self.net.send(C2S::JoinChannel { channel, password: None });
+        }
+    }
+
+    fn am_admin(&self) -> bool {
+        self.view.as_ref().and_then(|v| v.me()).is_some_and(|c| c.admin)
+    }
+
+    fn open_create_channel(&mut self, parent: Option<ChannelId>) {
+        let parent_temporary =
+            parent.and_then(|p| self.view.as_ref()?.channels.get(&p).map(|c| c.temporary)).unwrap_or(false);
+        self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
+            editing: None,
+            parent,
+            name: String::new(),
+            topic: String::new(),
+            limited: false,
+            limit: 5,
+            had_password: false,
+            protected: false,
+            password: String::new(),
+            temporary: !self.am_admin() || parent_temporary,
+            focused: false,
+        }));
+    }
+
+    fn open_edit_channel(&mut self, channel: ChannelId) {
+        let Some(ch) = self.view.as_ref().and_then(|v| v.channels.get(&channel)) else { return };
+        self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
+            editing: Some(channel),
+            parent: ch.parent,
+            name: ch.name.clone(),
+            topic: ch.topic.clone(),
+            limited: ch.max_clients.is_some(),
+            limit: ch.max_clients.unwrap_or(5),
+            had_password: ch.has_password,
+            protected: ch.has_password,
+            password: String::new(),
+            temporary: ch.temporary,
+            focused: false,
+        }));
+    }
+
+    fn open_delete_channel(&mut self, channel: ChannelId) {
+        let Some(view) = &self.view else { return };
+        let Some(ch) = view.channels.get(&channel) else { return };
+        // Everyone in the channel or below it.
+        let mut below = vec![channel];
+        let mut i = 0;
+        while i < below.len() {
+            let parent = below[i];
+            below.extend(view.channels.values().filter(|c| c.parent == Some(parent)).map(|c| c.id));
+            i += 1;
+        }
+        let occupants = view.clients.values().filter(|c| below.contains(&c.channel)).count();
+        self.channel_dialog = Some(ChannelDialog::Delete { channel, name: ch.name.clone(), occupants });
+    }
+
+    /// Moves a channel one place up (`-1`) or down (`+1`) among its siblings.
+    fn shift_channel(&mut self, channel: ChannelId, delta: i32) {
+        let Some(view) = &self.view else { return };
+        let Some(ch) = view.channels.get(&channel) else { return };
+        let mut siblings: Vec<_> = view.channels.values().filter(|c| c.parent == ch.parent).collect();
+        siblings.sort_by_key(|c| (c.order, c.id));
+        let Some(index) = siblings.iter().position(|c| c.id == channel) else { return };
+        let Some(position) = index.checked_add_signed(delta as isize).filter(|&p| p < siblings.len()) else { return };
+        self.net.send(C2S::MoveChannel { id: channel, parent: ch.parent, position: position as u32 });
+    }
+
+    fn authenticate(&mut self, token: String) {
+        self.pending_admin_token = Some(token.clone());
+        self.net.send(C2S::Authenticate { token });
     }
 
     fn set_status(&mut self, status: ClientStatus) {
@@ -420,6 +561,7 @@ impl App {
                     Conn::Connecting { address } => address.clone(),
                     _ => String::new(),
                 };
+                self.server_address = address.clone();
                 let recent = Recent { address, server_name: server.name.clone() };
                 self.settings.recent.retain(|r| r.address != recent.address);
                 self.settings.recent.insert(0, recent);
@@ -448,6 +590,9 @@ impl App {
                 self.focus_input = true;
                 if self.settings.status != ClientStatus::default() {
                     self.net.send(C2S::SetStatus(self.settings.status));
+                }
+                if let Some(token) = self.settings.admin_tokens.get(&self.server_address).cloned() {
+                    self.authenticate(token);
                 }
             }
             S2C::ClientJoined(info) => {
@@ -506,6 +651,23 @@ impl App {
                 }
             }
             S2C::ClientStatus { .. } => self.apply(&msg),
+            S2C::Channels(_) => {
+                self.apply(&msg);
+                self.sync_channel_tab_title();
+            }
+            S2C::ClientAdmin { id, admin } => {
+                self.apply(&msg);
+                let Some(view) = &self.view else { return };
+                let name = view.nickname(id).unwrap_or("Someone").to_owned();
+                if id == view.my_id {
+                    if let Some(token) = self.pending_admin_token.take() {
+                        self.settings.admin_tokens.insert(self.server_address.clone(), token);
+                    }
+                    self.push(0, LineKind::System, "You are a server admin now");
+                } else if admin {
+                    self.push(0, LineKind::System, format!("{name} is a server admin now"));
+                }
+            }
             S2C::Text { from, target, channel, text } => {
                 let Some(view) = &self.view else { return };
                 let name = view.nickname(from).unwrap_or("unknown").to_owned();
@@ -523,6 +685,10 @@ impl App {
             }
             S2C::Poked { from, message } => self.on_poked(from, message),
             S2C::Error { message } => {
+                // A saved token that no longer works (e.g. the server's was reset) is forgotten.
+                if message == "wrong admin token" && self.pending_admin_token.take().is_some() {
+                    self.settings.admin_tokens.remove(&self.server_address);
+                }
                 let tab = self.active_tab;
                 self.push(tab, LineKind::Error, message);
             }
@@ -699,8 +865,33 @@ impl App {
                 let mut join = None;
                 let mut private = None;
                 let mut poke = None;
+                let mut action: Option<TreeAction> = None;
+                let admin = view.me().is_some_and(|c| c.admin);
+                // Mirrors the server's rule: admins, or the creator of a temporary channel.
+                let may_manage = |ch: &t7_proto::ChannelInfo| admin || (ch.temporary && ch.creator == Some(view.my_id));
 
-                ui.label(RichText::new("CHANNELS").size(11.0).color(theme::TEXT_FAINT).strong());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("CHANNELS").size(11.0).color(theme::TEXT_FAINT).strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 20.0), Sense::click());
+                        let color = if resp.hovered() { theme::TEXT } else { theme::TEXT_FAINT };
+                        if resp.hovered() {
+                            ui.painter().rect_filled(rect, CornerRadius::same(5), theme::SURFACE_HOVER);
+                        }
+                        icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), Icon::Dots, color);
+                        egui::Popup::menu(&resp).show(|ui| {
+                            let label = if admin { "Create channel…" } else { "Create temporary channel…" };
+                            if ui.button(label).clicked() {
+                                action = Some(TreeAction::Create(None));
+                            }
+                            if admin {
+                                ui.add_enabled(false, egui::Button::new("You're a server admin"));
+                            } else if ui.button("Admin login…").clicked() {
+                                action = Some(TreeAction::AdminLogin);
+                            }
+                        });
+                    });
+                });
                 ui.add_space(4.0);
 
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -735,7 +926,16 @@ impl App {
                         let x = rect.left() + indent + 6.0;
                         icons::paint(p, egui::Rect::from_center_size(egui::pos2(x + 7.0, rect.center().y), vec2(15.0, 15.0)), Icon::Speaker, icon_color);
                         let name_color = if is_mine { theme::TEXT } else { theme::TEXT_DIM };
-                        p.text(egui::pos2(x + 22.0, rect.center().y), Align2::LEFT_CENTER, &ch.name, FontId::proportional(14.0), name_color);
+                        let name_rect = p.text(egui::pos2(x + 22.0, rect.center().y), Align2::LEFT_CENTER, &ch.name, FontId::proportional(14.0), name_color);
+                        let mut after = name_rect.right() + 6.0;
+                        if ch.has_password {
+                            let r = egui::Rect::from_center_size(egui::pos2(after + 6.0, rect.center().y), vec2(12.0, 12.0));
+                            icons::paint(p, r, Icon::Lock, theme::TEXT_FAINT);
+                            after += 16.0;
+                        }
+                        if ch.temporary {
+                            p.text(egui::pos2(after, rect.center().y + 0.5), Align2::LEFT_CENTER, "temporary", FontId::proportional(11.0), theme::TEXT_FAINT);
+                        }
 
                         let count = match ch.max_clients {
                             Some(m) => format!("{}/{}", clients.len(), m),
@@ -750,14 +950,45 @@ impl App {
                         if resp.double_clicked() || resp.dnd_release_payload::<DragSelf>().is_some() {
                             join = Some(ch_id);
                         }
-                        let resp = if ch.topic.is_empty() {
-                            resp
-                        } else {
-                            resp.on_hover_text(&ch.topic)
-                        };
+                        let mut tip: Vec<String> = Vec::new();
+                        if !ch.topic.is_empty() {
+                            tip.push(ch.topic.clone());
+                        }
+                        if ch.default {
+                            tip.push("New people land here.".into());
+                        }
+                        if ch.temporary {
+                            tip.push("Temporary: removed once everyone has left.".into());
+                        }
+                        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip.join("\n")) };
                         resp.context_menu(|ui| {
                             if ui.add_enabled(!is_mine && !full, egui::Button::new("Join channel")).clicked() {
                                 join = Some(ch_id);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if depth + 1 < MAX_CHANNEL_DEPTH && ui.button("Create sub-channel…").clicked() {
+                                action = Some(TreeAction::Create(Some(ch_id)));
+                                ui.close();
+                            }
+                            if may_manage(ch) && ui.button("Edit channel…").clicked() {
+                                action = Some(TreeAction::Edit(ch_id));
+                                ui.close();
+                            }
+                            if admin {
+                                if ui.button("Move up").clicked() {
+                                    action = Some(TreeAction::Shift(ch_id, -1));
+                                }
+                                if ui.button("Move down").clicked() {
+                                    action = Some(TreeAction::Shift(ch_id, 1));
+                                }
+                                if !ch.default && !ch.temporary && ui.button("Make default channel").clicked() {
+                                    action = Some(TreeAction::MakeDefault(ch_id));
+                                    ui.close();
+                                }
+                            }
+                            if may_manage(ch) && !ch.default && ui.button("Delete channel…").clicked() {
+                                action = Some(TreeAction::Delete(ch_id));
                                 ui.close();
                             }
                         });
@@ -778,6 +1009,13 @@ impl App {
                             }
                             let color = if c.status.away { theme::TEXT_FAINT } else { theme::TEXT };
                             let name_rect = p.text(egui::pos2(ax + 18.0, rect.center().y), Align2::LEFT_CENTER, &c.nickname, FontId::proportional(13.5), color);
+                            let mut name_end = name_rect.right();
+                            if c.admin {
+                                let r = egui::Rect::from_center_size(egui::pos2(name_end + 11.0, rect.center().y), vec2(12.0, 12.0));
+                                icons::paint(p, r, Icon::Shield, theme::ACCENT_TEXT);
+                                name_end += 16.0;
+                            }
+                            let name_rect = egui::Rect::from_min_max(name_rect.min, egui::pos2(name_end, name_rect.max.y));
                             let volume = volumes.get(&c.nickname).copied().unwrap_or(1.0);
                             let hint = if is_me {
                                 Some("you".to_owned())
@@ -857,6 +1095,17 @@ impl App {
                 }
                 if let Some((id, nickname, v)) = volume_change.take() {
                     self.set_user_volume(id, &nickname, v);
+                }
+                match action {
+                    Some(TreeAction::Create(parent)) => self.open_create_channel(parent),
+                    Some(TreeAction::Edit(ch)) => self.open_edit_channel(ch),
+                    Some(TreeAction::Shift(ch, delta)) => self.shift_channel(ch, delta),
+                    Some(TreeAction::MakeDefault(ch)) => self.net.send(C2S::SetDefaultChannel { id: ch }),
+                    Some(TreeAction::Delete(ch)) => self.open_delete_channel(ch),
+                    Some(TreeAction::AdminLogin) => {
+                        self.channel_dialog = Some(ChannelDialog::AdminLogin { token: String::new(), focused: false });
+                    }
+                    None => {}
                 }
             });
     }
@@ -1334,6 +1583,211 @@ impl App {
     }
 }
 
+impl App {
+    fn channel_dialog(&mut self, ctx: &egui::Context) {
+        // A dialog about a channel that just disappeared (deleted, or an emptied
+        // temporary channel) closes by itself.
+        let about = match &self.channel_dialog {
+            Some(ChannelDialog::Form(f)) => f.editing.or(f.parent),
+            Some(ChannelDialog::Password { channel, .. } | ChannelDialog::Delete { channel, .. }) => Some(*channel),
+            _ => None,
+        };
+        let gone = about.is_some_and(|id| !self.view.as_ref().is_some_and(|v| v.channels.contains_key(&id)));
+        if gone {
+            self.channel_dialog = None;
+        }
+        let Some(dialog) = &mut self.channel_dialog else { return };
+        let admin = self.view.as_ref().and_then(|v| v.me()).is_some_and(|c| c.admin);
+        let channel_name = |id: Option<ChannelId>| {
+            id.and_then(|id| self.view.as_ref()?.channels.get(&id).map(|c| c.name.clone()))
+        };
+        let parent_name = match dialog {
+            ChannelDialog::Form(f) if f.editing.is_none() => channel_name(f.parent),
+            _ => None,
+        };
+        let default_name = self
+            .view
+            .as_ref()
+            .and_then(|v| v.channels.values().find(|c| c.default).map(|c| c.name.clone()))
+            .unwrap_or_else(|| "the default channel".into());
+
+        let mut send: Option<C2S> = None;
+        let mut login: Option<String> = None;
+        let mut close = false;
+        let modal = egui::Modal::new(Id::unique("channel-dialog")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            match dialog {
+                ChannelDialog::Form(form) => {
+                    let title = match (&form.editing, &parent_name) {
+                        (Some(_), _) => format!("Edit {}", form.name),
+                        (None, Some(parent)) => format!("New channel in {parent}"),
+                        (None, None) => "New channel".to_owned(),
+                    };
+                    ui.label(RichText::new(title).size(19.0).strong().color(theme::TEXT));
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("Name").size(12.0).color(theme::TEXT_DIM));
+                    let name = ui.add(
+                        egui::TextEdit::singleline(&mut form.name)
+                            .char_limit(MAX_CHANNEL_NAME_LEN)
+                            .desired_width(f32::INFINITY)
+                            .margin(Margin::symmetric(10, 7)),
+                    );
+                    if !form.focused {
+                        name.request_focus();
+                        form.focused = true;
+                    }
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Topic (optional)").size(12.0).color(theme::TEXT_DIM));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.topic)
+                            .char_limit(MAX_CHANNEL_TOPIC_LEN)
+                            .desired_width(f32::INFINITY)
+                            .margin(Margin::symmetric(10, 7)),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut form.limited, "Limit to");
+                        ui.add_enabled(form.limited, egui::DragValue::new(&mut form.limit).range(1..=1000).suffix(" people"));
+                    });
+                    if form.had_password {
+                        ui.checkbox(&mut form.protected, "Password protected");
+                    }
+                    if !form.had_password || form.protected {
+                        let label = if form.had_password { "New password (empty keeps the current one)" } else { "Password (optional)" };
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(label).size(12.0).color(theme::TEXT_DIM));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.password)
+                                .password(true)
+                                .desired_width(f32::INFINITY)
+                                .margin(Margin::symmetric(10, 7)),
+                        );
+                    }
+                    if form.editing.is_none() {
+                        ui.add_space(6.0);
+                        if admin {
+                            ui.checkbox(&mut form.temporary, "Temporary: removed once everyone has left");
+                        } else {
+                            ui.label(
+                                RichText::new("Temporary: removed once everyone has left. You'll move into it.")
+                                    .size(12.0)
+                                    .color(theme::TEXT_FAINT),
+                            );
+                        }
+                    }
+                    ui.add_space(14.0);
+                    let ready = !form.name.trim().is_empty();
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let label = if form.editing.is_some() { "Save" } else { "Create" };
+                        if ui.add_enabled(ready, theme::primary_button(label)).clicked() || (ready && enter) {
+                            let settings = form.settings();
+                            send = Some(match form.editing {
+                                Some(id) => C2S::EditChannel { id, settings },
+                                None => C2S::CreateChannel { parent: form.parent, settings, temporary: form.temporary },
+                            });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                ChannelDialog::Password { channel, name, password, focused } => {
+                    ui.label(RichText::new(format!("Join {name}")).size(19.0).strong().color(theme::TEXT));
+                    ui.add_space(2.0);
+                    ui.label(RichText::new("This channel has a password.").size(12.5).color(theme::TEXT_DIM));
+                    ui.add_space(12.0);
+                    let field = ui.add(
+                        egui::TextEdit::singleline(password)
+                            .password(true)
+                            .hint_text("Password")
+                            .desired_width(f32::INFINITY)
+                            .margin(Margin::symmetric(10, 7)),
+                    );
+                    if !*focused {
+                        field.request_focus();
+                        *focused = true;
+                    }
+                    ui.add_space(14.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(theme::primary_button("Join")).clicked() || enter {
+                            send = Some(C2S::JoinChannel { channel: *channel, password: Some(password.clone()) });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                ChannelDialog::Delete { channel, name, occupants } => {
+                    ui.label(RichText::new(format!("Delete {name}?")).size(19.0).strong().color(theme::TEXT));
+                    ui.add_space(6.0);
+                    let mut text = "Its sub-channels are deleted too.".to_owned();
+                    if *occupants > 0 {
+                        let who = if *occupants == 1 { "The 1 person".to_owned() } else { format!("The {occupants} people") };
+                        text.push_str(&format!(" {who} inside will move to {default_name}."));
+                    }
+                    ui.label(RichText::new(text).size(13.0).color(theme::TEXT_DIM));
+                    ui.add_space(14.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let delete = egui::Button::new(RichText::new("Delete").color(Color32::WHITE).strong())
+                            .fill(theme::RED)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(theme::RADIUS);
+                        if ui.add(delete).clicked() {
+                            send = Some(C2S::DeleteChannel { id: *channel });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                ChannelDialog::AdminLogin { token, focused } => {
+                    ui.label(RichText::new("Admin login").size(19.0).strong().color(theme::TEXT));
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("Admins can create, edit, rearrange and delete any channel. The token is in the server's log and in admin_token.txt next to its config.")
+                            .size(12.5)
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.add_space(12.0);
+                    let field = ui.add(
+                        egui::TextEdit::singleline(token)
+                            .password(true)
+                            .hint_text("Admin token")
+                            .desired_width(f32::INFINITY)
+                            .margin(Margin::symmetric(10, 7)),
+                    );
+                    if !*focused {
+                        field.request_focus();
+                        *focused = true;
+                    }
+                    ui.add_space(14.0);
+                    let ready = !token.trim().is_empty();
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add_enabled(ready, theme::primary_button("Log in")).clicked() || (ready && enter) {
+                            login = Some(token.trim().to_owned());
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+            }
+        });
+        if let Some(msg) = send {
+            self.net.send(msg);
+            close = true;
+        }
+        if let Some(token) = login {
+            self.authenticate(token);
+            close = true;
+        }
+        if close || modal.should_close() {
+            self.channel_dialog = None;
+        }
+    }
+}
+
 fn sounds_dir() -> Option<std::path::PathBuf> {
     settings::data_dir().map(|d| d.join("sounds"))
 }
@@ -1372,6 +1826,7 @@ impl App {
         self.audio_dialog(&ctx);
         self.poke_dialog(&ctx);
         self.poke_alert(&ctx);
+        self.channel_dialog(&ctx);
     }
 
     /// True once after a poke arrived: the shell flashes the taskbar entry.

@@ -3,6 +3,8 @@
 //!     cargo run --example voicebot -- ADDR tone   [SECONDS]   # speak a quiet two-note tone
 //!     cargo run --example voicebot -- ADDR listen [SECONDS]   # report voice frames heard
 //!     cargo run --example voicebot -- ADDR poke NICK [MESSAGE]  # poke someone
+//!     cargo run --example voicebot -- ADDR admin TOKEN [SECONDS]  # become admin and stay
+//!     cargo run --example voicebot -- ADDR temp NAME PASSWORD [SECONDS]  # make a temporary channel and stay
 //!
 //! Joins the default channel. `listen` prints, per speaker, how many frames
 //! arrived and how loud they decode, so a real client's capture → encode →
@@ -32,6 +34,8 @@ async fn main() {
     let nickname = match mode.as_str() {
         "tone" => "ToneBot",
         "poke" => "PokeBot",
+        "admin" => "AdminBot",
+        "temp" => "RaidLead",
         _ => "ListenBot",
     }
     .to_owned();
@@ -44,6 +48,32 @@ async fn main() {
         }
         other => panic!("not welcomed: {other:?}"),
     };
+    if mode == "admin" || mode == "temp" {
+        let first = rest.first().cloned().unwrap_or_default();
+        let msg = if mode == "admin" {
+            C2S::Authenticate { token: first }
+        } else {
+            let password = rest.get(1).cloned().unwrap_or_default();
+            let settings = ChannelSettings {
+                name: first,
+                topic: "Tonight at 9".into(),
+                max_clients: Some(4),
+                password: if password.is_empty() { PasswordChange::Keep } else { PasswordChange::Set(password) },
+            };
+            C2S::CreateChannel { parent: None, settings, temporary: true }
+        };
+        write_frame(&mut w, &msg).await.unwrap();
+        let stay: u64 = rest.last().and_then(|s| s.parse().ok()).unwrap_or(10);
+        let _ = tokio::time::timeout(Duration::from_secs(stay), async {
+            while let Ok(m) = read_frame::<_, S2C>(&mut r, &mut buf).await {
+                if let S2C::Error { message } = m {
+                    println!("server said: {message}");
+                }
+            }
+        })
+        .await;
+        return;
+    }
     if mode == "poke" {
         let target_name = rest.first().cloned().unwrap_or_default();
         let message = rest.get(1).cloned().unwrap_or_default();

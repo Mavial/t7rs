@@ -16,6 +16,8 @@ pub struct Settings {
     pub recent: Vec<Recent>,
     /// Per-person volume by nickname; only values other than 100% are kept.
     pub user_volumes: std::collections::BTreeMap<String, f32>,
+    /// Admin token per server address, sent automatically on connect.
+    pub admin_tokens: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -102,6 +104,7 @@ mod tests {
             audio: AudioSettings { ptt_key: Some(crate::audio::PttKey { vk: 0x56 }), ..Default::default() },
             recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
             user_volumes: [("Some One".to_owned(), 0.5)].into(),
+            admin_tokens: [("1.2.3.4".to_owned(), "abc".to_owned())].into(),
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);

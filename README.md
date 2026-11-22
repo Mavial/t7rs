@@ -45,7 +45,10 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Action | How |
 | --- | --- |
 | Connect | `Ctrl+S`, the Connect button, or click a recent server |
-| Switch channel | Double-click a channel, drag yourself onto it, or right-click → Join |
+| Switch channel | Double-click a channel, drag yourself onto it, or right-click → Join. Channels with a lock ask for a password |
+| New channel | The ⋯ button next to CHANNELS, or right-click a channel → Create sub-channel. Yours are temporary: they disappear once everyone has left |
+| Edit, rearrange, delete | Right-click a channel. Anyone can edit or delete the temporary channels they made; admins can do everything |
+| Become admin | ⋯ → Admin login, with the server's admin token. T7 remembers it per server |
 | Private message | Double-click a user, or right-click → Send private message |
 | Close a PM tab | Middle-click it, or right-click → Close |
 | Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right. Sound off silences the other people, not notification sounds |
@@ -80,6 +83,7 @@ welcome = "Welcome!"
 bind = "0.0.0.0:9988"
 password = ""          # empty = public
 max_clients = 128
+admin_token = ""       # empty = generate one (see below)
 
 [[channels]]
 name = "Lobby"
@@ -91,6 +95,20 @@ name = "Gaming"
   name = "Squad 1"
   max_clients = 5
 ```
+
+The server keeps two more files next to its config:
+
+- `channels.toml`: the live channel tree. On first start it is copied from the
+  config's `[[channels]]`; after that admins edit channels in T7 and the server
+  saves every change here. Temporary channels are never saved. Delete the file
+  to start over from the config.
+- `admin_token.txt`: the admin token, generated on first start (unless
+  `admin_token` is set) and printed in the log at every start. Anyone with it
+  can manage all channels, so share it only with your admins.
+
+Limits: channel names up to 40 characters, topics up to 200, nesting up to 3
+levels, 200 channels per server. The default channel can't be deleted; deleting
+a channel moves the people inside to the default channel.
 
 Set log verbosity with `RUST_LOG=debug`.
 
@@ -153,7 +171,6 @@ cargo run --example bot -- 127.0.0.1:9988 500   # crude load test
 
 ## Roadmap
 
-1. Channel management at runtime: create/edit/delete, temporary channels, passwords.
-2. Permissions: server admin token, kick/ban, channel moderators.
-3. TLS for the control connection plus encrypted voice.
-4. Server-side persistence of channels made at runtime.
+1. Permissions beyond admin: kick/ban, channel moderators.
+2. TLS for the control connection plus encrypted voice.
+3. Drag-and-drop to rearrange channels.
