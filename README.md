@@ -48,7 +48,8 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Switch channel | Double-click a channel, drag yourself onto it, or right-click → Join |
 | Private message | Double-click a user, or right-click → Send private message |
 | Close a PM tab | Middle-click it, or right-click → Close |
-| Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right |
+| Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right. Sound off silences the other people, not notification sounds |
+| Someone's volume | Right-click them: 0% (muted for you) to 200%. Remembered by nickname |
 | Voice settings | The sliders button bottom-right: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), notification sounds and sound pack, volumes |
 | Poke | Right-click a user → Poke…, with an optional message. They get a popup, a sound and a flashing taskbar entry |
 
@@ -152,8 +153,7 @@ cargo run --example bot -- 127.0.0.1:9988 500   # crude load test
 
 ## Roadmap
 
-1. Voice polish: per-user volume.
-2. Channel management at runtime: create/edit/delete, temporary channels, passwords.
-3. Permissions: server admin token, kick/ban, channel moderators.
-4. TLS for the control connection plus encrypted voice.
-5. Server-side persistence of channels made at runtime.
+1. Channel management at runtime: create/edit/delete, temporary channels, passwords.
+2. Permissions: server admin token, kick/ban, channel moderators.
+3. TLS for the control connection plus encrypted voice.
+4. Server-side persistence of channels made at runtime.

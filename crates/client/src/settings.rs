@@ -14,6 +14,8 @@ pub struct Settings {
     pub status: ClientStatus,
     pub audio: AudioSettings,
     pub recent: Vec<Recent>,
+    /// Per-person volume by nickname; only values other than 100% are kept.
+    pub user_volumes: std::collections::BTreeMap<String, f32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -99,6 +101,7 @@ mod tests {
             status: ClientStatus { muted: true, deafened: false, away: false },
             audio: AudioSettings { ptt_key: Some(crate::audio::PttKey { vk: 0x56 }), ..Default::default() },
             recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
+            user_volumes: [("Some One".to_owned(), 0.5)].into(),
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);

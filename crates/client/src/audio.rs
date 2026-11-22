@@ -169,13 +169,15 @@ struct Speaker {
 /// Received voice, per speaker, waiting to be mixed into the output.
 pub struct Playback {
     speakers: Mutex<HashMap<ClientId, Speaker>>,
+    /// Per-person volume set by the listener (1.0 when absent).
+    volumes: Mutex<HashMap<ClientId, f32>>,
     effects: Mutex<Effects>,
     ctx: egui::Context,
 }
 
 impl Playback {
     pub fn new(ctx: egui::Context) -> Arc<Self> {
-        Arc::new(Self { speakers: Mutex::new(HashMap::new()), effects: Mutex::default(), ctx })
+        Arc::new(Self { speakers: Mutex::default(), volumes: Mutex::default(), effects: Mutex::default(), ctx })
     }
 
     /// Decodes one received frame (called on the network thread).
@@ -240,9 +242,14 @@ impl Playback {
     }
 
     /// Adds every speaker's next `out.len()` samples (48 kHz) into `out`.
-    pub fn mix(&self, out: &mut [f32]) {
+    /// Adds the next `out.len()` samples (48 kHz) of everyone talking, scaled
+    /// by `voice_gain` and each person's own volume, plus notification sounds
+    /// at their own volume.
+    pub fn mix(&self, out: &mut [f32], voice_gain: f32) {
         let mut speakers = self.speakers.lock().unwrap();
-        for s in speakers.values_mut() {
+        let volumes = self.volumes.lock().unwrap();
+        for (id, s) in speakers.iter_mut() {
+            let gain = voice_gain * volumes.get(id).copied().unwrap_or(1.0);
             if !s.primed {
                 if s.queue.len() < JITTER_PRIME {
                     continue;
@@ -251,12 +258,13 @@ impl Playback {
             }
             let n = out.len().min(s.queue.len());
             for (o, v) in out.iter_mut().zip(s.queue.drain(..n)) {
-                *o += v;
+                *o += v * gain;
             }
             if s.queue.is_empty() {
                 s.primed = false;
             }
         }
+        drop(volumes);
         drop(speakers);
         self.effects.lock().unwrap().mix(out);
     }
@@ -274,6 +282,16 @@ impl Playback {
 
     pub fn clear(&self) {
         self.speakers.lock().unwrap().clear();
+        self.volumes.lock().unwrap().clear();
+    }
+
+    pub fn set_user_volume(&self, id: ClientId, volume: f32) {
+        let mut volumes = self.volumes.lock().unwrap();
+        if volume == 1.0 {
+            volumes.remove(&id);
+        } else {
+            volumes.insert(id, volume);
+        }
     }
 
     pub fn play_chime(&self, sound: Sound, volume: f32) {
@@ -561,21 +579,22 @@ where
                 let frames = data.len() / channels;
                 mixed.clear();
                 mixed.resize(resampler.input_needed(frames), 0.0);
-                playback.mix(&mut mixed);
-                mono.clear();
-                resampler.pull(&mixed, frames, &mut mono);
-                let volume = if shared.deafened.load(Ordering::Relaxed) {
+                // Sound off silences the other people, not our own notification sounds.
+                let voice_gain = if shared.deafened.load(Ordering::Relaxed) {
                     0.0
                 } else {
                     f32::from_bits(shared.output_volume.load(Ordering::Relaxed))
                 };
+                playback.mix(&mut mixed, voice_gain);
+                mono.clear();
+                resampler.pull(&mixed, frames, &mut mono);
                 if let Ok(mut reference) = shared.echo_reference.try_lock() {
-                    reference.extend(mixed.iter().map(|v| v * volume));
+                    reference.extend(&mixed);
                     let excess = reference.len().saturating_sub(ECHO_REFERENCE_MAX);
                     reference.drain(..excess);
                 }
                 for (frame, &v) in data.chunks_exact_mut(channels).zip(&mono) {
-                    let out = (v * volume).clamp(-1.0, 1.0);
+                    let out = v.clamp(-1.0, 1.0);
                     meter_energy += (out * out) as f64;
                     frame.fill(T::from_sample(out));
                 }
@@ -635,7 +654,7 @@ mod tests {
 
     fn mix_frames(p: &Playback, frames: usize) -> Vec<f32> {
         let mut out = vec![0.0; frames * FRAME_SAMPLES];
-        p.mix(&mut out);
+        p.mix(&mut out, 1.0);
         out
     }
 
@@ -678,6 +697,44 @@ mod tests {
         let one = mix_frames(&p1, 3);
         for (b, o) in both.iter().zip(&one) {
             assert!((b - 2.0 * o).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn sound_off_silences_voices_but_not_notifications() {
+        let p = Playback::new(egui::Context::default());
+        for (seq, pkt) in encoded_tone(5).iter().enumerate() {
+            p.push(1, seq as u32, pkt);
+        }
+        p.play_chime(crate::sounds::Sound::Poke, 1.0);
+        let mut deafened = vec![0.0; 3 * FRAME_SAMPLES];
+        p.mix(&mut deafened, 0.0);
+
+        let chime_only = Playback::new(egui::Context::default());
+        chime_only.play_chime(crate::sounds::Sound::Poke, 1.0);
+        let mut expected = vec![0.0; 3 * FRAME_SAMPLES];
+        chime_only.mix(&mut expected, 1.0);
+        assert!(expected.iter().any(|v| v.abs() > 0.05), "chime should be audible");
+        assert!(deafened.iter().zip(&expected).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+
+    #[test]
+    fn per_person_volume_scales_only_that_person() {
+        let packets = encoded_tone(5);
+        let run = |volume: f32| {
+            let p = Playback::new(egui::Context::default());
+            for (seq, pkt) in packets.iter().enumerate() {
+                p.push(1, seq as u32, pkt);
+                p.push(2, seq as u32, pkt);
+            }
+            p.set_user_volume(1, volume);
+            mix_frames(&p, 3)
+        };
+        let (normal, quiet_one, muted_one) = (run(1.0), run(0.5), run(0.0));
+        // Both people say the same thing: 2x at 100%, 1.5x with one at 50%, 1x with one muted.
+        for ((n, q), m) in normal.iter().zip(&quiet_one).zip(&muted_one) {
+            assert!((q - n * 0.75).abs() < 1e-5);
+            assert!((m - n * 0.5).abs() < 1e-5);
         }
     }
 }

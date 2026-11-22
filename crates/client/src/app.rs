@@ -270,6 +270,23 @@ impl App {
         }
     }
 
+    fn user_volume(&self, nickname: &str) -> f32 {
+        self.settings.user_volumes.get(nickname).copied().unwrap_or(1.0)
+    }
+
+    fn apply_user_volume(&self, id: ClientId, nickname: &str) {
+        self.voice.playback.set_user_volume(id, self.user_volume(nickname));
+    }
+
+    fn set_user_volume(&mut self, id: ClientId, nickname: &str, volume: f32) {
+        if volume == 1.0 {
+            self.settings.user_volumes.remove(nickname);
+        } else {
+            self.settings.user_volumes.insert(nickname.to_owned(), volume);
+        }
+        self.voice.playback.set_user_volume(id, volume);
+    }
+
     fn open_poke(&mut self, target: ClientId) {
         let Some(name) = self.view.as_ref().and_then(|v| v.nickname(target)) else { return };
         self.poke_form = Some(PokeForm { target, name: name.to_owned(), message: String::new(), focus_requested: false });
@@ -410,6 +427,9 @@ impl App {
 
                 let name = server.name.clone();
                 let welcome = server.welcome.clone();
+                for c in &clients {
+                    self.apply_user_volume(c.id, &c.nickname);
+                }
                 self.view = Some(ServerView::new(your_id, server, channels, clients));
                 self.conn = Conn::Connected;
                 self.voice.connected_at = Some(Instant::now());
@@ -431,6 +451,7 @@ impl App {
                 }
             }
             S2C::ClientJoined(info) => {
+                self.apply_user_volume(info.id, &info.nickname);
                 let line = format!("{} connected", info.nickname);
                 let here = self.view.as_ref().and_then(|v| v.my_channel()) == Some(info.channel);
                 self.apply(&S2C::ClientJoined(info.clone()));
@@ -665,6 +686,8 @@ impl App {
     fn channel_tree(&mut self, ui: &mut egui::Ui) {
         let speaking = self.voice.playback.speaking();
         let me_talking = self.voice.shared.transmitting();
+        let volumes = self.settings.user_volumes.clone();
+        let mut volume_change: Option<(ClientId, String, f32)> = None;
         let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(8, 10));
         egui::Panel::left("tree")
             .frame(frame)
@@ -755,8 +778,18 @@ impl App {
                             }
                             let color = if c.status.away { theme::TEXT_FAINT } else { theme::TEXT };
                             let name_rect = p.text(egui::pos2(ax + 18.0, rect.center().y), Align2::LEFT_CENTER, &c.nickname, FontId::proportional(13.5), color);
-                            if is_me {
-                                p.text(name_rect.right_center() + vec2(6.0, 0.5), Align2::LEFT_CENTER, "you", FontId::proportional(11.0), theme::TEXT_FAINT);
+                            let volume = volumes.get(&c.nickname).copied().unwrap_or(1.0);
+                            let hint = if is_me {
+                                Some("you".to_owned())
+                            } else if volume == 0.0 {
+                                Some("muted for you".to_owned())
+                            } else if volume != 1.0 {
+                                Some(format!("{:.0}%", volume * 100.0))
+                            } else {
+                                None
+                            };
+                            if let Some(hint) = hint {
+                                p.text(name_rect.right_center() + vec2(6.0, 0.5), Align2::LEFT_CENTER, hint, FontId::proportional(11.0), theme::TEXT_FAINT);
                             }
                             let mut x = rect.right() - 16.0;
                             for (on, icon, col) in [
@@ -792,6 +825,21 @@ impl App {
                                         poke = Some(c.id);
                                         ui.close();
                                     }
+                                    ui.separator();
+                                    ui.label(RichText::new("Volume").size(12.0).color(theme::TEXT_DIM));
+                                    let mut v = volume;
+                                    ui.horizontal(|ui| {
+                                        let slider = egui::Slider::new(&mut v, 0.0..=2.0)
+                                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                                            .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0));
+                                        ui.add(slider);
+                                        if ui.add_enabled(v != 1.0, egui::Button::new("Reset").small()).clicked() {
+                                            v = 1.0;
+                                        }
+                                    });
+                                    if v != volume {
+                                        volume_change = Some((c.id, c.nickname.clone(), v));
+                                    }
                                 });
                             }
                         }
@@ -806,6 +854,9 @@ impl App {
                 }
                 if let Some(id) = poke {
                     self.open_poke(id);
+                }
+                if let Some((id, nickname, v)) = volume_change.take() {
+                    self.set_user_volume(id, &nickname, v);
                 }
             });
     }
