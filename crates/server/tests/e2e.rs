@@ -1274,6 +1274,33 @@ async fn overrides_take_effect_at_once_and_survive_a_restart() {
 }
 
 #[tokio::test]
+async fn deleting_a_role_drops_its_overrides_on_temporary_channels_from_editors_views() {
+    let (_, mut owner, _, _) = start_owned("forget-room-override", HOME).await;
+    let roles = owner.change_roles(RoleChange::Create { name: "DJ".into() }).await;
+    let dj = roles.ranked.last().unwrap().id;
+    owner
+        .send(C2S::CreateChannel {
+            parent: None,
+            settings: settings("Raid"),
+            temporary: true,
+            kind: ChannelKind::Voice,
+        })
+        .await;
+    let raid = id_of(&owner.channels().await, "Raid");
+    owner.send(set(raid, dj, &[Perm::Speak], &[])).await;
+    assert_eq!(owner.overrides(raid).await, [perms::Override::allowing(dj, Perms::of(&[Perm::Speak]))]);
+
+    owner.sync().await;
+    owner.send(C2S::ChangeRoles(RoleChange::Delete { id: dj })).await;
+    let arrived = owner.sync().await;
+    let latest = arrived.iter().rev().find_map(|m| match m {
+        S2C::Channels(list) => Some(list),
+        _ => None,
+    });
+    assert_eq!(overrides_in(latest.expect("a fresh channel list"), raid), []);
+}
+
+#[tokio::test]
 async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs() {
     let (addr, mut owner, _, channels) = start_owned("override-hierarchy", HOME).await;
     let [lobby, hangout] = ["Lobby", "Hangout"].map(|name| id_of(&channels, name));

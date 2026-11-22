@@ -71,12 +71,6 @@ struct ChannelsFile {
     channels: Vec<ChannelConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SavedChannels {
-    Changed,
-    Unchanged,
-}
-
 pub struct Channels {
     map: BTreeMap<ChannelId, Channel>,
     default: ChannelId,
@@ -400,16 +394,20 @@ impl Channels {
         Ok(true)
     }
 
-    pub fn forget_role(&mut self, role: RoleId) -> SavedChannels {
-        let mut saved = SavedChannels::Unchanged;
+    pub fn forget_role(&mut self, role: RoleId) -> Vec<ChannelId> {
+        let mut forgotten_in = Vec::new();
         for c in self.map.values_mut() {
             let before = c.info.overrides.len();
             c.info.overrides.retain(|o| o.role != role);
-            if !c.info.temporary && c.info.overrides.len() != before {
-                saved = SavedChannels::Changed;
+            if c.info.overrides.len() != before {
+                forgotten_in.push(c.info.id);
             }
         }
-        saved
+        forgotten_in
+    }
+
+    pub fn any_permanent(&self, ids: &[ChannelId]) -> bool {
+        ids.iter().any(|id| self.map.get(id).is_some_and(|c| !c.info.temporary))
     }
 
     fn self_then_ancestors(&self, id: ChannelId) -> Vec<ChannelId> {
@@ -820,9 +818,9 @@ deny = [\"view\"]"
         assert_eq!(ch.get(2).unwrap().overrides, [deny_view(RoleId::EVERYONE)]);
         let dj = RoleId(7);
         ch.set_override(3, deny_view(dj)).unwrap();
-        assert_eq!(ch.forget_role(dj), SavedChannels::Changed);
+        assert_eq!(ch.forget_role(dj), [3]);
         assert_eq!(ch.get(3).unwrap().overrides, []);
-        assert_eq!(ch.forget_role(dj), SavedChannels::Unchanged);
+        assert_eq!(ch.forget_role(dj), []);
     }
 
     #[test]
