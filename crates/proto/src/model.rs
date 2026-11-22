@@ -17,7 +17,7 @@ pub struct ServerView {
     pub roles: Option<Roles>,
     /// What the server lets this client do on the server as a whole.
     may: Perms,
-    /// ...and in each channel.
+    /// What it lets this client do in each channel.
     may_in: HashMap<ChannelId, Perms>,
     /// Channel tree in display order: (depth, channel id).
     tree: Vec<(usize, ChannelId)>,
@@ -103,7 +103,7 @@ impl ServerView {
         self.may.has(perm)
     }
 
-    /// ...and in a channel.
+    /// Whether the server lets this client do it in `channel`.
     pub fn may_in(&self, channel: ChannelId, perm: Perm) -> bool {
         self.may_in.get(&channel).is_some_and(|p| p.has(perm))
     }
