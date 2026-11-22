@@ -30,7 +30,8 @@ async fn main() {
     let tcp = TcpStream::connect(&addr).await.expect("connect");
     let server: SocketAddr = tcp.peer_addr().unwrap();
     let (tls, fingerprint) = tls::connect(tcp, None).await.expect("TLS handshake");
-    println!("TLS 1.3 to {server}, server certificate {fingerprint}");
+    let version = tls.get_ref().1.protocol_version().expect("handshake is done");
+    println!("{version:?} to {server}, server certificate {fingerprint}");
     let (r, mut w) = tokio::io::split(tls);
     let mut r = BufReader::new(r);
     let nickname = match mode.as_str() {
@@ -139,7 +140,7 @@ async fn main() {
     } else {
         let mut decoders: HashMap<ClientId, opus1::OpusDecoder> = HashMap::new();
         let mut stats: HashMap<ClientId, (u32, f64)> = HashMap::new();
-        let mut pongs = 0;
+        let (mut pongs, mut unreadable) = (0, 0);
         let mut dbuf = [0u8; 1500];
         let mut pcm = [0f32; FRAME_SAMPLES];
         let mut ping = tokio::time::interval(Duration::from_secs(1));
@@ -164,12 +165,12 @@ async fn main() {
                             e.1 += energy / samples.max(1) as f64;
                         }
                         Some(ToClient::Pong { .. }) => pongs += 1,
-                        None => {}
+                        None => unreadable += 1,
                     }
                 }
             }
         }
-        println!("voice pongs: {pongs}");
+        println!("voice pongs: {pongs}, datagrams that failed to decrypt: {unreadable}");
         if stats.is_empty() {
             println!("heard nobody");
         }
