@@ -46,7 +46,10 @@ enum Conn {
         address: String,
         password: String,
     },
-    Connected,
+    /// `server` keys what is kept per server: `net::canonical_address`.
+    Connected {
+        server: String,
+    },
 }
 
 enum LineKind {
@@ -103,6 +106,7 @@ enum TreeAction {
     Ban(ClientId),
     ServerSettings,
     SetRole { identity: Identity, role: RoleId, held: bool },
+    Fold(String),
 }
 
 /// Payload while dragging yourself onto another channel.
@@ -444,6 +448,19 @@ impl App {
         self.channel_dialog = Some(ChannelDialog::Delete { channel, name: ch.name.clone(), occupants });
     }
 
+    /// Folds the category of that name in the channel tree, or unfolds it,
+    /// remembering that for this server.
+    fn fold(&mut self, name: String) {
+        let Conn::Connected { server } = &self.conn else { return };
+        let folded = self.settings.folded.entry(server.clone()).or_default();
+        if !folded.remove(&name) {
+            folded.insert(name);
+        }
+        if folded.is_empty() {
+            self.settings.folded.remove(server);
+        }
+    }
+
     /// Moves a channel one place up (`-1`) or down (`+1`) among its siblings.
     fn shift_channel(&mut self, channel: ChannelId, delta: i32) {
         let Some(view) = &self.view else { return };
@@ -459,7 +476,7 @@ impl App {
         let mic_off = |s: ClientStatus| s.muted || s.deafened;
         let was_off = mic_off(self.settings.status);
         self.settings.status = status;
-        if matches!(self.conn, Conn::Connected) {
+        if matches!(self.conn, Conn::Connected { .. }) {
             self.net.send(C2S::SetStatus(status));
             match (was_off, mic_off(status)) {
                 (false, true) => self.sound(Sound::MicMuted),
@@ -588,7 +605,7 @@ impl App {
 
     fn send_chat(&mut self) {
         let text = self.input.trim().to_owned();
-        if text.is_empty() || !matches!(self.conn, Conn::Connected) {
+        if text.is_empty() || !matches!(self.conn, Conn::Connected { .. }) {
             return;
         }
         let target = match self.tabs[self.active_tab].kind {
@@ -679,7 +696,7 @@ impl App {
         };
         let kicked = self.kicked.take();
         let reason = kicked.clone().or(reason);
-        let was_connected = matches!(self.conn, Conn::Connected);
+        let was_connected = matches!(self.conn, Conn::Connected { .. });
         self.conn = Conn::Disconnected;
         self.view = None;
         self.ping = None;
@@ -711,6 +728,7 @@ impl App {
                     Conn::Connecting { address, .. } => address.clone(),
                     _ => String::new(),
                 };
+                let server_key = net::canonical_address(&address);
                 let recent = Recent { address, server_name: server.name.clone() };
                 self.settings.recent.retain(|r| r.address != recent.address);
                 self.settings.recent.insert(0, recent);
@@ -722,7 +740,7 @@ impl App {
                     self.apply_user_volume(c.id, &c.nickname);
                 }
                 self.view = Some(ServerView::new(your_id, server, channels, clients, permissions));
-                self.conn = Conn::Connected;
+                self.conn = Conn::Connected { server: server_key };
                 self.voice.connected_at = Some(Instant::now());
                 self.voice.seen = None;
                 self.tabs = base_tabs();
@@ -911,7 +929,7 @@ impl App {
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     match self.conn {
-                        Conn::Connected => {
+                        Conn::Connected { .. } => {
                             if ui.add(Btn::secondary("Disconnect")).clicked() {
                                 self.disconnect();
                             }
@@ -953,8 +971,8 @@ impl App {
 
     fn status_pill(&self, ui: &mut egui::Ui) {
         let (color, text) = match &self.conn {
-            Conn::Connected if self.voice.blocked() => (theme::AMBER, "Connected · no voice".to_owned()),
-            Conn::Connected => {
+            Conn::Connected { .. } if self.voice.blocked() => (theme::AMBER, "Connected · no voice".to_owned()),
+            Conn::Connected { .. } => {
                 let ping = match self.voice.rtt.or(self.ping) {
                     Some(p) if p < Duration::from_millis(1) => " · <1 ms".to_owned(),
                     Some(p) => format!(" · {} ms", p.as_millis()),
@@ -1006,7 +1024,7 @@ impl App {
                     ui.spacing_mut().item_spacing.y = 1.0;
                     ui.label(RichText::new(&nick).size(13.5).strong().color(theme::TEXT));
                     let s = self.settings.status;
-                    let (txt, col) = if !matches!(self.conn, Conn::Connected) {
+                    let (txt, col) = if !matches!(self.conn, Conn::Connected { .. }) {
                         ("Offline", theme::TEXT_FAINT)
                     } else if s.away {
                         ("Away", theme::AMBER)
@@ -1120,14 +1138,32 @@ impl App {
                     let dragging_self = egui::DragAndDrop::has_payload_of_type::<DragSelf>(ui.ctx());
                     let dragging_channel = egui::DragAndDrop::payload::<DragChannel>(ui.ctx()).map(|d| d.0);
                     let pointer = ui.input(|i| i.pointer.interact_pos());
-                    for &(depth, ch_id) in view.tree() {
+                    let server = match &self.conn {
+                        Conn::Connected { server } => server.as_str(),
+                        _ => "",
+                    };
+                    let folded = self.settings.folded.get(server);
+                    // Whether the top-level channel drawn last is a folded category.
+                    let mut in_fold = false;
+                    for (row, &(depth, ch_id)) in view.tree().iter().enumerate() {
                         let ch = &view.channels[&ch_id];
+                        let category = ch.kind == ChannelKind::Category;
+                        if depth == 0 {
+                            in_fold = category && folded.is_some_and(|f| f.contains(&ch.name));
+                        } else if in_fold {
+                            continue;
+                        }
+                        if category && row > 0 {
+                            ui.add_space(6.0);
+                        }
                         let manages_it = manages(view, Some(ch_id));
                         // Moving it renumbers its siblings.
                         let may_rearrange = manages_it && manages(view, ch.parent);
                         let clients = view.clients_in(ch_id);
                         let indent = depth as f32 * 18.0;
-                        let is_mine = mine == Some(ch_id);
+                        // A folded category stands in for the channels in it.
+                        let inside = |channel| channel == ch_id || (in_fold && view.within(channel, ch_id));
+                        let is_mine = mine.is_some_and(inside);
                         let full = ch.max_clients.is_some_and(|m| clients.len() as u32 >= m);
 
                         let sense = if may_rearrange { Sense::click_and_drag() } else { Sense::click() };
@@ -1142,7 +1178,7 @@ impl App {
                             }
                             _ => None,
                         };
-                        let drop_hover = (dragging_self && resp.contains_pointer() && !is_mine)
+                        let drop_hover = (dragging_self && resp.contains_pointer() && !is_mine && !category)
                             || matches!(channel_drop, Some((Zone::Into, Outcome::Move(_))));
                         let bg = if drop_hover {
                             theme::ACCENT_BG
@@ -1180,24 +1216,49 @@ impl App {
                             );
                         }
                         let icon_color = if is_mine { theme::ACCENT_TEXT } else { theme::TEXT_FAINT };
+                        let (icon, icon_size) = match (category, in_fold) {
+                            (false, _) => (Icon::Speaker, 15.0),
+                            (true, false) => (Icon::ChevronDown, 13.0),
+                            (true, true) => (Icon::ChevronRight, 13.0),
+                        };
                         icons::paint(
                             p,
                             egui::Rect::from_center_size(
                                 egui::pos2(rect.left() + indent + TREE_ICON_X, rect.center().y),
-                                vec2(15.0, 15.0),
+                                vec2(icon_size, icon_size),
                             ),
-                            Icon::Speaker,
+                            icon,
                             icon_color,
                         );
                         let name_color = if is_mine { theme::TEXT } else { theme::TEXT_DIM };
-                        let name_rect = p.text(
-                            egui::pos2(rect.left() + indent + TREE_TEXT_X, rect.center().y),
-                            Align2::LEFT_CENTER,
-                            &ch.name,
-                            FontId::proportional(13.5),
-                            name_color,
-                        );
+                        let name_rect = if category {
+                            p.text(
+                                egui::pos2(rect.left() + indent + TREE_TEXT_X, rect.center().y),
+                                Align2::LEFT_CENTER,
+                                ch.name.to_uppercase(),
+                                FontId::proportional(12.0),
+                                name_color,
+                            )
+                        } else {
+                            p.text(
+                                egui::pos2(rect.left() + indent + TREE_TEXT_X, rect.center().y),
+                                Align2::LEFT_CENTER,
+                                &ch.name,
+                                FontId::proportional(13.5),
+                                name_color,
+                            )
+                        };
                         let mut after = name_rect.right() + 6.0;
+                        // Hidden from people without a role, or from them.
+                        let hidden = manages_it && view.hidden(ch_id);
+                        if hidden {
+                            let r = egui::Rect::from_center_size(
+                                egui::pos2(after + 7.0, rect.center().y),
+                                vec2(14.0, 14.0),
+                            );
+                            icons::paint(p, r, Icon::Eye, theme::TEXT_FAINT);
+                            after += 19.0;
+                        }
                         if ch.has_password {
                             let r = egui::Rect::from_center_size(
                                 egui::pos2(after + 6.0, rect.center().y),
@@ -1216,9 +1277,14 @@ impl App {
                             );
                         }
 
+                        let people = if in_fold && category {
+                            view.clients.values().filter(|c| inside(c.channel)).count()
+                        } else {
+                            clients.len()
+                        };
                         let count = match ch.max_clients {
-                            Some(m) => format!("{}/{}", clients.len(), m),
-                            None if !clients.is_empty() => clients.len().to_string(),
+                            Some(m) => format!("{people}/{m}"),
+                            None if people > 0 => people.to_string(),
                             None => String::new(),
                         };
                         if !count.is_empty() {
@@ -1233,7 +1299,12 @@ impl App {
                         }
 
                         // Releasing takes the payload whatever its type, so ask only for the one being dragged.
-                        if resp.double_clicked() || (dragging_self && resp.dnd_release_payload::<DragSelf>().is_some())
+                        if category {
+                            if resp.clicked() {
+                                action = Some(TreeAction::Fold(ch.name.clone()));
+                            }
+                        } else if resp.double_clicked()
+                            || (dragging_self && resp.dnd_release_payload::<DragSelf>().is_some())
                         {
                             join = Some(ch_id);
                         }
@@ -1266,20 +1337,27 @@ impl App {
                         if ch.temporary {
                             tip.push("Temporary: removed once everyone has left.".into());
                         }
+                        if hidden {
+                            tip.push("Hidden: only those allowed to view it see it.".into());
+                        }
                         let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip.join("\n")) };
                         resp.context_menu(|ui| {
-                            if ui.add_enabled(!is_mine && !full, egui::Button::new("Join channel")).clicked() {
-                                join = Some(ch_id);
-                                ui.close();
+                            if !category {
+                                if ui.add_enabled(!is_mine && !full, egui::Button::new("Join channel")).clicked() {
+                                    join = Some(ch_id);
+                                    ui.close();
+                                }
+                                ui.separator();
                             }
-                            ui.separator();
                             let may_create = view.may_in(ch_id, Perm::CreateTemporary) || manages_it;
-                            if depth + 1 < MAX_CHANNEL_DEPTH && may_create && ui.button("Create sub-channel…").clicked()
-                            {
+                            let create = if category { "Create channel…" } else { "Create sub-channel…" };
+                            if depth + 1 < MAX_CHANNEL_DEPTH && may_create && ui.button(create).clicked() {
                                 action = Some(TreeAction::Create(Some(ch_id)));
                                 ui.close();
                             }
-                            if manages_it && ui.button("Edit channel…").clicked() {
+                            let edit = if category { "Edit category…" } else { "Edit channel…" };
+                            let may_edit = manages_it || view.may_in(ch_id, Perm::ManagePermissions);
+                            if may_edit && ui.button(edit).clicked() {
                                 action = Some(TreeAction::Edit(ch_id));
                                 ui.close();
                             }
@@ -1294,12 +1372,14 @@ impl App {
                             if view.may(Perm::ManageChannels)
                                 && !ch.default
                                 && !ch.temporary
+                                && !category
                                 && ui.button("Make default channel").clicked()
                             {
                                 action = Some(TreeAction::MakeDefault(ch_id));
                                 ui.close();
                             }
-                            if manages_it && !ch.default && ui.button("Delete channel…").clicked() {
+                            let delete = if category { "Delete category…" } else { "Delete channel…" };
+                            if manages_it && !ch.default && ui.button(delete).clicked() {
                                 action = Some(TreeAction::Delete(ch_id));
                                 ui.close();
                             }
@@ -1515,6 +1595,7 @@ impl App {
                     Some(TreeAction::SetRole { identity, role, held }) => {
                         self.net.send(C2S::ChangeRoles(RoleChange::Assign { identity, role, held }));
                     }
+                    Some(TreeAction::Fold(name)) => self.fold(name),
                     None => {}
                 }
             },
@@ -1704,7 +1785,7 @@ impl App {
         let s = self.settings.status;
         let v = &mut self.voice;
         v.shared.set_status(s.muted, s.deafened);
-        let connected = matches!(self.conn, Conn::Connected);
+        let connected = matches!(self.conn, Conn::Connected { .. });
         // A last sound (like "disconnected") finishes before the devices close.
         let finishing = v.engine.is_some() && v.playback.effects_active();
         let wanted = connected || self.audio_dialog.is_some() || finishing;
@@ -1726,7 +1807,7 @@ impl App {
         if v.shared.transmitting() || !v.playback.speaking().is_empty() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
-        if matches!(self.conn, Conn::Connected) && !v.reachable() {
+        if matches!(self.conn, Conn::Connected { .. }) && !v.reachable() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         if let Some(err) = v.shared.take_error() {

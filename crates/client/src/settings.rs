@@ -20,6 +20,8 @@ pub struct Settings {
     pub user_volumes: std::collections::BTreeMap<String, f32>,
     /// Certificate fingerprint per `net::canonical_address`, pinned on first connect.
     pub server_certs: std::collections::BTreeMap<String, Fingerprint>,
+    /// Per `net::canonical_address`, the categories folded in the channel tree, by name.
+    pub folded: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Who this user is on every server: roles, bans and moderator rights follow it.
     /// Made on the first connect.
     pub identity_key: Option<IdentityKey>,
@@ -117,6 +119,7 @@ mod tests {
             recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
             user_volumes: [("Some One".to_owned(), 0.5)].into(),
             server_certs: [("1.2.3.4:9988".to_owned(), Fingerprint([0xab; 32]))].into(),
+            folded: [("1.2.3.4:9988".to_owned(), ["Games".to_owned()].into())].into(),
             identity_key: Some(new_identity_key()),
         };
         let text = toml::to_string(&s).unwrap();

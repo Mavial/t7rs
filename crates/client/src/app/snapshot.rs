@@ -104,7 +104,7 @@ fn connected(ctx: &egui::Context) -> App {
     settings.user_volumes.insert("Marta".into(), 0.6);
     let mut app = App::new(ctx, settings, None);
     app.view = Some(view());
-    app.conn = Conn::Connected;
+    app.conn = Conn::Connected { server: "friday.example.com:9988".into() };
     app.ping = Some(Duration::from_millis(23));
     app.tabs[1].title = "Games".into();
     app.active_tab = 1;

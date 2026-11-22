@@ -122,6 +122,18 @@ impl ServerView {
         false
     }
 
+    /// Whether `channel` is `ancestor` or below it.
+    pub fn within(&self, channel: ChannelId, ancestor: ChannelId) -> bool {
+        let mut at = self.channels.get(&channel);
+        while let Some(c) = at {
+            if c.id == ancestor {
+                return true;
+            }
+            at = c.parent.and_then(|p| self.channels.get(&p));
+        }
+        false
+    }
+
     pub fn tree(&self) -> &[(usize, ChannelId)] {
         &self.tree
     }
