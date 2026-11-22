@@ -18,7 +18,7 @@ pub mod voice;
 /// below, so older clients keep working for everything they know about.
 pub const PROTOCOL_VERSION: u16 = 5;
 /// Oldest client protocol a server still accepts. Protocol 5 moved the
-/// control connection into TLS, so older clients can't connect.
+/// control connection into TLS and encrypts voice, so older clients can't connect.
 pub const MIN_PROTOCOL_VERSION: u16 = 5;
 /// Default port of a T7 server (TCP for control, UDP for voice).
 pub const DEFAULT_PORT: u16 = 9988;
@@ -159,8 +159,8 @@ pub enum S2C {
     /// Successful handshake: full snapshot of the server state.
     Welcome {
         your_id: ClientId,
-        /// Secret that authenticates this client's voice datagrams.
-        voice_token: u64,
+        /// Seals this client's voice datagrams, both ways.
+        voice_key: voice::VoiceKey,
         server: ServerInfo,
         channels: Vec<ChannelInfo>,
         clients: Vec<ClientInfo>,

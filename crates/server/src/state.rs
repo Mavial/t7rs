@@ -52,7 +52,7 @@ struct Client {
     addr: SocketAddr,
     outbox: mpsc::Sender<Frame>,
     text_bucket: TokenBucket,
-    voice_token: u64,
+    voice: voice::ServerSide,
     /// Learned from the first authenticated datagram (works behind NAT).
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
@@ -148,23 +148,21 @@ impl Server {
             }
             Event::Message { id, msg } => self.message(id, msg),
             Event::Left { id, reason } => self.remove(id, reason),
-            Event::Voice { from, data } => self.voice(from, &data),
+            Event::Voice { from, mut data } => self.voice(from, &mut data),
         }
     }
 
-    fn voice(&mut self, from: SocketAddr, data: &[u8]) {
-        let Some((id, token, msg)) = voice::parse_to_server(data) else { return };
+    fn voice(&mut self, from: SocketAddr, data: &mut [u8]) {
+        let Some(id) = voice::sender(data) else { return };
         let Some(sender) = self.clients.get_mut(&id) else { return };
-        if sender.voice_token != token {
-            return;
-        }
+        let Some(msg) = sender.voice.open(data) else { return };
         if sender.voice_addr != Some(from) {
             tracing::debug!(id, %from, "voice address learned");
             sender.voice_addr = Some(from);
         }
         match msg {
             ToServer::Ping { nonce } => {
-                voice::encode_to_client(ToClient::Pong { nonce }, &mut self.datagram);
+                sender.voice.seal(ToClient::Pong { nonce }, &mut self.datagram);
                 let _ = self.udp.try_send_to(&self.datagram, from);
             }
             ToServer::Audio { seq, payload } => {
@@ -173,11 +171,14 @@ impl Server {
                     return;
                 }
                 let channel = sender.info.channel;
-                voice::encode_to_client(ToClient::Audio { from: id, seq, payload }, &mut self.datagram);
-                let listeners = self.clients.values().filter(|c| {
+                let audio = ToClient::Audio { from: id, seq, payload };
+                let listeners = self.clients.values_mut().filter(|c| {
                     c.info.id != id && c.info.channel == channel && !c.info.status.deafened
                 });
-                for addr in listeners.filter_map(|c| c.voice_addr) {
+                for listener in listeners {
+                    let Some(addr) = listener.voice_addr else { continue };
+                    // Sealed per listener, with their key.
+                    listener.voice.seal(audio, &mut self.datagram);
                     // Non-blocking: a full socket buffer drops the frame, like any lost packet.
                     let _ = self.udp.try_send_to(&self.datagram, addr);
                 }
@@ -228,16 +229,14 @@ impl Server {
 
         let mut clients: Vec<ClientInfo> = self.clients.values().map(|c| c.info.clone()).collect();
         clients.push(info.clone());
-        let voice_token = match getrandom::u64() {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("no system randomness for voice token: {e}");
-                return reject("server error");
-            }
-        };
+        let mut voice_key = [0u8; 32];
+        if let Err(e) = getrandom::fill(&mut voice_key) {
+            tracing::error!("no system randomness for the voice key: {e}");
+            return reject("server error");
+        }
         let welcome = S2C::Welcome {
             your_id: id,
-            voice_token,
+            voice_key,
             server: self.info.clone(),
             channels: self.channels.snapshot(),
             clients,
@@ -255,7 +254,7 @@ impl Server {
                 addr,
                 outbox,
                 text_bucket: TokenBucket::text(),
-                voice_token,
+                voice: voice::ServerSide::new(&voice_key),
                 voice_addr: None,
                 voice_bucket: TokenBucket::voice(),
             },

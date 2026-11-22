@@ -193,21 +193,21 @@ pub fn with_default_port(address: &str) -> String {
 /// The UDP side of a session, available once the server has welcomed us.
 struct VoiceLink {
     sock: Arc<UdpSocket>,
-    id: ClientId,
-    token: u64,
+    crypto: voice::ClientSide,
     buf: Vec<u8>,
 }
 
 impl VoiceLink {
-    async fn open(server: SocketAddr, id: ClientId, token: u64) -> std::io::Result<Self> {
+    async fn open(server: SocketAddr, id: ClientId, key: &voice::VoiceKey) -> std::io::Result<Self> {
         let local: SocketAddr = if server.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }.parse().expect("valid");
         let sock = UdpSocket::bind(local).await?;
         sock.connect(server).await?;
-        Ok(Self { sock: Arc::new(sock), id, token, buf: Vec::with_capacity(voice::MAX_DATAGRAM) })
+        let crypto = voice::ClientSide::new(id, key);
+        Ok(Self { sock: Arc::new(sock), crypto, buf: Vec::with_capacity(voice::MAX_DATAGRAM) })
     }
 
     async fn send(&mut self, msg: ToServer<'_>) {
-        voice::encode_to_server(self.id, self.token, msg, &mut self.buf);
+        self.crypto.seal(msg, &mut self.buf);
         // Voice is best effort: a failed send is just a lost frame.
         let _ = self.sock.send(&self.buf).await;
     }
@@ -288,8 +288,8 @@ async fn session(
                 }
                 Some(Ok(S2C::Rejected { reason })) => return Some(reason),
                 Some(Ok(msg)) => {
-                    if let (S2C::Welcome { your_id, voice_token, .. }, Some(server)) = (&msg, server) {
-                        match VoiceLink::open(server, *your_id, *voice_token).await {
+                    if let (S2C::Welcome { your_id, voice_key, .. }, Some(server)) = (&msg, server) {
+                        match VoiceLink::open(server, *your_id, voice_key).await {
                             Ok(link) => voice = Some(link),
                             Err(e) => tracing::warn!("voice socket: {e}"),
                         }
@@ -300,10 +300,10 @@ async fn session(
                 Some(Err(FrameError::Io(_))) | None => return Some("Connection to the server was lost".into()),
                 Some(Err(e)) => return Some(format!("Protocol error: {e}")),
             },
-            (res, buf) = udp_recv => {
+            (res, mut buf) = udp_recv => {
                 // Errors here are usually ICMP "unreachable" bounces on Windows; keep listening.
-                if let Ok(n) = res {
-                    match voice::parse_to_client(&buf[..n]) {
+                if let (Ok(n), Some(v)) = (res, &mut voice) {
+                    match v.crypto.open(&mut buf[..n]) {
                         Some(ToClient::Audio { from, seq, payload }) => playback.push(from, seq, payload),
                         Some(ToClient::Pong { nonce }) => {
                             let sent = Duration::from_micros(nonce);

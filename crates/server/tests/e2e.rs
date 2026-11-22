@@ -131,29 +131,31 @@ async fn full_channel_and_password() {
 struct Voice {
     sock: tokio::net::UdpSocket,
     id: ClientId,
-    token: u64,
-    buf: Vec<u8>,
+    crypto: voice::ClientSide,
+    /// The last datagram sent, as it went on the wire.
+    sent: Vec<u8>,
 }
 
 impl Voice {
     async fn open(server: std::net::SocketAddr, welcome: &S2C) -> Self {
-        let S2C::Welcome { your_id, voice_token, .. } = welcome else { panic!("{welcome:?}") };
+        let S2C::Welcome { your_id, voice_key, .. } = welcome else { panic!("{welcome:?}") };
         let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         sock.connect(server).await.unwrap();
-        let mut v = Self { sock, id: *your_id, token: *voice_token, buf: Vec::new() };
+        let crypto = voice::ClientSide::new(*your_id, voice_key);
+        let mut v = Self { sock, id: *your_id, crypto, sent: Vec::new() };
         // The ping registers our UDP address with the server.
         v.send(voice::ToServer::Ping { nonce: 5 }).await;
         assert_eq!(v.recv_owned().await, Some(Got::Pong(5)));
         v
     }
     async fn send(&mut self, msg: voice::ToServer<'_>) {
-        voice::encode_to_server(self.id, self.token, msg, &mut self.buf);
-        self.sock.send(&self.buf).await.unwrap();
+        self.crypto.seal(msg, &mut self.sent);
+        self.sock.send(&self.sent).await.unwrap();
     }
     async fn recv_owned(&mut self) -> Option<Got> {
         let mut buf = [0u8; 1500];
         let n = tokio::time::timeout(Duration::from_millis(300), self.sock.recv(&mut buf)).await.ok()?.ok()?;
-        match voice::parse_to_client(&buf[..n])? {
+        match self.crypto.open(&mut buf[..n])? {
             voice::ToClient::Pong { nonce } => Some(Got::Pong(nonce)),
             voice::ToClient::Audio { from, seq, payload } => Some(Got::Audio(from, seq, payload.to_vec())),
         }
@@ -167,7 +169,7 @@ enum Got {
 }
 
 #[tokio::test]
-async fn voice_is_routed_within_the_channel() {
+async fn voice_is_routed_encrypted_within_the_channel() {
     let addr = start(DEFAULT_CONFIG).await;
     let (mut a, wa) = TestClient::connect(addr, "a", None).await;
     let (mut b, wb) = TestClient::connect(addr, "b", None).await;
@@ -181,17 +183,26 @@ async fn voice_is_routed_within_the_channel() {
         while !matches!(t.recv().await, S2C::ClientMoved { .. }) {}
     }
 
+    // Each listener opens the audio with its own key.
     va.send(voice::ToServer::Audio { seq: 1, payload: &[9, 9, 9] }).await;
     assert_eq!(vb.recv_owned().await, Some(Got::Audio(va.id, 1, vec![9, 9, 9])));
     assert_eq!(vc.recv_owned().await, None, "other channel must not hear it");
     assert_eq!(va.recv_owned().await, None, "speaker must not hear itself");
 
-    // A forged token is ignored.
-    let real = va.token;
-    va.token ^= 1;
-    va.send(voice::ToServer::Audio { seq: 2, payload: &[1] }).await;
-    assert_eq!(vb.recv_owned().await, None);
-    va.token = real;
+    // A replayed datagram is dropped.
+    va.sock.send(&va.sent).await.unwrap();
+    assert_eq!(vb.recv_owned().await, None, "replay was forwarded");
+
+    // So is one sealed with another key, even with a's id on it.
+    let mut forger = voice::ClientSide::new(va.id, &[0x42; 32]);
+    let mut forged = Vec::new();
+    forger.seal(voice::ToServer::Audio { seq: 2, payload: &[1] }, &mut forged);
+    va.sock.send(&forged).await.unwrap();
+    assert_eq!(vb.recv_owned().await, None, "forgery was forwarded");
+
+    // Neither disturbed the real sender.
+    va.send(voice::ToServer::Audio { seq: 2, payload: &[2] }).await;
+    assert_eq!(vb.recv_owned().await, Some(Got::Audio(va.id, 2, vec![2])));
 
     // A deafened listener gets nothing; a muted speaker is not forwarded.
     b.send(C2S::SetStatus(ClientStatus { deafened: true, ..Default::default() })).await;
