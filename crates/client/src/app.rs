@@ -1012,6 +1012,14 @@ impl App {
                 }
             }
 
+            section(ui, "Sound cleanup");
+            ui.checkbox(&mut a.cleanup.noise_suppression, "Noise suppression")
+                .on_hover_text("Removes fans, hum, traffic and other background noise");
+            ui.checkbox(&mut a.cleanup.echo_cancellation, "Echo cancellation")
+                .on_hover_text("Stops others from hearing themselves when you use speakers instead of headphones");
+            ui.checkbox(&mut a.cleanup.auto_gain, "Automatic volume")
+                .on_hover_text("Brings a quiet microphone up to a normal level");
+
             section(ui, "Volume");
             ui.add(egui::Slider::new(&mut a.input_gain_db, -20.0..=20.0).text("microphone").suffix(" dB").fixed_decimals(0));
             ui.add(

@@ -49,7 +49,7 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Private message | Double-click a user, or right-click → Send private message |
 | Close a PM tab | Middle-click it, or right-click → Close |
 | Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right |
-| Voice settings | The sliders button bottom-right: microphone, speakers, voice activation level with a live meter, push-to-talk key, volumes |
+| Voice settings | The sliders button bottom-right: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), volumes |
 
 A green ring around an avatar means that person is talking. On Windows the
 push-to-talk key works while another app, like a game, has focus.
@@ -95,8 +95,18 @@ crates/
   as UDP datagrams on the same port. Each datagram carries the sender's id and a
   random token from the handshake. The server forwards frames to everyone else in
   the speaker's channel without decoding them, skips listeners with sound off, and
-  rate-limits senders. Clients keep a ~60 ms jitter buffer per speaker and conceal
-  lost packets.
+  rate-limits senders. Clients keep a ~60 ms jitter buffer per speaker. Each packet
+  carries a low-bitrate copy of the previous frame (Opus in-band FEC), so a single
+  lost packet is rebuilt; longer gaps are concealed.
+- **Sound cleanup** (`crates/client/src/dsp.rs`), on the microphone, 10 ms at a time:
+  high-pass filter and WebRTC AEC3 echo cancellation (pure-Rust `sonora`), then
+  RNNoise noise suppression (`nnnoiseless`), then WebRTC AGC2 adaptive gain. Voice
+  activation opens only for frames RNNoise rates as speech *and* above the level
+  threshold, so keyboards and fans don't open the mic; the 40 ms before an onset
+  are sent too, so first syllables survive. In an offline comparison on synthetic
+  scenes, RNNoise removed ~20 dB more fan noise than WebRTC's own suppressor while
+  distorting speech less, and AEC3 + RNNoise removed ~69 dB of speaker echo. The
+  chain costs ~0.12 ms per 10 ms of audio (about 1% of one core).
 - **Server:** each connection gets a reader loop and a writer task. All state lives
   in one core task (no locks, a total order of events). Broadcasts are serialised
   once and shared (`Arc<[u8]>`) across recipients. Writers batch queued frames into
@@ -116,7 +126,8 @@ Measured on Windows (release build, idle and connected, median of 5 runs):
 | | Binary | Private memory (Task Manager) | Committed | Idle CPU |
 | --- | --- | --- | --- | --- |
 | t7-server | 1.4 MB | — | 7.5 MB working set | 0% |
-| t7-client | 5.9 MB | 7.2 MB | 8.1 MB | 0% |
+| t7-client, not connected | 7.1 MB | 7.2 MB | 8.1 MB | 0% |
+| t7-client, on a call | | 9.4 MB | 10.5 MB | ~1–3% of one core |
 
 ## Development
 
@@ -128,8 +139,7 @@ cargo run --example bot -- 127.0.0.1:9988 500   # crude load test
 
 ## Roadmap
 
-1. Voice polish: per-user volume, noise suppression, echo cancellation for
-   people without headphones, sounds for joins and leaves.
+1. Voice polish: per-user volume, sounds for joins and leaves.
 2. Channel management at runtime: create/edit/delete, temporary channels, passwords.
 3. Permissions: server admin token, kick/ban, channel moderators.
 4. TLS for the control connection plus encrypted voice.
