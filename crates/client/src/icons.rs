@@ -10,6 +10,8 @@ pub enum Icon {
     Speaker,
     Mic,
     MicOff,
+    /// Muted on the server: a microphone with a padlock.
+    MicLocked,
     Headphones,
     HeadphonesOff,
     Moon,
@@ -109,6 +111,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 pen.line((knob + 2.5, y), (21.0, y));
                 pen.poly(&Pen::arc_points(knob, y, 2.5, 0.0, 360.0), true);
             }
+        }
+        Icon::MicLocked => {
+            pen.rrect(5.0, 2.0, 10.5, 12.0, 2.75);
+            pen.arc(7.75, 9.0, 5.0, 0.0, 180.0);
+            pen.line((7.75, 14.0), (7.75, 20.0));
+            pen.rrect(14.0, 14.5, 22.0, 21.5, 1.5);
+            pen.arc(18.0, 14.5, 2.6, 180.0, 360.0);
         }
         Icon::Lock => {
             pen.rrect(5.0, 11.0, 19.0, 21.0, 2.0);

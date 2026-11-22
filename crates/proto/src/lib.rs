@@ -147,6 +147,9 @@ pub enum Speech {
     Allowed,
     /// They may not speak in the channel they are in.
     NotHere,
+    /// A moderator muted them on the server, until one unmutes them or the
+    /// server restarts.
+    ServerMuted,
 }
 
 /// A ban on the server: the identity, and the IP address if that was banned too.
@@ -275,6 +278,13 @@ pub enum C2S {
         role: perms::RoleId,
         allow: perms::Perms,
         deny: perms::Perms,
+    },
+    /// Mutes someone on the server, or lifts it, if you may mute people where
+    /// they are and their role is below yours. It sticks to their identity
+    /// across reconnects.
+    ServerMute {
+        target: ClientId,
+        muted: bool,
     },
 }
 

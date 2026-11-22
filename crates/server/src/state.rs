@@ -139,6 +139,8 @@ pub struct Server {
     dead: Vec<ClientId>,
     udp: Arc<UdpSocket>,
     datagram: Vec<u8>,
+    /// Muted on the server, whether connected or not, until unmuted. Not saved.
+    mutes: HashSet<Identity>,
 }
 
 impl Server {
@@ -163,6 +165,7 @@ impl Server {
             dead: Vec::new(),
             udp,
             datagram: Vec::with_capacity(voice::MAX_DATAGRAM),
+            mutes: HashSet::new(),
         }
     }
 
@@ -273,7 +276,8 @@ impl Server {
         let permissions = self.permissions_of(Subject { client: id, identity });
         let channel = self.landing_channel(&permissions, None);
         let status = ClientStatus::default();
-        let info = ClientInfo { id, nickname, channel, status, role, identity, speech: speech(&permissions, channel) };
+        let speech = speech(self.mutes.contains(&identity), &permissions, channel);
+        let info = ClientInfo { id, nickname, channel, status, role, identity, speech };
         let editor = permissions.edits_permissions();
 
         let seen = self.clients.values().filter(|c| permissions.sees(c.info.channel));
@@ -447,6 +451,31 @@ impl Server {
             C2S::SetOverride { channel, role, allow, deny } => {
                 self.set_override(id, channel, Override::new(role, allow, deny));
             }
+            C2S::ServerMute { target, muted } => self.server_mute(id, target, muted),
+        }
+    }
+
+    /// Mutes `target` on the server, or lifts it, for someone who may mute
+    /// people where `target` is and stands above them there. It holds for
+    /// every connection with their identity until lifted.
+    fn server_mute(&mut self, id: ClientId, target: ClientId, muted: bool) {
+        let Some(t) = self.clients.get(&target).filter(|_| self.knows(id, target)) else {
+            return self.error(id, "that user is no longer online");
+        };
+        let (channel, identity) = (t.info.channel, t.info.identity);
+        let verb = if muted { "mute" } else { "unmute" };
+        if let Some(msg) = self.refusal(id, target, (Perm::MuteMembers, verb), Some(channel)) {
+            return self.error(id, &msg);
+        }
+        let changed = if muted { self.mutes.insert(identity) } else { self.mutes.remove(&identity) };
+        if !changed {
+            return;
+        }
+        tracing::info!(target, by = id, muted, "server mute");
+        let theirs: Vec<ClientId> =
+            self.clients.values().filter(|c| c.info.identity == identity).map(|c| c.info.id).collect();
+        for client in theirs {
+            self.sync_about(client);
         }
     }
 
@@ -577,8 +606,9 @@ impl Server {
     /// see it: that it moved, came into view, or went out of it, and whether
     /// its voice is passed on there.
     fn sync_about(&mut self, subject: ClientId) {
+        let muted = self.mutes.contains(&self.clients[&subject].info.identity);
         let client = self.clients.get_mut(&subject).expect("exists");
-        let now = speech(&client.permissions, client.info.channel);
+        let now = speech(muted, &client.permissions, client.info.channel);
         let was = std::mem::replace(&mut client.info.speech, now);
         let info = client.info.clone();
         let mut told = [Vec::new(), Vec::new(), Vec::new()];
@@ -1078,8 +1108,14 @@ impl Server {
 
 /// Whether the server passes on the voice of someone who may do
 /// `permissions`, where they are in `channel`.
-fn speech(permissions: &Permissions, channel: ChannelId) -> Speech {
-    if permissions.may_in(channel, Perm::Speak) { Speech::Allowed } else { Speech::NotHere }
+fn speech(server_muted: bool, permissions: &Permissions, channel: ChannelId) -> Speech {
+    if server_muted {
+        Speech::ServerMuted
+    } else if permissions.may_in(channel, Perm::Speak) {
+        Speech::Allowed
+    } else {
+        Speech::NotHere
+    }
 }
 
 /// Enqueues a frame to a client. One whose queue is full is too slow to keep

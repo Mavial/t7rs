@@ -308,6 +308,14 @@ const SCENES: &[Scene] = &[
         });
         app
     }),
+    ("28-server-muted", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        // Santi and Priya were muted on the server; Ines may not speak in the Lobby.
+        for (id, speech) in [(1, Speech::ServerMuted), (5, Speech::ServerMuted), (8, Speech::NotHere)] {
+            app.apply(&S2C::ClientSpeech { id, speech });
+        }
+        app
+    }),
     ("24-moderator-edit", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         // A listed moderator, who may rename the channel but not manage it.

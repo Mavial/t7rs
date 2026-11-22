@@ -1515,20 +1515,26 @@ async fn a_full_server_opens_no_room() {
 }
 
 #[tokio::test]
-async fn voice_is_dropped_from_those_who_may_not_speak() {
+async fn voice_is_dropped_from_those_who_may_not_speak_or_are_server_muted() {
     let (addr, mut owner, _, channels) = start_owned("speak", HOME).await;
     let [lobby, hangout] = ["Lobby", "Hangout"].map(|name| id_of(&channels, name));
     let (_talker, wt) = TestClient::connect(addr, "talker", None).await;
+    let (_loud, wl) = TestClient::connect(addr, "loud", None).await;
     let (mut quiet, wq) = TestClient::connect(addr, "quiet", None).await;
     let (mut ear, we) = TestClient::connect(addr, "ear", None).await;
-    let quiet_id = welcomed_id(&wq);
-    let (mut vt, mut vq, mut ve) =
-        (Voice::open(addr, &wt).await, Voice::open(addr, &wq).await, Voice::open(addr, &we).await);
+    let (loud_id, quiet_id) = (welcomed_id(&wl), welcomed_id(&wq));
+    let mut v = Vec::new();
+    for welcome in [&wt, &wl, &wq, &we] {
+        v.push(Voice::open(addr, welcome).await);
+    }
+    let [vt, vl, vq, ve] = &mut v[..] else { unreachable!() };
     vq.send(voice::ToServer::Audio { seq: 1, payload: &[1] }).await;
     assert_eq!(ve.recv_owned().await, Some(Got::Audio(vq.id, 1, vec![1])), "everyone may speak at first");
 
-    // The Lobby keeps Everyone from speaking, but not the Moderator role, which the talker holds.
+    // The Lobby keeps Everyone from speaking, but not the Moderator role,
+    // which the talker and the loud one hold.
     owner.change_roles(assign("talker", RoleId::MODERATOR, true)).await;
+    owner.change_roles(assign("loud", RoleId::MODERATOR, true)).await;
     owner.send(set(lobby, RoleId::MODERATOR, &[Perm::Speak], &[])).await;
     owner.send(set(lobby, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
     let silenced = S2C::ClientSpeech { id: quiet_id, speech: Speech::NotHere };
@@ -1542,7 +1548,66 @@ async fn voice_is_dropped_from_those_who_may_not_speak() {
     let S2C::Welcome { clients, .. } = TestClient::connect(addr, "late", None).await.1 else { unreachable!() };
     assert_eq!(clients.iter().find(|c| c.id == quiet_id).unwrap().speech, Speech::NotHere);
 
-    // Elsewhere they may speak again.
+    // A server mute drops the voice of someone who may speak there.
+    vl.send(voice::ToServer::Audio { seq: 1, payload: &[4] }).await;
+    assert_eq!(ve.recv_owned().await, Some(Got::Audio(vl.id, 1, vec![4])));
+    owner.send(C2S::ServerMute { target: loud_id, muted: true }).await;
+    ear.until(|m| *m == S2C::ClientSpeech { id: loud_id, speech: Speech::ServerMuted }).await;
+    vl.send(voice::ToServer::Audio { seq: 2, payload: &[5] }).await;
+    assert_eq!(ve.recv_owned().await, None, "server-muted voice was forwarded");
+    vt.send(voice::ToServer::Audio { seq: 2, payload: &[6] }).await;
+    assert_eq!(ve.recv_owned().await, Some(Got::Audio(vt.id, 2, vec![6])));
+
+    // Elsewhere the quiet one may speak again.
     quiet.send(C2S::JoinChannel { channel: hangout, password: None }).await;
     ear.until(|m| *m == S2C::ClientSpeech { id: quiet_id, speech: Speech::Allowed }).await;
+}
+
+#[tokio::test]
+async fn a_server_mute_holds_across_reconnects_until_lifted_or_a_restart() {
+    let dir = data_dir("server-mute");
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (mut owner, owner_id, _) = claim(addr, &dir, HOME).await;
+    let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
+    let (user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
+    moder.until(|m| matches!(m, S2C::Permissions(p) if p.server.has(Perm::MuteMembers))).await;
+
+    // A moderator mutes those below them, and not the owner.
+    moder.send(C2S::ServerMute { target: owner_id, muted: true }).await;
+    assert!(error(&mut moder).await.contains("their role isn't below yours"));
+    moder.send(C2S::ServerMute { target: user_id, muted: true }).await;
+    owner.until(|m| *m == S2C::ClientSpeech { id: user_id, speech: Speech::ServerMuted }).await;
+
+    // Reconnecting doesn't shake it off.
+    drop(user);
+    owner.until(|m| matches!(m, S2C::ClientLeft { id, .. } if *id == user_id)).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    let S2C::Welcome { clients, .. } = &wu else { unreachable!() };
+    assert_eq!(clients.iter().find(|c| c.id == user_id).unwrap().speech, Speech::ServerMuted);
+    let (mut vu, mut vm) = (Voice::open(addr, &wu).await, Voice::open(addr, &wm).await);
+    vu.send(voice::ToServer::Audio { seq: 1, payload: &[1] }).await;
+    assert_eq!(vm.recv_owned().await, None, "server-muted voice was forwarded");
+
+    // They can't lift it themselves; a moderator can.
+    user.send(C2S::ServerMute { target: user_id, muted: false }).await;
+    assert!(error(&mut user).await.contains("can't unmute"));
+    moder.send(C2S::ServerMute { target: user_id, muted: false }).await;
+    user.until(|m| *m == S2C::ClientSpeech { id: user_id, speech: Speech::Allowed }).await;
+    vu.send(voice::ToServer::Audio { seq: 2, payload: &[2] }).await;
+    assert_eq!(vm.recv_owned().await, Some(Got::Audio(user_id, 2, vec![2])));
+
+    // A restart forgets it.
+    moder.send(C2S::ServerMute { target: user_id, muted: true }).await;
+    user.until(|m| *m == S2C::ClientSpeech { id: user_id, speech: Speech::ServerMuted }).await;
+    task.abort();
+    drop((owner, moder, user));
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (_, wu) = TestClient::connect(addr, "user", None).await;
+    let S2C::Welcome { your_id, clients, .. } = &wu else { panic!("not welcomed: {wu:?}") };
+    assert_eq!(clients.iter().find(|c| c.id == *your_id).unwrap().speech, Speech::Allowed);
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
 }

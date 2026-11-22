@@ -143,6 +143,7 @@ enum TreeAction {
     SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
     Kick { target: ClientId, from_server: bool },
     Ban(ClientId),
+    ServerMute { target: ClientId, muted: bool },
     ServerSettings,
     SetRole { identity: Identity, role: RoleId, held: bool },
     Fold(String),
@@ -918,9 +919,17 @@ impl App {
             S2C::ClientStatus { .. } | S2C::Permissions(_) | S2C::Roles(_) => self.apply(&msg),
             S2C::ClientSpeech { id, speech } => {
                 let mine = self.view.as_ref().is_some_and(|v| v.my_id == id);
+                let was = self.my_speech();
                 self.apply(&msg);
-                if mine && speech == Speech::NotHere {
-                    self.push(1, LineKind::System, "You can't speak in this channel");
+                let line = match (was, speech) {
+                    (_, Speech::ServerMuted) => Some("A moderator muted you on the server"),
+                    (Speech::ServerMuted, _) => Some("A moderator unmuted you on the server"),
+                    (_, Speech::NotHere) => Some("You can't speak in this channel"),
+                    (_, Speech::Allowed) => None,
+                };
+                if let Some(line) = line.filter(|_| mine) {
+                    let tab = self.active_tab;
+                    self.push(tab, LineKind::System, line);
                 }
             }
             S2C::Channels(_) => {
@@ -1111,6 +1120,8 @@ impl App {
                     let s = self.settings.status;
                     let (txt, col) = if !matches!(self.conn, Conn::Connected { .. }) {
                         ("Offline", theme::TEXT_FAINT)
+                    } else if self.my_speech() == Speech::ServerMuted {
+                        ("Muted on the server", theme::RED)
                     } else if self.my_speech() == Speech::NotHere {
                         ("Can't speak here", theme::AMBER)
                     } else if s.away {
@@ -1160,6 +1171,11 @@ impl App {
                             Speech::NotHere => {
                                 let tip = "You can't speak in this channel";
                                 mic_held(ui, Icon::MicOff, theme::TEXT_FAINT, tip);
+                                false
+                            }
+                            Speech::ServerMuted => {
+                                let tip = "A moderator muted you on the server. Only a moderator can unmute you.";
+                                mic_held(ui, Icon::MicLocked, theme::RED, tip);
                                 false
                             }
                         };
@@ -1557,6 +1573,9 @@ impl App {
                             let mut x = rect.right() - TREE_RIGHT_PAD - 7.0;
                             // One microphone: muted by themselves, or kept from speaking here.
                             let (mic, why) = match (c.status.muted, c.speech) {
+                                (_, Speech::ServerMuted) => {
+                                    (Some((Icon::MicLocked, theme::RED)), Some("Muted on the server"))
+                                }
                                 (true, _) => (Some((Icon::MicOff, theme::RED)), None),
                                 (false, Speech::NotHere) => {
                                     (Some((Icon::MicOff, theme::TEXT_FAINT)), Some("Can't speak here"))
@@ -1608,9 +1627,10 @@ impl App {
                                         (true, "Kick from server…", view.may(Perm::Kick)),
                                     ];
                                     let ban = view.may(Perm::Ban);
+                                    let mutes = view.may_in(ch_id, Perm::MuteMembers);
                                     let set_moderator = view.may_in(ch_id, Perm::ManagePermissions);
                                     let roles = view.roles.as_ref().filter(|_| view.may(Perm::ManageRoles));
-                                    if kicks.iter().any(|k| k.2) || ban || set_moderator || roles.is_some() {
+                                    if kicks.iter().any(|k| k.2) || ban || mutes || set_moderator || roles.is_some() {
                                         ui.separator();
                                     }
                                     if let Some(roles) = roles {
@@ -1637,6 +1657,14 @@ impl App {
                                     if ban && ui.button("Ban…").clicked() {
                                         action = Some(TreeAction::Ban(c.id));
                                         ui.close();
+                                    }
+                                    if mutes {
+                                        let muted = c.speech == Speech::ServerMuted;
+                                        let label = if muted { "Unmute on server" } else { "Mute on server" };
+                                        if ui.button(label).clicked() {
+                                            action = Some(TreeAction::ServerMute { target: c.id, muted: !muted });
+                                            ui.close();
+                                        }
                                     }
                                     if set_moderator {
                                         let moderator = ch.moderators.contains(&c.identity);
@@ -1706,6 +1734,7 @@ impl App {
                     }
                     Some(TreeAction::Kick { target, from_server }) => self.open_kick(target, from_server),
                     Some(TreeAction::Ban(target)) => self.open_ban(target),
+                    Some(TreeAction::ServerMute { target, muted }) => self.net.send(C2S::ServerMute { target, muted }),
                     Some(TreeAction::ServerSettings) => self.open_server_settings(),
                     Some(TreeAction::SetRole { identity, role, held }) => {
                         self.net.send(C2S::ChangeRoles(RoleChange::Assign { identity, role, held }));
@@ -1965,8 +1994,10 @@ impl App {
                 row(ui, "Speakers", |ui| restart |= device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs));
 
                 section(ui, "Transmit");
-                if speech == Speech::NotHere {
-                    hint(ui, "You can't speak in this channel, so nothing is sent.");
+                match speech {
+                    Speech::Allowed => {}
+                    Speech::NotHere => hint(ui, "You can't speak in this channel, so nothing is sent."),
+                    Speech::ServerMuted => hint(ui, "A moderator muted you on the server, so nothing is sent."),
                 }
                 row(ui, "Mode", |ui| {
                     theme::segmented(
