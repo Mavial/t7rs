@@ -15,8 +15,8 @@ pub struct ServerView {
     pub clients: HashMap<ClientId, ClientInfo>,
     /// Every role and who holds them, while this client may manage roles.
     pub roles: Option<Roles>,
-    may: Perms,
-    may_in: HashMap<ChannelId, Perms>,
+    server_perms: Perms,
+    channel_perms: HashMap<ChannelId, Perms>,
     /// Channel tree in display order: (depth, channel id).
     tree: Vec<(usize, ChannelId)>,
 }
@@ -35,8 +35,8 @@ impl ServerView {
             channels: channels.into_iter().map(|c| (c.id, c)).collect(),
             clients: clients.into_iter().map(|c| (c.id, c)).collect(),
             roles: None,
-            may: Perms::NONE,
-            may_in: HashMap::new(),
+            server_perms: Perms::NONE,
+            channel_perms: HashMap::new(),
             tree: Vec::new(),
         };
         view.set_permissions(permissions);
@@ -45,9 +45,9 @@ impl ServerView {
     }
 
     fn set_permissions(&mut self, permissions: Permissions) {
-        self.may = permissions.server;
-        self.may_in = permissions.channels.into_iter().collect();
-        if !self.may.has(Perm::ManageRoles) {
+        self.server_perms = permissions.server;
+        self.channel_perms = permissions.channels.into_iter().collect();
+        if !self.server_perms.has(Perm::ManageRoles) {
             self.roles = None;
         }
     }
@@ -98,12 +98,12 @@ impl ServerView {
     /// Whether the server lets this client do it on the server as a whole:
     /// what the UI offers. The server checks again.
     pub fn may(&self, perm: Perm) -> bool {
-        self.may.has(perm)
+        self.server_perms.has(perm)
     }
 
     /// Whether the server lets this client do it in `channel`.
     pub fn may_in(&self, channel: ChannelId, perm: Perm) -> bool {
-        self.may_in.get(&channel).is_some_and(|p| p.has(perm))
+        self.channel_perms.get(&channel).is_some_and(|p| p.has(perm))
     }
 
     pub fn is_owner(&self) -> bool {

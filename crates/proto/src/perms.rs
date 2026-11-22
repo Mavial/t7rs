@@ -95,6 +95,10 @@ impl Perms {
         Perms(bits)
     }
 
+    const fn from_bits_truncate(bits: u16) -> Perms {
+        Perms(bits & Perms::ALL.0)
+    }
+
     #[must_use]
     pub const fn union(self, other: Perms) -> Perms {
         Perms(self.0 | other.0)
@@ -165,7 +169,7 @@ impl Serialize for Perms {
 impl<'de> Deserialize<'de> for Perms {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         if !d.is_human_readable() {
-            return u16::deserialize(d).map(|bits| Perms(bits) & Perms::ALL);
+            return u16::deserialize(d).map(Perms::from_bits_truncate);
         }
         let mut perms = Perms::NONE;
         for name in Vec::<String>::deserialize(d)? {
@@ -306,9 +310,12 @@ pub struct Override {
 }
 
 impl Override {
-    /// A permission in both is allowed.
-    pub fn new(allow: Perms, deny: Perms) -> Self {
-        Self { allow, deny: deny.without(allow) }
+    pub fn allowing(perms: Perms) -> Self {
+        Self { allow: perms, deny: Perms::NONE }
+    }
+
+    pub fn denying(perms: Perms) -> Self {
+        Self { allow: Perms::NONE, deny: perms }
     }
 }
 
@@ -578,9 +585,9 @@ mod tests {
     fn the_closest_channel_setting_wins_and_there_allow_beats_deny() {
         let (roles, mut t) = (roles(), tree());
         let (view, speak) = (Perms::of(&[Perm::View]), Perms::of(&[Perm::Speak]));
-        t.overrides.insert(GAMING, vec![(RoleId::EVERYONE, Override::new(Perms::NONE, view | speak))]);
-        t.overrides.insert(SQUAD, vec![(RoleId::EVERYONE, Override::new(speak, Perms::NONE))]);
-        t.overrides.insert(DEEP, vec![(RoleId::MODERATOR, Override::new(view, Perms::NONE))]);
+        t.overrides.insert(GAMING, vec![(RoleId::EVERYONE, Override::denying(view | speak))]);
+        t.overrides.insert(SQUAD, vec![(RoleId::EVERYONE, Override::allowing(speak))]);
+        t.overrides.insert(DEEP, vec![(RoleId::MODERATOR, Override::allowing(view))]);
 
         assert!(!perms(&roles, &t, NOBODY, Some(GAMING)).has(Perm::View));
         assert!(!perms(&roles, &t, NOBODY, Some(SQUAD)).has(Perm::View), "inherited from Gaming");
@@ -591,10 +598,7 @@ mod tests {
 
         t.overrides.insert(
             GAMING,
-            vec![
-                (RoleId::EVERYONE, Override::new(Perms::NONE, view)),
-                (RoleId::MODERATOR, Override::new(view, Perms::NONE)),
-            ],
+            vec![(RoleId::EVERYONE, Override::denying(view)), (RoleId::MODERATOR, Override::allowing(view))],
         );
         assert!(perms(&roles, &t, MODERATOR, Some(GAMING)).has(Perm::View));
         assert!(perms(&roles, &t, M, Some(SQUAD)).has(Perm::View), "listed moderators hold the role there");
