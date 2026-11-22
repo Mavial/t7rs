@@ -107,6 +107,12 @@ pub enum ChannelKind {
     Lobby,
 }
 
+impl ChannelKind {
+    pub fn levels_including_rooms(self) -> usize {
+        if self == ChannelKind::Lobby { 2 } else { 1 }
+    }
+}
+
 /// The editable part of a channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelSettings {

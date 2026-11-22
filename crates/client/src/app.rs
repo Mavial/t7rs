@@ -2470,9 +2470,10 @@ impl App {
         let kinds: Vec<(ChannelKind, &str)> = match (view, editing) {
             (Some(v), None) if may_create_permanent => {
                 let above = parent.and_then(|p| v.tree().iter().find(|(_, id)| *id == p));
-                let depth = above.map_or(1, |(d, _)| d + 2);
+                let parent_depth = above.map_or(0, |(d, _)| d + 1);
+                let lobby_fits = parent_depth + ChannelKind::Lobby.levels_including_rooms() <= MAX_CHANNEL_DEPTH;
                 let in_temporary = parent.and_then(|p| v.channels.get(&p)).is_some_and(|c| c.temporary);
-                let lobby = (depth < MAX_CHANNEL_DEPTH && !in_temporary).then_some((ChannelKind::Lobby, "Lobby"));
+                let lobby = (lobby_fits && !in_temporary).then_some((ChannelKind::Lobby, "Lobby"));
                 let category = parent.is_none().then_some((ChannelKind::Category, "Category"));
                 [Some((ChannelKind::Voice, "Channel")), lobby, category].into_iter().flatten().collect()
             }

@@ -118,7 +118,7 @@ impl Channels {
             let refusal = if c.kind == ChannelKind::Category && parent.is_some() {
                 Some(ChannelError::CategoryPlacement)
             } else if c.kind == ChannelKind::Lobby
-                && parent.is_some_and(|p| self.depth(p) + levels(c.kind) > MAX_CHANNEL_DEPTH)
+                && parent.is_some_and(|p| self.depth(p) + c.kind.levels_including_rooms() > MAX_CHANNEL_DEPTH)
             {
                 Some(ChannelError::TooDeep)
             } else if c.kind != ChannelKind::Voice && (password.is_some() || c.max_clients.is_some()) {
@@ -241,7 +241,7 @@ impl Channels {
             if parent.info.temporary && !temporary {
                 return Err(ChannelError::PermanentUnderTemporary);
             }
-            if self.depth(p) + levels(kind) > MAX_CHANNEL_DEPTH {
+            if self.depth(p) + kind.levels_including_rooms() > MAX_CHANNEL_DEPTH {
                 return Err(ChannelError::TooDeep);
             }
         }
@@ -497,7 +497,7 @@ impl Channels {
 
     fn height(&self, id: ChannelId) -> usize {
         let below = self.children_of(Some(id)).into_iter().map(|k| self.height(k)).max().unwrap_or(0);
-        (1 + below).max(levels(self.map[&id].info.kind))
+        (1 + below).max(self.map[&id].info.kind.levels_including_rooms())
     }
 
     fn name_taken(&self, name: &str, parent: Option<ChannelId>, except: Option<ChannelId>) -> bool {
@@ -528,10 +528,6 @@ impl Channels {
         }
         Ok((name, topic, s.max_clients))
     }
-}
-
-fn levels(kind: ChannelKind) -> usize {
-    if kind == ChannelKind::Lobby { 2 } else { 1 }
 }
 
 fn singular(kind: ChannelKind) -> &'static str {

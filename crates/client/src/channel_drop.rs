@@ -155,8 +155,7 @@ fn depth(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
 
 fn height(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
     let below = children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0);
-    let lobby = channels.get(&id).is_some_and(|c| c.kind == ChannelKind::Lobby);
-    (1 + below).max(if lobby { 2 } else { 1 })
+    (1 + below).max(channels.get(&id).map_or(1, |c| c.kind.levels_including_rooms()))
 }
 
 #[cfg(test)]
