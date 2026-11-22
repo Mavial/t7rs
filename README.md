@@ -24,7 +24,7 @@ cargo build --release
 ./target/release/t7-client 127.0.0.1 --nick Santiago
 ```
 
-The server uses port **9987 on both TCP (control) and UDP (voice)**; open both in
+The server uses port **9988 on both TCP (control) and UDP (voice)**. Open both in
 your firewall. When connecting you can leave the port off. If the client shows
 "Connected · no voice", UDP is being blocked.
 
@@ -63,7 +63,7 @@ Nickname, recent servers, status and voice settings are remembered between sessi
 ```toml
 name = "T7 Server"
 welcome = "Welcome!"
-bind = "0.0.0.0:9987"
+bind = "0.0.0.0:9988"
 password = ""          # empty = public
 max_clients = 128
 
@@ -122,8 +122,8 @@ Measured on Windows (release build, idle and connected, median of 5 runs):
 
 ```sh
 cargo test --workspace                       # unit + end-to-end server tests
-cargo run --example bot -- 127.0.0.1:9987    # fill a server with demo users
-cargo run --example bot -- 127.0.0.1:9987 500   # crude load test
+cargo run --example bot -- 127.0.0.1:9988    # fill a server with demo users
+cargo run --example bot -- 127.0.0.1:9988 500   # crude load test
 ```
 
 ## Roadmap

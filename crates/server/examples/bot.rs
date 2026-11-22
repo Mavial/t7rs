@@ -1,6 +1,6 @@
 //! Connects scripted clients to a server: handy for demos and load tests.
 //!
-//!     cargo run --example bot -- 127.0.0.1:9987 [COUNT]
+//!     cargo run --example bot -- 127.0.0.1:9988 [COUNT]
 //!
 //! With COUNT > 6 the bots get numbered names and just idle (load test).
 

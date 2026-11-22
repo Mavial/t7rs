@@ -47,7 +47,7 @@ pub const DEFAULT_CONFIG: &str = r#"# T7 server configuration
 
 name = "T7 Server"
 welcome = "Welcome! Double-click a channel to join it."
-bind = "0.0.0.0:9987"
+bind = "0.0.0.0:9988"
 # Leave empty for a public server.
 password = ""
 max_clients = 128
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn default_config_flattens() {
         let cfg: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
-        assert_eq!(cfg.bind, "0.0.0.0:9987");
+        assert_eq!(cfg.bind, "0.0.0.0:9988");
         let (channels, default) = cfg.flatten_channels();
         assert_eq!(channels.len(), 6);
         assert_eq!(default, 1);

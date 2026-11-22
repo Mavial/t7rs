@@ -11,7 +11,7 @@ struct Args {
     /// Path to the config file (created with defaults if missing).
     #[arg(short, long, default_value = "t7-server.toml")]
     config: PathBuf,
-    /// Override the bind address from the config, e.g. 0.0.0.0:9987.
+    /// Override the bind address from the config, e.g. 0.0.0.0:9988.
     #[arg(short, long)]
     bind: Option<String>,
 }

@@ -521,7 +521,7 @@ impl App {
         if self.voice.blocked() {
             pill.response.on_hover_text(
                 "Voice packets aren't getting through. The server's UDP port (same number as \
-                 the TCP port, 9987 by default) is probably blocked by a firewall.",
+                 the TCP port, 9988 by default) is probably blocked by a firewall.",
             );
         }
     }
@@ -873,7 +873,7 @@ impl App {
             ui.set_width(360.0);
             ui.label(RichText::new("Connect to server").size(19.0).strong().color(theme::TEXT));
             ui.add_space(2.0);
-            ui.label(RichText::new("Enter an address like example.com or 1.2.3.4:9987").size(12.5).color(theme::TEXT_DIM));
+            ui.label(RichText::new("Enter an address like example.com or 1.2.3.4:9988").size(12.5).color(theme::TEXT_DIM));
             ui.add_space(14.0);
 
             let address = field(ui, "Server address", &mut form.address, false);

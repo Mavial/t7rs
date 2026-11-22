@@ -14,7 +14,7 @@ pub mod voice;
 /// Bumped whenever the wire format changes incompatibly.
 pub const PROTOCOL_VERSION: u16 = 2;
 /// Default port of a T7 server (TCP for control, UDP for voice).
-pub const DEFAULT_PORT: u16 = 9987;
+pub const DEFAULT_PORT: u16 = 9988;
 /// Upper bound for a single frame. Protects both sides from memory abuse.
 pub const MAX_FRAME_LEN: usize = 256 * 1024;
 

@@ -363,9 +363,9 @@ mod tests {
 
     #[test]
     fn default_port() {
-        assert_eq!(with_default_port("example.com"), "example.com:9987");
+        assert_eq!(with_default_port("example.com"), "example.com:9988");
         assert_eq!(with_default_port(" example.com:1234 "), "example.com:1234");
-        assert_eq!(with_default_port("::1"), "[::1]:9987");
+        assert_eq!(with_default_port("::1"), "[::1]:9988");
         assert_eq!(with_default_port("[::1]:5"), "[::1]:5");
     }
 }
