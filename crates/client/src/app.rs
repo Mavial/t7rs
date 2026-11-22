@@ -1604,115 +1604,120 @@ impl App {
 
         let modal = egui::Modal::new(Id::unique("voice-settings")).show(ctx, |ui| {
             ui.set_width(400.0);
-            ui.spacing_mut().slider_width = 250.0;
+            ui.spacing_mut().slider_width = 220.0;
             ui.label(RichText::new("Voice settings").size(19.0).strong().color(theme::TEXT));
 
-            section(ui, "Microphone");
-            restart |= device_combo(ui, "mic", &mut a.input_device, &dlg.inputs);
-            section(ui, "Speakers");
-            restart |= device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs);
+            // Keeps the title and the Done button on screen when the window is shorter than the
+            // dialog; 170 points covers both plus the modal's margins.
+            let body_height = (ui.ctx().content_rect().height() - 170.0).max(120.0);
+            egui::ScrollArea::vertical().max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+                section(ui, "Microphone");
+                restart |= device_combo(ui, "mic", &mut a.input_device, &dlg.inputs);
+                section(ui, "Speakers");
+                restart |= device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs);
 
-            section(ui, "Transmit");
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut a.mode, TxMode::VoiceActivation, "Voice activation");
-                ui.selectable_value(&mut a.mode, TxMode::PushToTalk, "Push to talk");
-            });
-            ui.add_space(6.0);
-            match a.mode {
-                TxMode::VoiceActivation => {
-                    level_meter(ui, level, a.threshold_db, open);
-                    ui.add(
-                        egui::Slider::new(&mut a.threshold_db, METER_MIN_DB..=METER_MAX_DB)
-                            .text("activation level")
-                            .suffix(" dB")
-                            .fixed_decimals(0),
-                    );
-                    ui.label(
-                        RichText::new("Talk normally: the bar should cross the line, and stay left of it when you're quiet.")
-                            .size(11.5)
-                            .color(theme::TEXT_FAINT),
-                    );
-                }
-                TxMode::PushToTalk => {
-                    ui.horizontal(|ui| {
-                        let text = match (dlg.binding, a.ptt_key) {
-                            (true, _) => "Press a key or mouse button…".to_owned(),
-                            (false, Some(k)) => ptt::label(k.vk),
-                            (false, None) => "Click to set a key".to_owned(),
+                section(ui, "Transmit");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut a.mode, TxMode::VoiceActivation, "Voice activation");
+                    ui.selectable_value(&mut a.mode, TxMode::PushToTalk, "Push to talk");
+                });
+                ui.add_space(6.0);
+                match a.mode {
+                    TxMode::VoiceActivation => {
+                        level_meter(ui, level, a.threshold_db, open);
+                        ui.add(
+                            egui::Slider::new(&mut a.threshold_db, METER_MIN_DB..=METER_MAX_DB)
+                                .text("activation level")
+                                .suffix(" dB")
+                                .fixed_decimals(0),
+                        );
+                        ui.label(
+                            RichText::new("Talk normally: the bar should cross the line, and stay left of it when you're quiet.")
+                                .size(11.5)
+                                .color(theme::TEXT_FAINT),
+                        );
+                    }
+                    TxMode::PushToTalk => {
+                        ui.horizontal(|ui| {
+                            let text = match (dlg.binding, a.ptt_key) {
+                                (true, _) => "Press a key or mouse button…".to_owned(),
+                                (false, Some(k)) => ptt::label(k.vk),
+                                (false, None) => "Click to set a key".to_owned(),
+                            };
+                            if ui.add(egui::Button::new(text).min_size(vec2(220.0, 30.0))).clicked() {
+                                dlg.binding = true;
+                            }
+                            if open {
+                                ui.label(RichText::new("Transmitting").color(theme::GREEN));
+                            }
+                        });
+                        let note = if cfg!(windows) {
+                            "Works while other apps, like games, are focused."
+                        } else {
+                            "Works while T7 is focused."
                         };
-                        if ui.add(egui::Button::new(text).min_size(vec2(220.0, 30.0))).clicked() {
-                            dlg.binding = true;
-                        }
-                        if open {
-                            ui.label(RichText::new("Transmitting").color(theme::GREEN));
+                        ui.label(RichText::new(note).size(11.5).color(theme::TEXT_FAINT));
+                    }
+                }
+
+                section(ui, "Sound cleanup");
+                ui.checkbox(&mut a.cleanup.noise_suppression, "Noise suppression")
+                    .on_hover_text("Removes fans, hum, traffic and other background noise");
+                ui.checkbox(&mut a.cleanup.echo_cancellation, "Echo cancellation")
+                    .on_hover_text("Stops others from hearing themselves when you use speakers instead of headphones");
+                ui.checkbox(&mut a.cleanup.auto_gain, "Automatic volume")
+                    .on_hover_text("Brings a quiet microphone up to a normal level");
+
+                section(ui, "Notifications");
+                ui.checkbox(&mut a.sounds, "Notification sounds")
+                    .on_hover_text("Chimes for connecting, people joining and leaving, pokes and private messages");
+                ui.add_enabled(
+                    a.sounds,
+                    egui::Slider::new(&mut a.sounds_volume, 0.0..=1.0)
+                        .text("sound volume")
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                        .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
+                );
+                ui.horizontal(|ui| {
+                    let shown = match &a.sound_pack {
+                        None => "Built-in".to_owned(),
+                        Some(dir) => dlg
+                            .packs
+                            .iter()
+                            .find(|(_, d)| d == dir)
+                            .map(|(label, _)| label.clone())
+                            .unwrap_or_else(|| dir.display().to_string()),
+                    };
+                    egui::ComboBox::from_id_salt("sound-pack").width(250.0).selected_text(shown).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut a.sound_pack, None, "Built-in");
+                        for (label, dir) in &dlg.packs {
+                            ui.selectable_value(&mut a.sound_pack, Some(dir.clone()), label);
                         }
                     });
-                    let note = if cfg!(windows) {
-                        "Works while other apps, like games, are focused."
-                    } else {
-                        "Works while T7 is focused."
-                    };
-                    ui.label(RichText::new(note).size(11.5).color(theme::TEXT_FAINT));
-                }
-            }
-
-            section(ui, "Sound cleanup");
-            ui.checkbox(&mut a.cleanup.noise_suppression, "Noise suppression")
-                .on_hover_text("Removes fans, hum, traffic and other background noise");
-            ui.checkbox(&mut a.cleanup.echo_cancellation, "Echo cancellation")
-                .on_hover_text("Stops others from hearing themselves when you use speakers instead of headphones");
-            ui.checkbox(&mut a.cleanup.auto_gain, "Automatic volume")
-                .on_hover_text("Brings a quiet microphone up to a normal level");
-
-            section(ui, "Notifications");
-            ui.checkbox(&mut a.sounds, "Notification sounds")
-                .on_hover_text("Chimes for connecting, people joining and leaving, pokes and private messages");
-            ui.add_enabled(
-                a.sounds,
-                egui::Slider::new(&mut a.sounds_volume, 0.0..=1.0)
-                    .text("sound volume")
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                    .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
-            );
-            ui.horizontal(|ui| {
-                let shown = match &a.sound_pack {
-                    None => "Built-in".to_owned(),
-                    Some(dir) => dlg
-                        .packs
-                        .iter()
-                        .find(|(_, d)| d == dir)
-                        .map(|(label, _)| label.clone())
-                        .unwrap_or_else(|| dir.display().to_string()),
-                };
-                egui::ComboBox::from_id_salt("sound-pack").width(250.0).selected_text(shown).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut a.sound_pack, None, "Built-in");
-                    for (label, dir) in &dlg.packs {
-                        ui.selectable_value(&mut a.sound_pack, Some(dir.clone()), label);
+                    if ui.small_button("Test").clicked() {
+                        test_sound = true;
                     }
                 });
-                if ui.small_button("Test").clicked() {
-                    test_sound = true;
+                if a.sound_pack.is_some() && a.sound_pack == sounds_dir() {
+                    let names: Vec<&str> = Sound::ALL.iter().map(|s| s.file_name()).collect();
+                    if ui
+                        .small_button("Open custom folder…")
+                        .on_hover_text(format!("WAV files with these names replace the built-in sounds: {}", names.join(", ")))
+                        .clicked()
+                    {
+                        open_sounds_folder();
+                    }
                 }
-            });
-            if a.sound_pack.is_some() && a.sound_pack == sounds_dir() {
-                let names: Vec<&str> = Sound::ALL.iter().map(|s| s.file_name()).collect();
-                if ui
-                    .small_button("Open custom folder…")
-                    .on_hover_text(format!("WAV files with these names replace the built-in sounds: {}", names.join(", ")))
-                    .clicked()
-                {
-                    open_sounds_folder();
-                }
-            }
 
-            section(ui, "Volume");
-            ui.add(egui::Slider::new(&mut a.input_gain_db, -20.0..=20.0).text("microphone").suffix(" dB").fixed_decimals(0));
-            ui.add(
-                egui::Slider::new(&mut a.output_volume, 0.0..=2.0)
-                    .text("speakers")
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                    .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
-            );
+                section(ui, "Volume");
+                ui.add(egui::Slider::new(&mut a.input_gain_db, -20.0..=20.0).text("microphone").suffix(" dB").fixed_decimals(0));
+                ui.add(
+                    egui::Slider::new(&mut a.output_volume, 0.0..=2.0)
+                        .text("speakers")
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                        .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
+                );
+            });
 
             ui.add_space(14.0);
             ui.horizontal(|ui| {
