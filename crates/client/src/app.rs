@@ -155,7 +155,7 @@ struct ServerSettings {
     /// The ban list; `None` until the server sends it.
     bans: Option<Vec<BanInfo>>,
     picked: Pick,
-    name: String,
+    name_draft: String,
     new_role: String,
 }
 
@@ -520,7 +520,7 @@ impl App {
         }
         let picked = Pick::Role(RoleId::MODERATOR);
         self.server_settings =
-            Some(ServerSettings { tab, bans: None, picked, name: String::new(), new_role: String::new() });
+            Some(ServerSettings { tab, bans: None, picked, name_draft: String::new(), new_role: String::new() });
     }
 
     fn open_poke(&mut self, target: ClientId) {
@@ -1096,7 +1096,7 @@ impl App {
                     for &(depth, ch_id) in view.tree() {
                         let ch = &view.channels[&ch_id];
                         let manages_it = manages(view, Scope::Channel(ch_id));
-                        let may_rearrange = manages_it && manages(view, Scope::within(ch.parent));
+                        let may_rearrange = manages_it && may_renumber_children(view, ch.parent);
                         let clients = view.clients_in(ch_id);
                         let indent = depth as f32 * 18.0;
                         let is_mine = mine == Some(ch_id);
@@ -1108,7 +1108,7 @@ impl App {
                             (Some(dragged), Some(pos)) if resp.contains_pointer() => {
                                 let zone = Zone::at((pos.y - rect.top()) / rect.height());
                                 match channel_drop::drop_target(&view.channels, dragged, ch_id, zone) {
-                                    Outcome::Move(to) if !manages(view, Scope::within(to.parent)) => None,
+                                    Outcome::Move(to) if !may_renumber_children(view, to.parent) => None,
                                     outcome => Some((zone, outcome)),
                                 }
                             }
@@ -2340,6 +2340,10 @@ impl App {
     }
 }
 
+fn may_renumber_children(view: &ServerView, parent: Option<ChannelId>) -> bool {
+    manages(view, Scope::within(parent))
+}
+
 fn manages(view: &ServerView, scope: Scope) -> bool {
     match scope {
         Scope::Channel(id) => view.may_in(id, Perm::ManageChannels),
@@ -2710,8 +2714,10 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
                 if below(role.id) {
                     resp.dnd_set_drag_payload(DragRole(role.id));
                 }
-                let fits = mine > roles.height_at(position);
-                if let Some(dragged) = dragging.filter(|d| *d != role.id && fits && resp.contains_pointer()) {
+                let below_mine_at_position = mine > roles.height_at(position);
+                if let Some(dragged) =
+                    dragging.filter(|d| *d != role.id && below_mine_at_position && resp.contains_pointer())
+                {
                     let y = if roles.height(dragged) > roles.height(role.id) {
                         resp.rect.bottom()
                     } else {
@@ -2768,11 +2774,11 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
                     field_label(ui, "Name");
                     let name_id = egui::Id::unique(("role-name", id));
                     if !ui.memory(|m| m.has_focus(name_id)) {
-                        s.name.clone_from(&role.name);
+                        s.name_draft.clone_from(&role.name);
                     }
-                    let field =
-                        ui.add_enabled(editable, text_input(&mut s.name).id(name_id).char_limit(MAX_ROLE_NAME_LEN));
-                    let name = s.name.trim();
+                    let field = ui
+                        .add_enabled(editable, text_input(&mut s.name_draft).id(name_id).char_limit(MAX_ROLE_NAME_LEN));
+                    let name = s.name_draft.trim();
                     if field.lost_focus() && !name.is_empty() && name != role.name {
                         change(send, RoleChange::Rename { id, name: name.to_owned() });
                     }
