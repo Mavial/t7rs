@@ -646,7 +646,8 @@ async fn bans_keep_identities_and_addresses_out() {
     assert!(ends.iter().any(|e| e == rejected(&reply)), "{reply:?}");
 
     // Banning the address the admin is on would lock the admin out too.
-    let (_, wb) = TestClient::connect_from(addr, ADMIN_IP, "flatmate", &key("flatmate")).await;
+    // Held open: a dropped connection could leave before the ban arrives.
+    let (_flatmate, wb) = TestClient::connect_from(addr, ADMIN_IP, "flatmate", &key("flatmate")).await;
     admin
         .send(C2S::Ban { target: welcomed_id(&wb), duration_secs: None, reason: String::new(), include_ip: true })
         .await;
@@ -764,7 +765,8 @@ async fn moderators_and_bans_survive_a_restart() {
     admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: true }).await;
     let list = admin.channels().await;
     assert_eq!(list.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
-    let (_, wm) = TestClient::connect(addr, "mallory", None).await;
+    // Held open, so the ClientLeft below is the ban's kick and not a disconnect.
+    let (_mallory, wm) = TestClient::connect(addr, "mallory", None).await;
     admin
         .send(C2S::Ban { target: welcomed_id(&wm), duration_secs: None, reason: "spam".into(), include_ip: true })
         .await;
