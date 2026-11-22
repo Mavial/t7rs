@@ -82,6 +82,9 @@ max_clients = 128
 # channels.toml next to this file, which then holds the live channel tree as
 # it is edited in T7. Delete channels.toml to start over from these.
 # Channels nest via `children`; `default = true` marks where people land.
+# `kind = "category"` makes a top-level heading for the channels in it,
+# which nobody joins. Who may see or do what in a channel is easiest to
+# set in T7: right-click the channel, then Edit channel, then Permissions.
 
 [[channels]]
 name = "Lobby"
