@@ -10,6 +10,9 @@ use t7_proto::{BanId, BanInfo, Identity};
 /// `bans.toml`.
 #[derive(Default, Serialize, Deserialize)]
 struct BansFile {
+    /// The id the next ban gets. Files from before it was saved lack it.
+    #[serde(default)]
+    next_id: BanId,
     #[serde(default)]
     bans: Vec<BanInfo>,
 }
@@ -25,16 +28,25 @@ pub struct NewBan {
     pub duration_secs: Option<u64>,
 }
 
-#[derive(Default)]
 pub struct Bans {
     list: Vec<BanInfo>,
+    /// Ids only count up, so a stale ban list can't lift someone else's ban.
+    next_id: BanId,
+}
+
+impl Default for Bans {
+    fn default() -> Self {
+        Self { list: Vec::new(), next_id: 1 }
+    }
 }
 
 impl Bans {
     pub fn load(path: &Path, now: u64) -> std::io::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let file: BansFile = toml::from_str(&text).map_err(std::io::Error::other)?;
-        let mut bans = Self { list: file.bans };
+        // Counted before pruning: an expired ban's id stays used.
+        let highest = file.bans.iter().map(|b| b.id).max().unwrap_or(0);
+        let mut bans = Self { next_id: file.next_id.max(highest + 1), list: file.bans };
         bans.prune(now);
         Ok(bans)
     }
@@ -43,14 +55,15 @@ impl Bans {
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let header = "# Banned identities and IP addresses, kept up to date by the server as\n\
                       # admins ban and unban people in T7. Edit it only while the server is stopped.\n\n";
-        let body = toml::to_string(&BansFile { bans: self.list.clone() }).map_err(std::io::Error::other)?;
+        let body = toml::to_string(&BansFile { next_id: self.next_id, bans: self.list.clone() }).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, format!("{header}{body}"))?;
         std::fs::rename(&tmp, path)
     }
 
     pub fn add(&mut self, ban: NewBan, now: u64) -> &BanInfo {
-        let id = self.list.iter().map(|b| b.id).max().unwrap_or(0) + 1;
+        let id = self.next_id;
+        self.next_id += 1;
         self.list.push(BanInfo {
             id,
             identity: ban.identity,
@@ -162,6 +175,34 @@ mod tests {
         assert_eq!(bans.remove(first), None);
         assert!(bans.find(ALICE, ip("10.0.0.1"), 100).is_none());
         assert_eq!(bans.add(ban(ALICE, None, None), 100).id, second + 1, "ids are not reused while in the list");
+    }
+
+    #[test]
+    fn ids_are_never_reused() {
+        let dir = std::env::temp_dir().join(format!("t7-ban-ids-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bans.toml");
+        let mut bans = Bans::default();
+        bans.add(ban(ALICE, None, None), 100);
+        let newest = bans.add(ban(BOB, None, None), 100).id;
+        bans.remove(newest);
+        let after_unban = bans.add(ban(BOB, None, Some(10)), 100).id;
+        assert!(after_unban > newest, "the newest ban's id came back after an unban");
+
+        // The newest ban expires and is pruned on load; a restart keeps counting.
+        bans.save(&file).unwrap();
+        let mut back = Bans::load(&file, 200).unwrap();
+        assert_eq!(back.list().len(), 1);
+        assert!(back.add(ban(BOB, None, None), 200).id > after_unban, "an id came back after a restart");
+
+        // A file from before the next id was saved continues after its highest id, expired or not.
+        let saved = std::fs::read_to_string(&file).unwrap();
+        let old: String = saved.lines().filter(|l| !l.starts_with("next_id")).map(|l| format!("{l}\n")).collect();
+        assert_ne!(old, saved, "the next id is saved");
+        std::fs::write(&file, old).unwrap();
+        let mut old = Bans::load(&file, 200).unwrap();
+        assert!(old.add(ban(BOB, None, None), 200).id > after_unban);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

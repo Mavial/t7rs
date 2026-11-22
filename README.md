@@ -148,6 +148,7 @@ The server keeps more files next to its config:
 - `bans.toml`: the ban list, saved at every ban and unban. Expired bans are
   dropped when the server starts and when an admin opens the ban list. To
   lift a ban by hand, stop the server and delete its `[[bans]]` entry.
+  `next_id` keeps ban ids from being reused, so leave it in place.
 - `admin_token.txt`: the admin token, generated on first start (unless
   `admin_token` is set) and printed in the log at every start. Anyone with it
   can manage all channels, so share it only with your admins.
