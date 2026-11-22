@@ -290,13 +290,15 @@ crates/
   current-thread tokio runtime. Icons are painted vectors (no image assets).
   Settings live in `T7/settings.toml` in the user's config directory.
 
-Measured on Windows (release build, idle and connected, median of 5 runs):
+Measured on Windows 11 (release build, median of 5 runs, other apps running).
+On a call, one other person talks the whole time:
 
-| | Binary | Private memory (Task Manager) | Committed | Idle CPU |
+| | Binary | Private memory (Task Manager) | Committed | CPU |
 | --- | --- | --- | --- | --- |
-| t7-server | 1.4 MB | — | 7.5 MB working set | 0% |
-| t7-client, not connected | 7.1 MB | 7.2 MB | 8.1 MB | 0% |
-| t7-client, on a call | | 9.4 MB | 10.5 MB | ~1–3% of one core |
+| t7-server, on a call | 3.1 MB | 1.2 MB | 1.9 MB (8.1 MB working set) | ~0.2% of one core |
+| t7-client, not connected | 10.7 MB | 6.2 MB | 7.1 MB | 0% |
+| t7-client, connected and alone | | 9.7 MB | 11.1 MB | ~2% of one core |
+| t7-client, on a call | | 9.9 MB | 11.1 MB | ~4% of one core |
 
 ## Development
 
