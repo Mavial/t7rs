@@ -568,6 +568,39 @@ async fn moderators_kick_from_their_channels_only() {
 }
 
 #[tokio::test]
+async fn kicked_people_land_where_a_joining_client_would() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    let [lobby, hangout, gaming, squad] = ["Lobby", "Hangout", "Gaming", "Squad 1"].map(|name| id_of(&channels, name));
+    let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    for channel in [gaming, hangout] {
+        admin.send(C2S::SetModerator { channel, identity: key("mod").identity(), moderator: true }).await;
+        moder.channels().await;
+    }
+    user.send(C2S::JoinChannel { channel: squad, password: None }).await;
+    moder.until(|m| *m == S2C::ClientMoved { id: user_id, channel: squad }).await;
+
+    // The default channel needs a password: the kick lands them in the first open channel.
+    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Lobby") };
+    admin.send(C2S::EditChannel { id: lobby, settings: locked }).await;
+    moder.channels().await;
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    moder.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    assert_eq!(moder.recv().await, S2C::ClientMoved { id: user_id, channel: hangout });
+
+    // The default channel is full (admin and mod are in it), and the kick is
+    // out of Hangout, so the next open channel it is.
+    let full = ChannelSettings { max_clients: Some(2), password: PasswordChange::Remove, ..settings("Lobby") };
+    admin.send(C2S::EditChannel { id: lobby, settings: full }).await;
+    moder.channels().await;
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    moder.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    assert_eq!(moder.recv().await, S2C::ClientMoved { id: user_id, channel: gaming });
+}
+
+#[tokio::test]
 async fn bans_keep_identities_and_addresses_out() {
     let addr = start(&with_admin_token("t")).await;
     // The admin comes from another address than the people it bans.

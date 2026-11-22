@@ -1783,7 +1783,7 @@ impl App {
                     let (title, note) = if *from_server {
                         (format!("Kick {name} from the server"), "They can connect again right away.".to_owned())
                     } else {
-                        (format!("Kick {name} from the channel"), format!("They move to {default_name}."))
+                        (format!("Kick {name} from the channel"), format!("They move to {default_name}, or the first open channel if it's full or locked."))
                     };
                     ui.label(RichText::new(title).size(19.0).strong().color(theme::TEXT));
                     ui.add_space(2.0);

@@ -234,7 +234,7 @@ impl Server {
 
         let id = self.next_id;
         self.next_id += 1;
-        let channel = self.default_channel_for_join();
+        let channel = self.landing_channel(None);
         let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), admin: false, identity };
 
         let mut clients: Vec<ClientInfo> = self.clients.values().map(|c| c.info.clone()).collect();
@@ -284,12 +284,13 @@ impl Server {
             .expect("infinite iterator")
     }
 
-    /// The default channel, or the first open channel with room if it's full.
-    fn default_channel_for_join(&self) -> ChannelId {
+    /// Where someone joining the server, or kicked out of `leaving`, lands:
+    /// the default channel, or the first open channel with room if it's full.
+    fn landing_channel(&self, leaving: Option<ChannelId>) -> ChannelId {
         let default = self.channels.default_id();
         std::iter::once(default)
             .chain(self.channels.ids_in_order())
-            .find(|&ch| self.has_room(ch) && self.channels.password_ok(ch, None))
+            .find(|&ch| Some(ch) != leaving && self.has_room(ch) && self.channels.password_ok(ch, None))
             .unwrap_or(default)
     }
 
@@ -469,7 +470,7 @@ impl Server {
         self.eject(target, id, from_server, reason);
     }
 
-    /// Tells everyone, then moves `target` to the default channel or disconnects it.
+    /// Tells everyone, then moves `target` where a joining client would land, or disconnects it.
     fn eject(&mut self, target: ClientId, by: ClientId, from_server: bool, reason: String) {
         tracing::info!(target, by, from_server, reason, "client kicked");
         self.broadcast(&S2C::ClientKicked { id: target, by, from_server, reason }, |_| true);
@@ -477,7 +478,8 @@ impl Server {
             // Its writer sends the notice before it closes the connection.
             self.remove(target, LeaveReason::Kicked);
         } else {
-            self.move_to(target, self.channels.default_id());
+            let leaving = self.clients[&target].info.channel;
+            self.move_to(target, self.landing_channel(Some(leaving)));
             self.remove_abandoned_channels();
         }
     }

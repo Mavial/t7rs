@@ -82,7 +82,7 @@ Each person has one of three roles on a server. The strongest comes first.
 | Role | Who | May |
 | --- | --- | --- |
 | Admin | Anyone who logged in with the server's admin token | Everything, including kicks off the server, bans, the ban list, and choosing moderators |
-| Channel moderator | An identity that an admin made moderator of a channel | In that channel and every channel below it: edit the channel, and kick people out of it to the default channel |
+| Channel moderator | An identity that an admin made moderator of a channel | In that channel and every channel below it: edit the channel, and kick people out of it |
 | Everyone | Everyone else | Join, talk, chat and poke. Make temporary channels, and edit or delete the ones they made |
 
 The server and the client share one set of rules (`crates/proto/src/perms.rs`).
@@ -101,7 +101,8 @@ The server enforces them, and the client shows only the menu entries they allow.
   change the default channel, choose moderators, or kick anyone off the
   server. They can't kick admins or other moderators of the same channel or a
   higher one.
-- **Kick:** **Kick from channel…** moves someone to the default channel.
+- **Kick:** **Kick from channel…** moves someone to the default channel, or,
+  if that is full or has a password, to the first open channel with room.
   **Kick from server…** (admins) disconnects them, and they can connect again.
   Everyone sees who kicked whom and the reason in chat. Nobody can kick or ban
   themselves.

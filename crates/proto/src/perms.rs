@@ -20,7 +20,7 @@ pub enum Action<'a> {
     RearrangeChannels,
     /// Join a password-protected channel without its password.
     SkipChannelPassword,
-    /// Out of their channel (to the default one), or off the server.
+    /// Out of their channel (to where a new client would land), or off the server.
     Kick { target: &'a ClientInfo, from_server: bool },
     Ban(&'a ClientInfo),
     /// See the ban list and lift bans.
