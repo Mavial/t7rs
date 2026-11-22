@@ -1934,9 +1934,7 @@ fn layout_line(line: &Line, my_id: ClientId, width: f32) -> LayoutJob {
 
 fn logo(ui: &mut egui::Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same((size * 0.22) as u8), theme::ACCENT);
-    p.text(rect.center(), Align2::CENTER_CENTER, "T7", FontId::proportional(size * 0.42), Color32::WHITE);
+    crate::brand::paint(ui.painter(), rect);
 }
 
 fn paint_avatar(p: &egui::Painter, center: egui::Pos2, radius: f32, name: &str) {
@@ -2002,7 +2000,7 @@ fn badge(ui: &egui::Ui, anchor: egui::Rect, count: u32) {
     let r = egui::Rect::from_center_size(center, vec2(w, 16.0));
     let p = ui.painter();
     p.rect_filled(r, CornerRadius::same(8), theme::ACCENT);
-    p.text(r.center(), Align2::CENTER_CENTER, text, FontId::proportional(10.5), Color32::WHITE);
+    p.text(r.center(), Align2::CENTER_CENTER, text, FontId::proportional(10.5), theme::ON_ACCENT);
 }
 
 /// An icon toggle button; red when active (muted, deafened...).

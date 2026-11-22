@@ -30,5 +30,8 @@ opus1 = "0.3"
 sonora = "=0.3.0"
 nnnoiseless = { version = "=0.5.2", default-features = false }
 
+[build-dependencies]
+embed-resource = "3"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }

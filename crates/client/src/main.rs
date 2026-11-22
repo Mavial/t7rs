@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod brand;
 mod dsp;
 mod icons;
 mod net;
