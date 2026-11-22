@@ -11,9 +11,9 @@ use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
 use t7_proto::voice::{self, ToClient, ToServer};
+use t7_proto::tls::{self, ConnectError, Fingerprint};
 use t7_proto::{
-    C2S, ClientId, DEFAULT_PORT, FrameError, PING_INTERVAL_SECS, PROTOCOL_VERSION, S2C, read_frame, tls,
-    write_frame,
+    C2S, ClientId, DEFAULT_PORT, FrameError, PING_INTERVAL_SECS, PROTOCOL_VERSION, S2C, read_frame, write_frame,
 };
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UdpSocket};
@@ -26,10 +26,19 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const VOICE_PING_INTERVAL: Duration = Duration::from_secs(1);
 
 enum Command {
-    Connect { address: String, nickname: String, password: Option<String> },
+    Connect(Attempt),
     Send(C2S),
     Voice { seq: u32, payload: Vec<u8> },
     Disconnect,
+}
+
+/// What a session connects to and with.
+struct Attempt {
+    address: String,
+    nickname: String,
+    password: Option<String>,
+    /// The certificate fingerprint seen here before, if any.
+    pinned: Option<Fingerprint>,
 }
 
 /// What a session sends.
@@ -47,8 +56,18 @@ pub enum NetEvent {
     Ping(SessionId, Duration),
     /// Round trip of a voice datagram: proof that UDP gets through.
     VoicePing(SessionId, Duration),
-    /// The session ended. `None` means the user disconnected on purpose.
-    Closed(SessionId, Option<String>),
+    /// TLS is up, and this is the server's certificate.
+    Secured(SessionId, Fingerprint),
+    Closed(SessionId, Ended),
+}
+
+/// Why a session ended.
+pub enum Ended {
+    /// The user disconnected on purpose.
+    ByUser,
+    Failed(String),
+    /// The server's certificate is not the one pinned for its address.
+    CertChanged { pinned: Fingerprint, presented: Fingerprint },
 }
 
 pub struct Net {
@@ -74,10 +93,17 @@ impl Net {
         Self { tx, rx, session: 0 }
     }
 
-    /// Starts a new connection and returns its session id.
-    pub fn connect(&mut self, address: String, nickname: String, password: Option<String>) -> SessionId {
+    /// Starts a new connection and returns its session id. `pinned` is the
+    /// certificate fingerprint to insist on; with `None` the server's is trusted.
+    pub fn connect(
+        &mut self,
+        address: String,
+        nickname: String,
+        password: Option<String>,
+        pinned: Option<Fingerprint>,
+    ) -> SessionId {
         self.session += 1;
-        let _ = self.tx.send(Command::Connect { address, nickname, password });
+        let _ = self.tx.send(Command::Connect(Attempt { address, nickname, password, pinned }));
         self.session
     }
 
@@ -118,7 +144,7 @@ async fn command_loop(mut cmds: mpsc::UnboundedReceiver<Command>, events: Events
 
     while let Some(cmd) = cmds.recv().await {
         match cmd {
-            Command::Connect { address, nickname, password } => {
+            Command::Connect(attempt) => {
                 if let Some((tx, task)) = current.take() {
                     let _ = tx.send(Out::Control(C2S::Goodbye));
                     // Give the goodbye a moment to flush, then stop the old session.
@@ -129,15 +155,7 @@ async fn command_loop(mut cmds: mpsc::UnboundedReceiver<Command>, events: Events
                 }
                 session += 1;
                 let (tx, rx) = mpsc::unbounded_channel();
-                let task = tokio::spawn(run_session(
-                    session,
-                    address,
-                    nickname,
-                    password,
-                    rx,
-                    events.clone(),
-                    playback.clone(),
-                ));
+                let task = tokio::spawn(run_session(session, attempt, rx, events.clone(), playback.clone()));
                 current = Some((tx, task));
             }
             Command::Send(msg) => {
@@ -161,16 +179,19 @@ async fn command_loop(mut cmds: mpsc::UnboundedReceiver<Command>, events: Events
 
 async fn run_session(
     id: SessionId,
-    address: String,
-    nickname: String,
-    password: Option<String>,
+    attempt: Attempt,
     outgoing: mpsc::UnboundedReceiver<Out>,
     events: Events,
     playback: Arc<Playback>,
 ) {
-    let reason = session(id, &address, nickname, password, outgoing, &events, &playback).await;
+    let ended = session(id, attempt, outgoing, &events, &playback).await;
     playback.clear();
-    events.emit(NetEvent::Closed(id, reason));
+    events.emit(NetEvent::Closed(id, ended));
+}
+
+/// The key under which a server's certificate is pinned: one per host and port.
+pub fn canonical_address(address: &str) -> String {
+    with_default_port(address).to_ascii_lowercase()
 }
 
 /// Adds the default port when the user typed just a host name.
@@ -213,38 +234,41 @@ impl VoiceLink {
     }
 }
 
-/// Runs one connection to completion. Returns the reason it ended
-/// (`None` for a clean, user-requested disconnect).
+/// Runs one connection to completion and says why it ended.
 async fn session(
     id: SessionId,
-    address: &str,
-    nickname: String,
-    password: Option<String>,
+    attempt: Attempt,
     mut outgoing: mpsc::UnboundedReceiver<Out>,
     events: &Events,
     playback: &Playback,
-) -> Option<String> {
-    let target = with_default_port(address);
+) -> Ended {
+    let target = with_default_port(&attempt.address);
     let connect = async {
-        let stream = TcpStream::connect(&target).await.map_err(|e| format!("Could not connect to {target}: {e}"))?;
+        let stream = TcpStream::connect(&target)
+            .await
+            .map_err(|e| Ended::Failed(format!("Could not connect to {target}: {e}")))?;
         let _ = stream.set_nodelay(true);
         let server = stream.peer_addr().ok();
-        let (stream, _fingerprint) = tls::connect(stream, None)
-            .await
-            .map_err(|e| format!("Could not connect securely to {target} ({e}). Is it an older T7 server?"))?;
-        Ok::<_, String>((stream, server))
+        let (stream, fingerprint) = tls::connect(stream, attempt.pinned).await.map_err(|e| match e {
+            ConnectError::CertChanged { pinned, presented } => Ended::CertChanged { pinned, presented },
+            ConnectError::Io(_) => {
+                Ended::Failed(format!("Could not connect securely to {target} ({e}). Is it an older T7 server?"))
+            }
+        })?;
+        Ok::<_, Ended>((stream, server, fingerprint))
     };
-    let (stream, server) = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+    let (stream, server, fingerprint) = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
         Ok(Ok(connected)) => connected,
-        Ok(Err(e)) => return Some(e),
-        Err(_) => return Some(format!("Connection to {target} timed out")),
+        Ok(Err(ended)) => return ended,
+        Err(_) => return Ended::Failed(format!("Connection to {target} timed out")),
     };
+    events.emit(NetEvent::Secured(id, fingerprint));
     let (read, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(read);
 
-    let hello = C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password };
+    let hello = C2S::Hello { protocol: PROTOCOL_VERSION, nickname: attempt.nickname, password: attempt.password };
     if let Err(e) = write_frame(&mut writer, &hello).await {
-        return Some(format!("Connection lost: {e}"));
+        return Ended::Failed(format!("Connection lost: {e}"));
     }
 
     // Reading happens in its own task: `read_frame` must not be cancelled mid-frame.
@@ -286,7 +310,7 @@ async fn session(
                     let sent = Duration::from_micros(nonce);
                     events.emit(NetEvent::Ping(id, epoch.elapsed().saturating_sub(sent)));
                 }
-                Some(Ok(S2C::Rejected { reason })) => return Some(reason),
+                Some(Ok(S2C::Rejected { reason })) => return Ended::Failed(reason),
                 Some(Ok(msg)) => {
                     if let (S2C::Welcome { your_id, voice_key, .. }, Some(server)) = (&msg, server) {
                         match VoiceLink::open(server, *your_id, voice_key).await {
@@ -297,8 +321,8 @@ async fn session(
                     }
                     events.emit(NetEvent::Message(id, msg));
                 }
-                Some(Err(FrameError::Io(_))) | None => return Some("Connection to the server was lost".into()),
-                Some(Err(e)) => return Some(format!("Protocol error: {e}")),
+                Some(Err(FrameError::Io(_))) | None => return Ended::Failed("Connection to the server was lost".into()),
+                Some(Err(e)) => return Ended::Failed(format!("Protocol error: {e}")),
             },
             (res, mut buf) = udp_recv => {
                 // Errors here are usually ICMP "unreachable" bounces on Windows; keep listening.
@@ -322,22 +346,22 @@ async fn session(
                 Some(Out::Control(msg)) => {
                     let bye = matches!(msg, C2S::Goodbye);
                     if let Err(e) = write_frame(&mut writer, &msg).await {
-                        return Some(format!("Connection lost: {e}"));
+                        return Ended::Failed(format!("Connection lost: {e}"));
                     }
                     if bye {
                         let _ = writer.shutdown().await;
-                        return None;
+                        return Ended::ByUser;
                     }
                 }
                 None => {
                     let _ = write_frame(&mut writer, &C2S::Goodbye).await;
-                    return None;
+                    return Ended::ByUser;
                 }
             },
             _ = ping.tick() => {
                 let nonce = epoch.elapsed().as_micros() as u64;
                 if let Err(e) = write_frame(&mut writer, &C2S::Ping { nonce }).await {
-                    return Some(format!("Connection lost: {e}"));
+                    return Ended::Failed(format!("Connection lost: {e}"));
                 }
             }
             _ = voice_ping.tick() => {
@@ -359,7 +383,7 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
-    use super::with_default_port;
+    use super::{canonical_address, with_default_port};
 
     #[test]
     fn default_port() {
@@ -367,5 +391,12 @@ mod tests {
         assert_eq!(with_default_port(" example.com:1234 "), "example.com:1234");
         assert_eq!(with_default_port("::1"), "[::1]:9988");
         assert_eq!(with_default_port("[::1]:5"), "[::1]:5");
+    }
+
+    #[test]
+    fn one_pin_per_server() {
+        assert_eq!(canonical_address(" Example.COM "), "example.com:9988");
+        assert_eq!(canonical_address("example.com:9988"), "example.com:9988");
+        assert_ne!(canonical_address("example.com:9989"), "example.com:9988");
     }
 }

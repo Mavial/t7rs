@@ -6,6 +6,7 @@ use egui::{
     text::LayoutJob, vec2,
 };
 use t7_proto::model::ServerView;
+use t7_proto::tls::Fingerprint;
 use t7_proto::{
     C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, LeaveReason, MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN,
     MAX_CHANNEL_TOPIC_LEN, PasswordChange, S2C, TextTarget,
@@ -13,7 +14,7 @@ use t7_proto::{
 
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
 use crate::icons::{self, Icon};
-use crate::net::{Net, NetEvent, SessionId};
+use crate::net::{self, Ended, Net, NetEvent, SessionId};
 use crate::settings::{self, Recent, Settings};
 use crate::sounds::{self, Pack, Resolved, Sound};
 use crate::{ptt, theme};
@@ -26,7 +27,8 @@ const DEFAULT_SERVER: Option<&str> = option_env!("T7_DEFAULT_SERVER");
 
 enum Conn {
     Disconnected,
-    Connecting { address: String },
+    /// `password` is kept to retry after trusting a changed certificate.
+    Connecting { address: String, password: String },
     Connected,
 }
 
@@ -116,6 +118,14 @@ struct PokeForm {
     focus_requested: bool,
 }
 
+/// A server came back with a different certificate than the pinned one.
+struct CertChange {
+    address: String,
+    password: String,
+    pinned: Fingerprint,
+    presented: Fingerprint,
+}
+
 /// A poke someone sent us, waiting to be acknowledged.
 struct PokeAlert {
     from: String,
@@ -194,6 +204,7 @@ pub struct App {
     pokes: std::collections::VecDeque<PokeAlert>,
     sound_pack: Pack,
     channel_dialog: Option<ChannelDialog>,
+    cert_change: Option<CertChange>,
     /// Address of the connected server, for per-server admin tokens.
     server_address: String,
     /// Token sent but not yet confirmed; saved once the server accepts it.
@@ -243,6 +254,7 @@ impl App {
             pokes: Default::default(),
             sound_pack: Pack::BuiltIn,
             channel_dialog: None,
+            cert_change: None,
             server_address: String::new(),
             pending_admin_token: None,
             attention: false,
@@ -284,9 +296,10 @@ impl App {
             return;
         }
         self.settings.nickname = nickname.clone();
-        let password = Some(password).filter(|p| !p.is_empty());
-        self.session = self.net.connect(address.clone(), nickname, password);
-        self.conn = Conn::Connecting { address };
+        let pinned = self.settings.server_certs.get(&net::canonical_address(&address)).copied();
+        let login_password = Some(password.clone()).filter(|p| !p.is_empty());
+        self.session = self.net.connect(address.clone(), nickname, login_password, pinned);
+        self.conn = Conn::Connecting { address, password };
         self.view = None;
         self.ping = None;
         self.last_error = None;
@@ -531,13 +544,30 @@ impl App {
                     self.voice.rtt = Some(rtt);
                     self.voice.seen = Some(Instant::now());
                 }
-                NetEvent::Closed(s, reason) if s == self.session => self.on_closed(reason),
+                NetEvent::Secured(s, fingerprint) if s == self.session => {
+                    // Trust on first use: the first certificate seen at an address is pinned.
+                    if let Conn::Connecting { address, .. } = &self.conn {
+                        self.settings.server_certs.entry(net::canonical_address(address)).or_insert(fingerprint);
+                    }
+                }
+                NetEvent::Closed(s, ended) if s == self.session => self.on_closed(ended),
                 _ => {} // stale session
             }
         }
     }
 
-    fn on_closed(&mut self, reason: Option<String>) {
+    fn on_closed(&mut self, ended: Ended) {
+        let reason = match ended {
+            Ended::ByUser => None,
+            Ended::Failed(reason) => Some(reason),
+            Ended::CertChanged { pinned, presented } => {
+                if let Conn::Connecting { address, password } = &self.conn {
+                    let (address, password) = (address.clone(), password.clone());
+                    self.cert_change = Some(CertChange { address, password, pinned, presented });
+                }
+                Some("The server's certificate has changed".to_owned())
+            }
+        };
         let was_connected = matches!(self.conn, Conn::Connected);
         self.conn = Conn::Disconnected;
         self.view = None;
@@ -567,7 +597,7 @@ impl App {
         match msg {
             S2C::Welcome { your_id, server, channels, clients, .. } => {
                 let address = match &self.conn {
-                    Conn::Connecting { address } => address.clone(),
+                    Conn::Connecting { address, .. } => address.clone(),
                     _ => String::new(),
                 };
                 self.server_address = address.clone();
@@ -797,7 +827,7 @@ impl App {
                 };
                 (theme::GREEN, format!("Connected{ping}"))
             }
-            Conn::Connecting { address } => (theme::AMBER, format!("Connecting to {address}…")),
+            Conn::Connecting { address, .. } => (theme::AMBER, format!("Connecting to {address}…")),
             Conn::Disconnected => (theme::TEXT_FAINT, "Not connected".to_owned()),
         };
         let pill = egui::Frame::new()
@@ -1243,7 +1273,7 @@ impl App {
             logo(ui, 64.0);
             ui.add_space(14.0);
             match &self.conn {
-                Conn::Connecting { address } => {
+                Conn::Connecting { address, .. } => {
                     ui.label(RichText::new("Connecting…").size(22.0).strong().color(theme::TEXT));
                     ui.add_space(6.0);
                     ui.label(RichText::new(address).color(theme::TEXT_DIM));
@@ -1623,6 +1653,56 @@ impl App {
 }
 
 impl App {
+    fn cert_change_dialog(&mut self, ctx: &egui::Context) {
+        let Some(change) = &self.cert_change else { return };
+        let (mut trust, mut cancel) = (false, false);
+        let modal = egui::Modal::new(Id::unique("cert-change")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new("Server certificate changed").size(19.0).strong().color(theme::TEXT));
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} shows a different certificate than last time. That is expected if its admin \
+                     replaced it. Otherwise someone may be intercepting the connection. The server \
+                     prints its fingerprint when it starts, so ask the admin which is right.",
+                    change.address
+                ))
+                .size(12.5)
+                .color(theme::TEXT_DIM),
+            );
+            for (title, fingerprint, color) in
+                [("SAVED", change.pinned, theme::TEXT_DIM), ("NEW", change.presented, theme::TEXT)]
+            {
+                ui.add_space(10.0);
+                ui.label(RichText::new(title).size(11.0).strong().color(theme::TEXT_FAINT));
+                ui.label(RichText::new(two_lines(fingerprint)).font(FontId::monospace(12.0)).color(color));
+            }
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let accept = egui::Button::new(
+                    RichText::new("Trust new certificate and connect").color(Color32::WHITE).strong(),
+                )
+                .fill(theme::RED)
+                .stroke(Stroke::NONE)
+                .corner_radius(theme::RADIUS);
+                if ui.add(accept).clicked() {
+                    trust = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if trust {
+            let change = self.cert_change.take().expect("dialog open");
+            self.settings.server_certs.insert(net::canonical_address(&change.address), change.presented);
+            let nickname = self.settings.nickname.clone();
+            self.connect(change.address, nickname, change.password);
+        } else if cancel || modal.should_close() {
+            self.cert_change = None;
+        }
+    }
+
     fn channel_dialog(&mut self, ctx: &egui::Context) {
         // A dialog about a channel that just disappeared (deleted, or an emptied
         // temporary channel) closes by itself.
@@ -1827,6 +1907,13 @@ impl App {
     }
 }
 
+/// A fingerprint as two rows of 16 bytes, so it fits a dialog.
+fn two_lines(fingerprint: Fingerprint) -> String {
+    let text = fingerprint.to_string();
+    let (first, second) = text.split_at(16 * 3);
+    format!("{}\n{second}", first.trim_end_matches(':'))
+}
+
 fn sounds_dir() -> Option<std::path::PathBuf> {
     settings::data_dir().map(|d| d.join("sounds"))
 }
@@ -1866,6 +1953,7 @@ impl App {
         self.poke_dialog(&ctx);
         self.poke_alert(&ctx);
         self.channel_dialog(&ctx);
+        self.cert_change_dialog(&ctx);
     }
 
     /// True once after a poke arrived: the shell flashes the taskbar entry.

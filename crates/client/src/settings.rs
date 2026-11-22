@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use t7_proto::ClientStatus;
+use t7_proto::tls::Fingerprint;
 
 use crate::audio::AudioSettings;
 
@@ -18,6 +19,8 @@ pub struct Settings {
     pub user_volumes: std::collections::BTreeMap<String, f32>,
     /// Admin token per server address, sent automatically on connect.
     pub admin_tokens: std::collections::BTreeMap<String, String>,
+    /// Certificate fingerprint per `net::canonical_address`, pinned on first connect.
+    pub server_certs: std::collections::BTreeMap<String, Fingerprint>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -105,6 +108,7 @@ mod tests {
             recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
             user_volumes: [("Some One".to_owned(), 0.5)].into(),
             admin_tokens: [("1.2.3.4".to_owned(), "abc".to_owned())].into(),
+            server_certs: [("1.2.3.4:9988".to_owned(), Fingerprint([0xab; 32]))].into(),
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
