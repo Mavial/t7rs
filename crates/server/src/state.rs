@@ -23,7 +23,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bans::{self, Bans, NewBan, describe_duration};
-use crate::channels::Channels;
+use crate::channels::{ChannelError, Channels};
 use crate::roles::RoleStore;
 
 /// A complete, ready-to-write frame shared between all recipients.
@@ -516,8 +516,10 @@ impl Server {
     }
 
     fn join_channel(&mut self, id: ClientId, channel: ChannelId, password: Option<&str>) {
-        let Some(info) = self.channels.get(channel) else { return self.error(id, "channel does not exist") };
-        if info.kind == ChannelKind::Category {
+        let Some(kind) = self.channels.get(channel).map(|c| c.kind) else {
+            return self.error(id, "channel does not exist");
+        };
+        if kind == ChannelKind::Category {
             return self.error(id, "a category can't be joined; join a channel in it");
         }
         if self.clients[&id].info.channel == channel {
@@ -534,8 +536,31 @@ impl Server {
         if !may.has(Perm::Bypass) && !self.has_room(channel) {
             return self.error(id, "channel is full");
         }
+        if kind == ChannelKind::Lobby && !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
+            return self.error(id, "you are opening rooms too fast");
+        }
+        if let Err(e) = self.enter(id, channel) {
+            self.error(id, &format!("no room for you there: {}", e.message()));
+        }
+    }
+
+    /// Puts `id` in `channel`, or for a lobby, in a new room of its own
+    /// under it, which it owns.
+    fn enter(&mut self, id: ClientId, channel: ChannelId) -> Result<(), ChannelError> {
+        let lobby = self.channels.get(channel).is_some_and(|c| c.kind == ChannelKind::Lobby);
+        let channel = if lobby {
+            let name = self.channels.room_name(channel, &self.clients[&id].info.nickname);
+            let room =
+                ChannelSettings { name, topic: String::new(), max_clients: None, password: PasswordChange::Keep };
+            let room = self.channels.create(Some(channel), &room, true, ChannelKind::Voice, id)?;
+            self.channels_changed(false);
+            room
+        } else {
+            channel
+        };
         self.move_to(id, channel);
         self.tidy_rooms();
+        Ok(())
     }
 
     fn move_to(&mut self, id: ClientId, channel: ChannelId) {

@@ -1221,6 +1221,7 @@ impl App {
                     for (row, &(depth, ch_id)) in view.tree().iter().enumerate() {
                         let ch = &view.channels[&ch_id];
                         let category = ch.kind == ChannelKind::Category;
+                        let lobby = ch.kind == ChannelKind::Lobby;
                         if depth == 0 {
                             in_fold = category && folded.is_some_and(|f| f.contains(&ch.name));
                         } else if in_fold {
@@ -1289,10 +1290,11 @@ impl App {
                             );
                         }
                         let icon_color = if is_mine { theme::ACCENT_TEXT } else { theme::TEXT_FAINT };
-                        let (icon, icon_size) = match (category, in_fold) {
-                            (false, _) => (Icon::Speaker, 15.0),
-                            (true, false) => (Icon::ChevronDown, 13.0),
-                            (true, true) => (Icon::ChevronRight, 13.0),
+                        let (icon, icon_size) = match (ch.kind, in_fold) {
+                            (ChannelKind::Voice, _) => (Icon::Speaker, 15.0),
+                            (ChannelKind::Lobby, _) => (Icon::SpeakerPlus, 15.0),
+                            (ChannelKind::Category, false) => (Icon::ChevronDown, 13.0),
+                            (ChannelKind::Category, true) => (Icon::ChevronRight, 13.0),
                         };
                         icons::paint(
                             p,
@@ -1410,13 +1412,17 @@ impl App {
                         if ch.temporary {
                             tip.push("Temporary: removed once everyone has left.".into());
                         }
+                        if lobby {
+                            tip.push("Join to open a room of your own in it.".into());
+                        }
                         if hidden {
                             tip.push("Hidden: only those allowed to view it see it.".into());
                         }
                         let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip.join("\n")) };
                         resp.context_menu(|ui| {
                             if !category {
-                                if ui.add_enabled(!is_mine && !full, egui::Button::new("Join channel")).clicked() {
+                                let join_label = if lobby { "Open a room" } else { "Join channel" };
+                                if ui.add_enabled(!is_mine && !full, egui::Button::new(join_label)).clicked() {
                                     join = Some(ch_id);
                                     ui.close();
                                 }
@@ -1446,7 +1452,7 @@ impl App {
                             if view.may(Perm::ManageChannels)
                                 && !ch.default
                                 && !ch.temporary
-                                && !category
+                                && ch.kind == ChannelKind::Voice
                                 && ui.button("Make default channel").clicked()
                             {
                                 action = Some(TreeAction::MakeDefault(ch_id));
@@ -2369,6 +2375,19 @@ impl App {
             .as_ref()
             .and_then(|v| v.channels.values().find(|c| c.default).map(|c| c.name.clone()))
             .unwrap_or_else(|| "the default channel".into());
+        // What a new channel may be: a lobby keeps a level below it for its
+        // rooms and is permanent, and a category is a top-level heading.
+        let kinds: Vec<(ChannelKind, &str)> = match (view, editing) {
+            (Some(v), None) if may_create_permanent => {
+                let above = parent.and_then(|p| v.tree().iter().find(|(_, id)| *id == p));
+                let depth = above.map_or(1, |(d, _)| d + 2);
+                let in_temporary = parent.and_then(|p| v.channels.get(&p)).is_some_and(|c| c.temporary);
+                let lobby = (depth < MAX_CHANNEL_DEPTH && !in_temporary).then_some((ChannelKind::Lobby, "Lobby"));
+                let category = parent.is_none().then_some((ChannelKind::Category, "Category"));
+                [Some((ChannelKind::Voice, "Channel")), lobby, category].into_iter().flatten().collect()
+            }
+            _ => Vec::new(),
+        };
 
         let mut send: Vec<C2S> = Vec::new();
         let mut close = false;
@@ -2378,23 +2397,25 @@ impl App {
             match dialog {
                 ChannelDialog::Form(form) => {
                     let category = form.kind == ChannelKind::Category;
+                    let (noun, general) = match form.kind {
+                        ChannelKind::Voice => ("channel", "Channel"),
+                        ChannelKind::Category => ("category", "Category"),
+                        ChannelKind::Lobby => ("lobby", "Lobby"),
+                    };
                     let title = match (&form.editing, &parent_name) {
                         (Some(_), _) => format!("Edit {}", form.name),
-                        (None, _) if category => "New category".to_owned(),
-                        (None, Some(parent)) => format!("New channel in {parent}"),
-                        (None, None) => "New channel".to_owned(),
+                        (None, Some(parent)) => format!("New {noun} in {parent}"),
+                        (None, None) => format!("New {noun}"),
                     };
                     dialog_header(ui, &title, "");
                     if moderators.is_some() {
-                        let general = if category { "Category" } else { "Channel" };
                         theme::segmented(
                             ui,
                             &mut form.tab,
                             &[(FormTab::Channel, general), (FormTab::Permissions, "Permissions")],
                         );
                         ui.add_space(14.0);
-                    } else if form.editing.is_none() && form.parent.is_none() && may_create_permanent {
-                        let kinds = [(ChannelKind::Voice, "Channel"), (ChannelKind::Category, "Category")];
+                    } else if kinds.len() > 1 {
                         theme::segmented(ui, &mut form.kind, &kinds);
                         ui.add_space(14.0);
                     }
@@ -2431,7 +2452,7 @@ impl App {
                                 None => send.push(C2S::CreateChannel {
                                     parent: form.parent,
                                     settings,
-                                    temporary: form.temporary && !category,
+                                    temporary: form.temporary && form.kind == ChannelKind::Voice,
                                     kind: form.kind,
                                 }),
                             }
@@ -2527,9 +2548,14 @@ fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, may_create_permanen
     field_label(ui, "Topic (optional)");
     ui.add(text_input(&mut form.topic).char_limit(MAX_CHANNEL_TOPIC_LEN));
     ui.add_space(8.0);
-    if form.kind == ChannelKind::Category {
-        hint(ui, "A heading for the channels in it, at the top of the tree. Nobody joins it.");
-        return;
+    match form.kind {
+        ChannelKind::Voice => {}
+        ChannelKind::Category => {
+            return hint(ui, "A heading for the channels in it, at the top of the tree. Nobody joins it.");
+        }
+        ChannelKind::Lobby => {
+            return hint(ui, "Joining it opens a temporary room in it that you own. Nobody stays in the lobby itself.");
+        }
     }
     ui.add_enabled_ui(may_manage, |ui| {
         if !form.had_password || form.protected {

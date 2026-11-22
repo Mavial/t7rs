@@ -1,5 +1,6 @@
 //! Spins up a real server on localhost and drives it with raw protocol clients.
 
+use std::fmt::Write as _;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -108,7 +109,7 @@ async fn join_move_chat_leave() {
     let (mut a, welcome) = TestClient::connect(addr, "alice", None).await;
     let S2C::Welcome { your_id: a_id, channels, clients, .. } = welcome else { panic!("{welcome:?}") };
     assert_eq!(clients.len(), 1);
-    assert_eq!(channels.len(), 6);
+    assert_eq!(channels.len(), 7);
 
     // Duplicate nickname is auto-suffixed.
     let (mut b, welcome) = TestClient::connect(addr, "Alice", None).await;
@@ -1451,4 +1452,64 @@ async fn a_room_passes_to_whoever_has_been_in_it_longest() {
     // Disconnecting is leaving too: c has now been there longest.
     drop(b);
     owned_by(&mut a, raid, Some(c_id)).await;
+}
+
+#[tokio::test]
+async fn joining_a_lobby_opens_a_room_of_your_own() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut ana, wa) = TestClient::connect(addr, "ana", None).await;
+    let (mut ben, wb) = TestClient::connect(addr, "ben", None).await;
+    let (ana_id, ben_id) = (welcomed_id(&wa), welcomed_id(&wb));
+    let S2C::Welcome { channels, .. } = &wa else { unreachable!() };
+    let [lobby, rooms] = ["Lobby", "Create a room"].map(|name| id_of(channels, name));
+
+    // Ana gets a room under the lobby, moves in, and owns it.
+    ana.send(C2S::JoinChannel { channel: rooms, password: None }).await;
+    let list = ben.channels().await;
+    let room = list.iter().find(|c| c.parent == Some(rooms)).expect("a room in the lobby");
+    assert_eq!((room.name.as_str(), room.temporary, room.owner), ("ana's room", true, Some(ana_id)));
+    let room = room.id;
+    assert_eq!(
+        ben.until(|m| matches!(m, S2C::ClientMoved { .. })).await,
+        S2C::ClientMoved { id: ana_id, channel: room }
+    );
+    let S2C::Permissions(p) = ana.until(|m| matches!(m, S2C::Permissions(p) if p.sees(room))).await else {
+        unreachable!()
+    };
+    assert!(p.may_in(room, Perm::Kick) && p.may_in(room, Perm::ManageChannels) && !p.may_in(rooms, Perm::Kick));
+
+    // Ben gets one of his own, and the lobby itself stays empty.
+    ben.send(C2S::JoinChannel { channel: rooms, password: None }).await;
+    let S2C::ClientMoved { channel: bens, .. } =
+        ana.until(|m| matches!(m, S2C::ClientMoved { id, .. } if *id == ben_id)).await
+    else {
+        unreachable!()
+    };
+    assert_ne!(bens, room);
+    let S2C::Welcome { clients, channels, .. } = TestClient::connect(addr, "cid", None).await.1 else { unreachable!() };
+    assert!(clients.iter().all(|c| c.channel != rooms), "{clients:?}");
+    assert_eq!(channels.iter().find(|c| c.id == bens).unwrap().name, "ben's room");
+
+    // Once Ana leaves hers, it goes.
+    ana.send(C2S::JoinChannel { channel: lobby, password: None }).await;
+    let gone = |m: &S2C| matches!(m, S2C::Channels(l) if l.iter().all(|c| c.id != room));
+    let S2C::Channels(list) = ben.until(gone).await else { unreachable!() };
+    assert!(list.iter().any(|c| c.id == bens), "Ben's stays");
+}
+
+#[tokio::test]
+async fn a_full_server_opens_no_room() {
+    let mut cfg = String::from("[[channels]]\nname = \"Lobby\"\n\n[[channels]]\nname = \"Rooms\"\nkind = \"lobby\"\n");
+    for i in 2..MAX_CHANNELS {
+        writeln!(cfg, "\n[[channels]]\nname = \"Channel {i}\"").unwrap();
+    }
+    let addr = start(&cfg).await;
+    let (mut ana, wa) = TestClient::connect(addr, "ana", None).await;
+    let S2C::Welcome { channels, .. } = &wa else { unreachable!() };
+    assert_eq!(channels.len(), MAX_CHANNELS);
+    ana.send(C2S::JoinChannel { channel: id_of(channels, "Rooms"), password: None }).await;
+    let refusal = error(&mut ana).await;
+    assert!(refusal.contains("no room for you there") && refusal.contains("maximum of 200 channels"), "{refusal}");
+    let after = ana.drain().await;
+    assert!(after.iter().all(|m| !matches!(m, S2C::ClientMoved { .. } | S2C::Channels(_))), "{after:?}");
 }

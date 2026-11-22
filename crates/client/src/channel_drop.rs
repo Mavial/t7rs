@@ -153,9 +153,12 @@ fn depth(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
     depth
 }
 
-/// Levels in the subtree under and including `id`.
+/// Levels in the subtree under and including `id`, counting the rooms an
+/// empty lobby will have.
 fn height(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
-    1 + children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0)
+    let below = children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0);
+    let lobby = channels.get(&id).is_some_and(|c| c.kind == ChannelKind::Lobby);
+    (1 + below).max(if lobby { 2 } else { 1 })
 }
 
 #[cfg(test)]
@@ -271,6 +274,14 @@ mod tests {
         assert_eq!(drop_target(&t, 5, 1, Zone::Into), Outcome::NotAllowed(Refusal::CategoryPlacement));
         assert_eq!(drop_target(&t, 5, 1, Zone::Before), to(None, 0));
         assert_eq!(drop_target(&t, 6, 5, Zone::Into), to(Some(5), 0));
+    }
+
+    #[test]
+    fn a_lobby_keeps_a_level_for_its_rooms() {
+        let mut t = tree();
+        t.get_mut(&6).unwrap().kind = ChannelKind::Lobby;
+        assert_eq!(drop_target(&t, 6, 3, Zone::Into), Outcome::NotAllowed(Refusal::TooDeep));
+        assert_eq!(drop_target(&t, 6, 2, Zone::Into), to(Some(2), 1));
     }
 
     #[test]

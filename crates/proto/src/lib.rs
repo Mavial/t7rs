@@ -105,6 +105,9 @@ pub enum ChannelKind {
     Voice,
     /// Groups the channels under it, at the top level. Nobody joins it.
     Category,
+    /// Joining it makes you a temporary room of your own under it, which you
+    /// own. Nobody stays in it.
+    Lobby,
 }
 
 /// The editable part of a channel.
@@ -199,7 +202,7 @@ pub enum C2S {
         target: ClientId,
         message: String,
     },
-    /// The creator moves into the new channel, unless it is a category.
+    /// The creator moves into the new channel, if it is a voice channel.
     CreateChannel {
         parent: Option<ChannelId>,
         settings: ChannelSettings,

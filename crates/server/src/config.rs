@@ -38,6 +38,7 @@ pub struct ChannelConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub moderators: Vec<t7_proto::Identity>,
     /// `"category"`: a heading at the top level for the channels under it, which nobody joins.
+    /// `"lobby"`: joining it opens a temporary room of your own under it. Nobody stays in it.
     #[serde(default, skip_serializing_if = "is_default")]
     pub kind: ChannelKind,
     /// Per role (0 is Everyone), the permissions this channel allows and
@@ -83,8 +84,10 @@ max_clients = 128
 # it is edited in T7. Delete channels.toml to start over from these.
 # Channels nest via `children`; `default = true` marks where people land.
 # `kind = "category"` makes a top-level heading for the channels in it,
-# which nobody joins. Who may see or do what in a channel is easiest to
-# set in T7: right-click the channel, then Edit channel, then Permissions.
+# which nobody joins. `kind = "lobby"` opens a temporary room of their own
+# in it for everyone who joins it. Who may see or do what in a channel is
+# easiest to set in T7: right-click the channel, then Edit channel, then
+# Permissions.
 
 [[channels]]
 name = "Lobby"
@@ -105,6 +108,11 @@ topic = "Squad up"
   [[channels.children]]
   name = "Squad 2"
   max_clients = 5
+
+[[channels]]
+name = "Create a room"
+topic = "Join to open a room of your own"
+kind = "lobby"
 
 [[channels]]
 name = "AFK"
@@ -139,7 +147,7 @@ mod tests {
         assert_eq!(cfg.bind, "0.0.0.0:9988");
         let channels = Channels::from_config(&cfg.channels).unwrap();
         let all: Vec<_> = t7_proto::perms::ChannelTree::channels(&channels).collect();
-        assert_eq!(all.len(), 6);
+        assert_eq!(all.len(), 7);
         assert_eq!(channels.get(channels.default_id()).unwrap().name, "Lobby");
         let squad = all.iter().find(|c| c.name == "Squad 2").unwrap();
         assert_eq!(channels.get(squad.parent.unwrap()).unwrap().name, "Gaming");

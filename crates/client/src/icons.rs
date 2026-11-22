@@ -25,6 +25,8 @@ pub enum Icon {
     Cross,
     Dash,
     Crown,
+    /// A lobby: a speaker with a plus, for the room joining it opens.
+    SpeakerPlus,
 }
 
 struct Pen<'a> {
@@ -146,6 +148,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line((17.5, 6.5), (6.5, 17.5));
         }
         Icon::Dash => pen.line((6.5, 12.0), (17.5, 12.0)),
+        Icon::SpeakerPlus => {
+            pen.poly(&[(2.0, 9.0), (6.0, 9.0), (11.0, 5.0), (11.0, 19.0), (6.0, 15.0), (2.0, 15.0)], true);
+            pen.line((14.5, 12.0), (21.5, 12.0));
+            pen.line((18.0, 8.5), (18.0, 15.5));
+        }
         Icon::Crown => pen
             .poly(&[(3.0, 18.5), (3.0, 7.5), (8.0, 12.0), (12.0, 5.0), (16.0, 12.0), (21.0, 7.5), (21.0, 18.5)], true),
         Icon::Moon => {

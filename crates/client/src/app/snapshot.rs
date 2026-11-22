@@ -44,12 +44,12 @@ fn view() -> ServerView {
     ranked.max_clients = Some(5);
     let mut duo = channel(4, Some(3), "Duo queue", 0);
     duo.has_password = true;
-    let mut afk = channel(5, None, "AFK", 2);
+    let mut afk = channel(5, None, "AFK", 3);
     afk.temporary = true;
     afk.owner = Some(7);
-    let music = channel(6, None, "Music", 3);
+    let music = channel(6, None, "Music", 4);
     // Only moderators see it.
-    let mut staff = channel(7, None, "Staff", 4);
+    let mut staff = channel(7, None, "Staff", 5);
     staff.kind = ChannelKind::Category;
     let view_only = Perms::of(&[Perm::View]);
     staff.overrides = vec![
@@ -58,6 +58,11 @@ fn view() -> ServerView {
     ];
     let office = channel(8, Some(7), "Office", 0);
     let meeting = channel(9, Some(7), "Meeting room", 1);
+    let mut rooms = channel(10, None, "Create a room", 2);
+    rooms.kind = ChannelKind::Lobby;
+    rooms.topic = "Join to open a room of your own".into();
+    let mut room = channel(11, Some(10), "Dmitri's room", 0);
+    (room.temporary, room.owner) = (true, Some(6));
     let muted = ClientStatus { muted: true, ..Default::default() };
     let deaf = ClientStatus { muted: true, deafened: true, ..Default::default() };
     let away = ClientStatus { away: true, ..Default::default() };
@@ -73,13 +78,14 @@ fn view() -> ServerView {
         kenji,
         client(4, "Ola", 3, deaf),
         client(5, "Priya", 3, ClientStatus::default()),
-        client(6, "Dmitri", 3, ClientStatus::default()),
+        client(6, "Dmitri", 11, ClientStatus::default()),
+        client(10, "Mei", 11, ClientStatus::default()),
         client(7, "Lucas", 5, away),
         client(8, "Ines", 1, ClientStatus::default()),
         ClientInfo { role: Some("Moderator".into()), ..client(9, "Jonas", 8, ClientStatus::default()) },
     ];
     let info = ServerInfo { name: "Friday Night".into(), welcome: String::new(), max_clients: 32 };
-    let channels = vec![lobby, games, ranked, duo, afk, music, staff, office, meeting];
+    let channels = vec![lobby, games, ranked, duo, afk, music, staff, office, meeting, rooms, room];
     let everywhere = channels.iter().map(|c| (c.id, Perms::ALL | Perms::of(&[Perm::Rename]))).collect();
     let mut view =
         ServerView::new(1, info, channels, clients, Permissions { server: Perms::ALL, channels: everywhere });
@@ -272,6 +278,14 @@ const SCENES: &[Scene] = &[
     ("23-folded-category", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         app.settings.folded.insert("friday.example.com:9988".into(), ["Staff".to_owned()].into());
+        app
+    }),
+    ("25-create-lobby", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.open_create_channel(Some(2));
+        let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
+        form.kind = ChannelKind::Lobby;
+        form.name = "Squads".into();
         app
     }),
     ("24-moderator-edit", (1100, 720), |ctx| {
