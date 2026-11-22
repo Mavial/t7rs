@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::perms::{ChannelTree, Perm, Permissions, Roles};
+use crate::perms::{ChannelTree, Perm, Permissions, Rank, RoleId, Roles};
 use crate::{ChannelId, ChannelInfo, ClientId, ClientInfo, Identity, S2C, ServerInfo};
 
 #[derive(Debug, Clone)]
@@ -119,6 +119,12 @@ impl ServerView {
             at = c.parent.and_then(|p| self.channels.get(&p));
         }
         false
+    }
+
+    pub fn my_rank_in(&self, channel: ChannelId) -> Rank {
+        let (Some(roles), Some(me)) = (&self.roles, self.me()) else { return Rank::EVERYONE };
+        let rank = roles.rank(me.identity);
+        if self.moderates(me.identity, channel) { rank.max(roles.height(RoleId::MODERATOR)) } else { rank }
     }
 
     /// Whether `channel` is `ancestor` or below it.

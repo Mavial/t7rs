@@ -53,7 +53,7 @@ mod tests {
             temporary: false,
             focused: false,
             overrides: saved.to_vec(),
-            role: RoleId::EVERYONE,
+            permissions_role: RoleId::EVERYONE,
         };
         assert_eq!(form.override_changes(4, &saved), []);
         let dj = Override::allowing(RoleId(7), Perms::of(&[Perm::Speak]));
@@ -258,7 +258,7 @@ struct ChannelForm {
     temporary: bool,
     focused: bool,
     overrides: Vec<Override>,
-    role: RoleId,
+    permissions_role: RoleId,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -466,7 +466,7 @@ impl App {
             temporary: !permanent || parent_temporary,
             focused: false,
             overrides: Vec::new(),
-            role: RoleId::EVERYONE,
+            permissions_role: RoleId::EVERYONE,
         }));
     }
 
@@ -489,7 +489,7 @@ impl App {
             temporary: ch.temporary,
             focused: false,
             overrides: ch.overrides.clone(),
-            role: RoleId::EVERYONE,
+            permissions_role: RoleId::EVERYONE,
         }));
     }
 
@@ -508,7 +508,7 @@ impl App {
         self.channel_dialog = Some(ChannelDialog::Delete { channel, name: ch.name.clone(), occupants });
     }
 
-    fn fold(&mut self, name: String) {
+    fn toggle_folded(&mut self, name: String) {
         let Conn::Connected { server } = &self.conn else { return };
         let folded = self.settings.folded.entry(server.clone()).or_default();
         if !folded.remove(&name) {
@@ -1200,13 +1200,13 @@ impl App {
                         Conn::Connected { server } => self.settings.folded.get(server),
                         _ => None,
                     };
-                    let mut in_fold = false;
+                    let mut in_folded_category = false;
                     for (row, &(depth, ch_id)) in view.tree().iter().enumerate() {
                         let ch = &view.channels[&ch_id];
                         let category = ch.kind == ChannelKind::Category;
                         if depth == 0 {
-                            in_fold = category && folded.is_some_and(|f| f.contains(&ch.name));
-                        } else if in_fold {
+                            in_folded_category = category && folded.is_some_and(|f| f.contains(&ch.name));
+                        } else if in_folded_category {
                             continue;
                         }
                         if category && row > 0 {
@@ -1216,8 +1216,9 @@ impl App {
                         let may_rearrange = manages_it && may_renumber_children(view, ch.parent);
                         let clients = view.clients_in(ch_id);
                         let indent = depth as f32 * 18.0;
-                        let inside = |channel| channel == ch_id || (in_fold && view.within(channel, ch_id));
-                        let is_mine = mine.is_some_and(inside);
+                        let row_stands_for =
+                            |channel| channel == ch_id || (in_folded_category && view.within(channel, ch_id));
+                        let is_mine = mine.is_some_and(row_stands_for);
                         let full = ch.max_clients.is_some_and(|m| clients.len() as u32 >= m);
 
                         let sense = if may_rearrange { Sense::click_and_drag() } else { Sense::click() };
@@ -1270,7 +1271,7 @@ impl App {
                             );
                         }
                         let icon_color = if is_mine { theme::ACCENT_TEXT } else { theme::TEXT_FAINT };
-                        let (icon, icon_size) = match (category, in_fold) {
+                        let (icon, icon_size) = match (category, in_folded_category) {
                             (false, _) => (Icon::Speaker, 15.0),
                             (true, false) => (Icon::ChevronDown, 13.0),
                             (true, true) => (Icon::ChevronRight, 13.0),
@@ -1330,8 +1331,8 @@ impl App {
                             );
                         }
 
-                        let people = if in_fold && category {
-                            view.clients.values().filter(|c| inside(c.channel)).count()
+                        let people = if in_folded_category && category {
+                            view.clients.values().filter(|c| row_stands_for(c.channel)).count()
                         } else {
                             clients.len()
                         };
@@ -1648,7 +1649,7 @@ impl App {
                     Some(TreeAction::SetRole { identity, role, held }) => {
                         self.net.send(C2S::ChangeRoles(RoleChange::Assign { identity, role, held }));
                     }
-                    Some(TreeAction::Fold(name)) => self.fold(name),
+                    Some(TreeAction::Fold(name)) => self.toggle_folded(name),
                     None => {}
                 }
             },
@@ -2374,8 +2375,8 @@ impl App {
                     match (form.tab, view.zip(form.editing)) {
                         (FormTab::Permissions, Some((view, channel))) => {
                             permissions_tab(ui, view, channel, form);
-                            if let Some(list) = moderators.as_ref().filter(|l| !category || !l.is_empty()) {
-                                moderator_list(ui, list, &mut unmoderate);
+                            if let Some(list) = &moderators {
+                                moderator_list(ui, form.kind, list, &mut unmoderate);
                             }
                         }
                         _ => ui.add_enabled_ui(may_edit, |ui| channel_fields(ui, form, may_create_permanent)).inner,
@@ -2523,25 +2524,24 @@ fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, for
         ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
         return;
     };
-    if form.role != RoleId::EVERYONE && roles.role(form.role).is_none() {
-        form.role = RoleId::EVERYONE;
+    if form.permissions_role != RoleId::EVERYONE && roles.role(form.permissions_role).is_none() {
+        form.permissions_role = RoleId::EVERYONE;
     }
-    let me = view.me();
-    let mut mine = me.map_or(Rank::EVERYONE, |me| roles.rank(me.identity));
-    if me.is_some_and(|me| view.moderates(me.identity, channel)) {
-        mine = mine.max(roles.height(RoleId::MODERATOR));
-    }
+    let mine = view.my_rank_in(channel);
     let name = |role: RoleId| roles.role(role).map_or("Everyone", |r| r.name.as_str());
     row(ui, "Role", |ui| {
-        egui::ComboBox::from_id_salt("override-role").selected_text(name(form.role)).width(220.0).show_ui(ui, |ui| {
-            for role in roles.ranked.iter().map(|r| r.id).chain([RoleId::EVERYONE]) {
-                let set = form.overrides.iter().any(|o| o.role == role);
-                let label = if set { format!("{}  •", name(role)) } else { name(role).to_owned() };
-                ui.selectable_value(&mut form.role, role, label);
-            }
-        });
+        egui::ComboBox::from_id_salt("override-role").selected_text(name(form.permissions_role)).width(220.0).show_ui(
+            ui,
+            |ui| {
+                for role in roles.ranked.iter().map(|r| r.id).chain([RoleId::EVERYONE]) {
+                    let set = form.overrides.iter().any(|o| o.role == role);
+                    let label = if set { format!("{}  •", name(role)) } else { name(role).to_owned() };
+                    ui.selectable_value(&mut form.permissions_role, role, label);
+                }
+            },
+        );
     });
-    let editable = mine > roles.height(form.role);
+    let editable = mine > roles.height(form.permissions_role);
     ui.add_space(4.0);
     if editable {
         hint(ui, "A dash inherits from the channel above. The grey word is what that gives.");
@@ -2551,9 +2551,9 @@ fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, for
     ui.add_space(6.0);
 
     let here = ChannelInfo { overrides: form.overrides.clone(), ..saved.clone() };
-    let inherited = roles.inherited(form.role, &here, view);
-    let before = form.overrides.iter().find(|o| o.role == form.role).copied();
-    let mut set = before.unwrap_or(Override::inheriting(form.role));
+    let inherited = roles.inherited(form.permissions_role, &here, view);
+    let before = form.overrides.iter().find(|o| o.role == form.permissions_role).copied();
+    let mut set = before.unwrap_or(Override::inheriting(form.permissions_role));
     ui.add_enabled_ui(editable, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for perm in Perms::CHANNEL.iter() {
@@ -2573,7 +2573,7 @@ fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, for
         }
     });
     if Some(set) != before && !(before.is_none() && set.is_empty()) {
-        form.overrides.retain(|o| o.role != form.role);
+        form.overrides.retain(|o| o.role != form.permissions_role);
         if !set.is_empty() {
             form.overrides.push(set);
         }
@@ -2582,9 +2582,9 @@ fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, for
 
 fn tri_state(ui: &mut egui::Ui, setting: &mut Setting, perm: Perm) {
     let options = [
-        (Setting::Allow, Icon::Check, theme::GREEN, "Allow"),
-        (Setting::Inherit, Icon::Dash, theme::TEXT, "Inherit"),
         (Setting::Deny, Icon::Cross, theme::RED, "Deny"),
+        (Setting::Inherit, Icon::Dash, theme::TEXT, "Inherit"),
+        (Setting::Allow, Icon::Check, theme::GREEN, "Allow"),
     ];
     let segment = vec2(30.0, 22.0);
     let (track, _) = ui.allocate_exact_size(vec2(segment.x * 3.0 + 4.0, segment.y + 4.0), Sense::hover());
@@ -2596,7 +2596,7 @@ fn tri_state(ui: &mut egui::Ui, setting: &mut Setting, perm: Perm) {
         egui::StrokeKind::Inside,
     );
     for (i, (option, icon, color, tip)) in options.into_iter().enumerate() {
-        let min = egui::pos2(track.right() - 2.0 - segment.x * (i + 1) as f32, track.top() + 2.0);
+        let min = egui::pos2(track.left() + 2.0 + segment.x * i as f32, track.top() + 2.0);
         let rect = egui::Rect::from_min_size(min, segment);
         let resp = ui.interact(rect, ui.scope_id().with((perm.key(), i)), Sense::click()).on_hover_text(tip);
         if resp.clicked() {
@@ -2616,7 +2616,16 @@ fn tri_state(ui: &mut egui::Ui, setting: &mut Setting, perm: Perm) {
     }
 }
 
-fn moderator_list(ui: &mut egui::Ui, list: &[(Identity, Option<String>)], unmoderate: &mut Option<Identity>) {
+fn moderator_list(
+    ui: &mut egui::Ui,
+    kind: ChannelKind,
+    list: &[(Identity, Option<String>)],
+    unmoderate: &mut Option<Identity>,
+) {
+    let joinable = kind == ChannelKind::Voice;
+    if !joinable && list.is_empty() {
+        return;
+    }
     section(ui, "Moderators");
     if list.is_empty() {
         hint(ui, "Nobody yet. Right-click someone in this channel to make them a moderator.");
