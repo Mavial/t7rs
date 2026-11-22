@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
-use t7_proto::perms::{Member, Override, Perm, Permissions, Perms, RoleId, Roles};
-use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo};
+use t7_proto::perms::{ChannelPerms, Member, Override, Perm, Permissions, Perms, RoleId, Roles};
+use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo, Speech};
 
 use super::*;
 
@@ -23,7 +23,7 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
         temporary: false,
         has_password: false,
         default: false,
-        creator: None,
+        owner: None,
         moderators: Vec::new(),
         kind: ChannelKind::Voice,
         overrides: Vec::new(),
@@ -31,7 +31,8 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
 }
 
 fn client(id: u32, name: &str, channel: u32, status: ClientStatus) -> ClientInfo {
-    ClientInfo { id, nickname: name.into(), channel, status, role: None, identity: Identity([id as u8; 32]) }
+    let identity = Identity([id as u8; 32]);
+    ClientInfo { id, nickname: name.into(), channel, status, role: None, identity, speech: Speech::Allowed }
 }
 
 fn view() -> ServerView {
@@ -44,16 +45,22 @@ fn view() -> ServerView {
     ranked.max_clients = Some(5);
     let mut duo = channel(4, Some(3), "Duo queue", 0);
     duo.has_password = true;
-    let mut afk = channel(5, None, "AFK", 2);
+    let mut afk = channel(5, None, "AFK", 3);
     afk.temporary = true;
-    let music = channel(6, None, "Music", 3);
-    let mut staff = channel(7, None, "Staff", 4);
+    afk.owner = Some(7);
+    let music = channel(6, None, "Music", 4);
+    let mut staff = channel(7, None, "Staff", 5);
     staff.kind = ChannelKind::Category;
     let view_only = Perms::of(&[Perm::View]);
     staff.overrides =
         vec![Override::denying(RoleId::EVERYONE, view_only), Override::allowing(RoleId::MODERATOR, view_only)];
     let office = channel(8, Some(7), "Office", 0);
     let meeting = channel(9, Some(7), "Meeting room", 1);
+    let mut rooms = channel(10, None, "Create a room", 2);
+    rooms.kind = ChannelKind::Lobby;
+    rooms.topic = "Join to open a room of your own".into();
+    let mut room = channel(11, Some(10), "Dmitri's room", 0);
+    (room.temporary, room.owner) = (true, Some(6));
     let muted = ClientStatus { muted: true, ..Default::default() };
     let deaf = ClientStatus { muted: true, deafened: true, ..Default::default() };
     let away = ClientStatus { away: true, ..Default::default() };
@@ -69,14 +76,16 @@ fn view() -> ServerView {
         kenji,
         client(4, "Ola", 3, deaf),
         client(5, "Priya", 3, ClientStatus::default()),
-        client(6, "Dmitri", 3, ClientStatus::default()),
+        client(6, "Dmitri", 11, ClientStatus::default()),
+        client(10, "Mei", 11, ClientStatus::default()),
         client(7, "Lucas", 5, away),
         client(8, "Ines", 1, ClientStatus::default()),
         ClientInfo { role: Some("Moderator".into()), ..client(9, "Jonas", 8, ClientStatus::default()) },
     ];
     let info = ServerInfo { name: "Friday Night".into(), welcome: String::new(), max_clients: 32 };
-    let channels = vec![lobby, games, ranked, duo, afk, music, staff, office, meeting];
-    let everywhere = channels.iter().map(|c| (c.id, Perms::ALL)).collect();
+    let channels = vec![lobby, games, ranked, duo, afk, music, staff, office, meeting, rooms, room];
+    let everything = ChannelPerms { perms: Perms::ALL, rename: true };
+    let everywhere = channels.iter().map(|c| (c.id, everything)).collect();
     let mut view =
         ServerView::new(1, info, channels, clients, Permissions { server: Perms::ALL, channels: everywhere });
     let mut roles = Roles { owner: Some(Identity([1; 32])), ..Roles::default() };
@@ -270,6 +279,49 @@ const SCENES: &[Scene] = &[
         app.settings.folded.insert(ServerKey::of("friday.example.com:9988"), ["Staff".to_owned()].into());
         app
     }),
+    ("25-create-lobby", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.open_create_channel(Some(2));
+        let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
+        form.kind = ChannelKind::Lobby;
+        form.name = "Squads".into();
+        app
+    }),
+    ("26-cant-speak", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        for id in [1, 5] {
+            app.apply(&S2C::ClientSpeech { id, speech: Speech::NotHere });
+        }
+        app
+    }),
+    ("27-voice-settings-cant-speak", (1100, 820), |ctx| {
+        let mut app = connected(ctx);
+        app.apply(&S2C::ClientSpeech { id: 1, speech: Speech::NotHere });
+        app.audio_dialog = Some(AudioDialog {
+            packs: Vec::new(),
+            inputs: vec!["Microphone (USB)".into()],
+            outputs: vec!["Headphones".into()],
+            binding: false,
+        });
+        app
+    }),
+    ("28-server-muted", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        for (id, speech) in [(1, Speech::ServerMuted), (5, Speech::ServerMuted), (8, Speech::NotHere)] {
+            app.apply(&S2C::ClientSpeech { id, speech });
+        }
+        app
+    }),
+    ("24-moderator-edit", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        let view = app.view.as_mut().unwrap();
+        let moderator =
+            ChannelPerms { perms: Perms::of(&[Perm::View, Perm::Join, Perm::Speak, Perm::Kick]), rename: true };
+        let channels = view.channels.keys().map(|&c| (c, moderator)).collect();
+        view.apply(&S2C::Permissions(Permissions { server: Perms::of(&[Perm::View]), channels }));
+        app.open_edit_channel(3);
+        app
+    }),
     ("16-connecting", (1100, 720), |ctx| {
         let mut app = disconnected(ctx);
         app.conn = Conn::Connecting { address: "friday.example.com".into(), password: String::new() };
@@ -297,16 +349,28 @@ struct Menu {
     steps: &'static [Step],
 }
 
-const MENUS: &[Menu] = &[Menu {
-    name: "19-user-roles",
-    size: (1100, 720),
-    make: connected,
-    steps: &[
-        Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Press) },
-        Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Release) },
-        Step { x: 150.0, y: 330.0, right_button: None },
-    ],
-}];
+const MENUS: &[Menu] = &[
+    Menu {
+        name: "19-user-roles",
+        size: (1100, 720),
+        make: connected,
+        steps: &[
+            Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Press) },
+            Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Release) },
+            Step { x: 150.0, y: 330.0, right_button: None },
+        ],
+    },
+    Menu {
+        name: "29-user-move-to",
+        size: (1100, 720),
+        make: connected,
+        steps: &[
+            Step { x: 80.0, y: 340.0, right_button: Some(RightButton::Press) },
+            Step { x: 80.0, y: 340.0, right_button: Some(RightButton::Release) },
+            Step { x: 150.0, y: 240.0, right_button: None },
+        ],
+    },
+];
 
 const FRAMES_BEFORE_STEPS: usize = 2;
 

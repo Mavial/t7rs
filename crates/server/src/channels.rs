@@ -35,8 +35,8 @@ pub enum ChannelError {
     PermanentUnderTemporary,
     IntoItself,
     CategoryPlacement,
-    CategorySettings,
-    DefaultCategory,
+    KindSettings(ChannelKind),
+    DefaultKind(ChannelKind),
     HidesDefault,
 }
 
@@ -54,8 +54,10 @@ impl ChannelError {
             ChannelError::PermanentUnderTemporary => "permanent channels can't go inside a temporary one".into(),
             ChannelError::IntoItself => "a channel can't be moved inside itself".into(),
             ChannelError::CategoryPlacement => "categories can only be at the top level".into(),
-            ChannelError::CategorySettings => "categories can't be temporary or have a password or a user limit".into(),
-            ChannelError::DefaultCategory => "a category can't be the default channel".into(),
+            ChannelError::KindSettings(kind) => {
+                format!("{} can't be temporary or have a password or a user limit", plural(kind))
+            }
+            ChannelError::DefaultKind(kind) => format!("a {} can't be the default channel", singular(kind)),
             ChannelError::HidesDefault => {
                 "everyone must be able to see the default channel and the channels above it".into()
             }
@@ -67,12 +69,6 @@ impl ChannelError {
 #[derive(Serialize, Deserialize)]
 struct ChannelsFile {
     channels: Vec<ChannelConfig>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SavedChannels {
-    Changed,
-    Unchanged,
 }
 
 pub struct Channels {
@@ -113,17 +109,19 @@ impl Channels {
             let id = self.next_id;
             self.next_id += 1;
             let password = c.password.clone().filter(|p| !p.is_empty());
-            if c.kind == ChannelKind::Category {
-                let refusal = if parent.is_some() {
-                    Some(ChannelError::CategoryPlacement)
-                } else if password.is_some() || c.max_clients.is_some() {
-                    Some(ChannelError::CategorySettings)
-                } else {
-                    c.default.then_some(ChannelError::DefaultCategory)
-                };
-                if let Some(e) = refusal {
-                    return Err(format!("{}: {}", c.name, e.message()));
-                }
+            let refusal = if c.kind == ChannelKind::Category && parent.is_some() {
+                Some(ChannelError::CategoryPlacement)
+            } else if c.kind == ChannelKind::Lobby
+                && parent.is_some_and(|p| self.depth(p) + c.kind.levels_including_rooms() > MAX_CHANNEL_DEPTH)
+            {
+                Some(ChannelError::TooDeep)
+            } else if c.kind != ChannelKind::Voice && (password.is_some() || c.max_clients.is_some()) {
+                Some(ChannelError::KindSettings(c.kind))
+            } else {
+                (c.kind != ChannelKind::Voice && c.default).then_some(ChannelError::DefaultKind(c.kind))
+            };
+            if let Some(e) = refusal {
+                return Err(format!("{}: {}", c.name, e.message()));
             }
             let info = ChannelInfo {
                 id,
@@ -135,7 +133,7 @@ impl Channels {
                 temporary: false,
                 has_password: password.is_some(),
                 default: false,
-                creator: None,
+                owner: None,
                 moderators: c.moderators.clone(),
                 kind: c.kind,
                 overrides: Vec::new(),
@@ -226,20 +224,18 @@ impl Channels {
         if self.map.len() >= MAX_CHANNELS {
             return Err(ChannelError::TooMany);
         }
-        if kind == ChannelKind::Category {
-            if parent.is_some() {
-                return Err(ChannelError::CategoryPlacement);
-            }
-            if temporary || has_joinable_only_settings(settings) {
-                return Err(ChannelError::CategorySettings);
-            }
+        if kind == ChannelKind::Category && parent.is_some() {
+            return Err(ChannelError::CategoryPlacement);
+        }
+        if kind != ChannelKind::Voice && (temporary || has_joinable_only_settings(settings)) {
+            return Err(ChannelError::KindSettings(kind));
         }
         if let Some(p) = parent {
             let parent = self.map.get(&p).ok_or(ChannelError::NotFound)?;
             if parent.info.temporary && !temporary {
                 return Err(ChannelError::PermanentUnderTemporary);
             }
-            if self.depth(p) + 1 > MAX_CHANNEL_DEPTH {
+            if self.depth(p) + kind.levels_including_rooms() > MAX_CHANNEL_DEPTH {
                 return Err(ChannelError::TooDeep);
             }
         }
@@ -260,7 +256,7 @@ impl Channels {
             temporary,
             has_password: password.is_some(),
             default: false,
-            creator: temporary.then_some(creator),
+            owner: temporary.then_some(creator),
             moderators: Vec::new(),
             kind,
             overrides: Vec::new(),
@@ -271,8 +267,8 @@ impl Channels {
 
     pub fn edit(&mut self, id: ChannelId, settings: &ChannelSettings) -> Result<(), ChannelError> {
         let info = &self.map.get(&id).ok_or(ChannelError::NotFound)?.info;
-        if info.kind == ChannelKind::Category && has_joinable_only_settings(settings) {
-            return Err(ChannelError::CategorySettings);
+        if info.kind != ChannelKind::Voice && has_joinable_only_settings(settings) {
+            return Err(ChannelError::KindSettings(info.kind));
         }
         let parent = info.parent;
         let (name, topic, limit) = self.validate(settings, parent, Some(id))?;
@@ -350,8 +346,8 @@ impl Channels {
         if c.info.temporary {
             return Err(ChannelError::DefaultChannel);
         }
-        if c.info.kind == ChannelKind::Category {
-            return Err(ChannelError::DefaultCategory);
+        if c.info.kind != ChannelKind::Voice {
+            return Err(ChannelError::DefaultKind(c.info.kind));
         }
         if self.hides_from_some_role(id) {
             return Err(ChannelError::HidesDefault);
@@ -398,16 +394,20 @@ impl Channels {
         Ok(true)
     }
 
-    pub fn forget_role(&mut self, role: RoleId) -> SavedChannels {
-        let mut saved = SavedChannels::Unchanged;
+    pub fn forget_role(&mut self, role: RoleId) -> Vec<ChannelId> {
+        let mut forgotten_in = Vec::new();
         for c in self.map.values_mut() {
             let before = c.info.overrides.len();
             c.info.overrides.retain(|o| o.role != role);
-            if !c.info.temporary && c.info.overrides.len() != before {
-                saved = SavedChannels::Changed;
+            if c.info.overrides.len() != before {
+                forgotten_in.push(c.info.id);
             }
         }
-        saved
+        forgotten_in
+    }
+
+    pub fn any_permanent(&self, ids: &[ChannelId]) -> bool {
+        ids.iter().any(|id| self.map.get(id).is_some_and(|c| !c.info.temporary))
     }
 
     fn self_then_ancestors(&self, id: ChannelId) -> Vec<ChannelId> {
@@ -434,6 +434,27 @@ impl Channels {
             i += 1;
         }
         out
+    }
+
+    pub fn room_name(&self, lobby: ChannelId, nickname: &str) -> String {
+        (1..)
+            .map(|n| {
+                let room = if n == 1 { "'s room".to_owned() } else { format!("'s room {n}") };
+                let fits = MAX_CHANNEL_NAME_LEN - room.chars().count();
+                format!("{}{room}", nickname.chars().take(fits).collect::<String>())
+            })
+            .find(|name| !self.name_taken(name, Some(lobby), None))
+            .expect("some number is free")
+    }
+
+    pub fn temporaries(&self) -> Vec<ChannelId> {
+        self.map.values().filter(|c| c.info.temporary).map(|c| c.info.id).collect()
+    }
+
+    pub fn set_owner(&mut self, id: ChannelId, owner: Option<ClientId>) {
+        if let Some(c) = self.map.get_mut(&id).filter(|c| c.info.temporary) {
+            c.info.owner = owner;
+        }
     }
 
     /// Top-most temporary channels with nobody in them or below them.
@@ -472,9 +493,9 @@ impl Channels {
         depth
     }
 
-    /// Levels in the subtree under and including `id`.
     fn height(&self, id: ChannelId) -> usize {
-        1 + self.children_of(Some(id)).into_iter().map(|k| self.height(k)).max().unwrap_or(0)
+        let below = self.children_of(Some(id)).into_iter().map(|k| self.height(k)).max().unwrap_or(0);
+        (1 + below).max(self.map[&id].info.kind.levels_including_rooms())
     }
 
     fn name_taken(&self, name: &str, parent: Option<ChannelId>, except: Option<ChannelId>) -> bool {
@@ -507,6 +528,22 @@ impl Channels {
     }
 }
 
+fn singular(kind: ChannelKind) -> &'static str {
+    match kind {
+        ChannelKind::Voice => "voice channel",
+        ChannelKind::Category => "category",
+        ChannelKind::Lobby => "lobby",
+    }
+}
+
+fn plural(kind: ChannelKind) -> &'static str {
+    match kind {
+        ChannelKind::Voice => "voice channels",
+        ChannelKind::Category => "categories",
+        ChannelKind::Lobby => "lobbies",
+    }
+}
+
 fn has_joinable_only_settings(s: &ChannelSettings) -> bool {
     s.max_clients.is_some() || matches!(&s.password, PasswordChange::Set(p) if !p.is_empty())
 }
@@ -523,6 +560,8 @@ impl ChannelTree for Channels {
 
 #[cfg(test)]
 mod tests {
+    use t7_proto::MAX_NICKNAME_LEN;
+
     use super::*;
 
     fn settings(name: &str) -> ChannelSettings {
@@ -609,7 +648,7 @@ mod tests {
     fn temporary_channels_stay_temporary_and_vanish_when_empty() {
         let mut ch = three();
         let temp = ch.create(None, &settings("Raid"), true, ChannelKind::Voice, 7).unwrap();
-        assert_eq!(ch.get(temp).unwrap().creator, Some(7));
+        assert_eq!(ch.get(temp).unwrap().owner, Some(7));
         assert_eq!(
             ch.create(Some(temp), &settings("Perm"), false, ChannelKind::Voice, 7),
             Err(ChannelError::PermanentUnderTemporary)
@@ -689,16 +728,19 @@ mod tests {
         assert_eq!(nested, Err(ChannelError::CategoryPlacement));
         assert_eq!(
             ch.create(None, &settings("Temp"), true, ChannelKind::Category, 1),
-            Err(ChannelError::CategorySettings)
+            Err(ChannelError::KindSettings(ChannelKind::Category))
         );
         let limited = ChannelSettings { max_clients: Some(3), ..settings("Games") };
-        assert_eq!(ch.create(None, &limited, false, ChannelKind::Category, 1), Err(ChannelError::CategorySettings));
-        assert_eq!(ch.edit(games, &limited), Err(ChannelError::CategorySettings));
+        assert_eq!(
+            ch.create(None, &limited, false, ChannelKind::Category, 1),
+            Err(ChannelError::KindSettings(ChannelKind::Category))
+        );
+        assert_eq!(ch.edit(games, &limited), Err(ChannelError::KindSettings(ChannelKind::Category)));
         assert_eq!(ch.move_to(games, Some(2), 0), Err(ChannelError::CategoryPlacement));
         ch.move_to(games, None, 0).unwrap();
         ch.move_to(2, Some(games), 0).unwrap();
         assert_eq!(names(&ch), ["Games", "Gaming", "Squad", "Duo", "Lobby", "AFK"]);
-        assert_eq!(ch.set_default(games), Err(ChannelError::DefaultCategory));
+        assert_eq!(ch.set_default(games), Err(ChannelError::DefaultKind(ChannelKind::Category)));
         let back = Channels::from_config(&ch.to_config()).unwrap();
         assert_eq!(back.to_config(), ch.to_config());
         assert_eq!(back.get(1).unwrap().kind, ChannelKind::Category);
@@ -708,6 +750,43 @@ mod tests {
         let only = Channels::from_config(&[category("Games")]).unwrap();
         assert_eq!(names(&only), ["Games", "Lobby"]);
         assert_eq!(only.get(only.default_id()).unwrap().name, "Lobby");
+    }
+
+    #[test]
+    fn lobbies_keep_a_level_for_their_rooms_and_nobody_lands_in_them() {
+        let mut ch = three();
+        let lobby = |name: &str, limit| ChannelSettings { max_clients: limit, ..settings(name) };
+        let rooms = ch.create(Some(2), &lobby("Rooms", None), false, ChannelKind::Lobby, 1).unwrap();
+        assert_eq!(ch.create(Some(3), &lobby("Deep", None), false, ChannelKind::Lobby, 1), Err(ChannelError::TooDeep));
+        let room = ch.create(Some(rooms), &settings(&ch.room_name(rooms, "ana")), true, ChannelKind::Voice, 7).unwrap();
+        assert_eq!(ch.get(room).unwrap().name, "ana's room");
+        assert_eq!(ch.room_name(rooms, "Ana"), "Ana's room 2", "names differ in more than case");
+        let long = "x".repeat(MAX_NICKNAME_LEN);
+        assert_eq!(ch.room_name(rooms, &long), format!("{long}'s room"));
+        ch.create(Some(rooms), &settings(&format!("{long}'s room")), true, ChannelKind::Voice, 7).unwrap();
+        assert_eq!(ch.room_name(rooms, &long).chars().count(), MAX_CHANNEL_NAME_LEN);
+        ch.validate(&settings(&ch.room_name(rooms, &long)), Some(rooms), None).unwrap();
+
+        ch.delete(rooms).unwrap();
+        let rooms = ch.create(Some(2), &lobby("Rooms", None), false, ChannelKind::Lobby, 1).unwrap();
+        assert_eq!(ch.move_to(rooms, Some(3), 0), Err(ChannelError::TooDeep));
+        assert_eq!(ch.move_to(2, Some(4), 0), Err(ChannelError::TooDeep), "nor does the channel it is in");
+        ch.move_to(rooms, None, 0).unwrap();
+
+        let lobbies = ChannelError::KindSettings(ChannelKind::Lobby);
+        assert_eq!(ch.create(None, &lobby("Pop-up", None), true, ChannelKind::Lobby, 1), Err(lobbies));
+        assert_eq!(ch.create(None, &lobby("Small", Some(3)), false, ChannelKind::Lobby, 1), Err(lobbies));
+        assert_eq!(ch.edit(rooms, &lobby("Rooms", Some(3))), Err(lobbies));
+        assert_eq!(ch.set_default(rooms), Err(ChannelError::DefaultKind(ChannelKind::Lobby)));
+
+        let back = Channels::from_config(&ch.to_config()).unwrap();
+        assert_eq!(back.to_config(), ch.to_config());
+        let deep = ChannelConfig { kind: ChannelKind::Lobby, ..cfg("Deep", vec![]) };
+        let file = [cfg("Lobby", vec![cfg("Games", vec![cfg("Squad", vec![deep])])])];
+        assert!(Channels::from_config(&file).err().unwrap().contains("Deep: channels can be nested at most"));
+        let first = ChannelConfig { kind: ChannelKind::Lobby, ..cfg("Rooms", vec![]) };
+        let only = Channels::from_config(&[first, cfg("Hangout", vec![])]).unwrap();
+        assert_eq!(only.get(only.default_id()).unwrap().name, "Hangout", "nobody lands in a lobby");
     }
 
     #[test]
@@ -739,9 +818,9 @@ deny = [\"view\"]"
         assert_eq!(ch.get(2).unwrap().overrides, [deny_view(RoleId::EVERYONE)]);
         let dj = RoleId(7);
         ch.set_override(3, deny_view(dj)).unwrap();
-        assert_eq!(ch.forget_role(dj), SavedChannels::Changed);
+        assert_eq!(ch.forget_role(dj), [3]);
         assert_eq!(ch.get(3).unwrap().overrides, []);
-        assert_eq!(ch.forget_role(dj), SavedChannels::Unchanged);
+        assert_eq!(ch.forget_role(dj), []);
     }
 
     #[test]

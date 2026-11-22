@@ -74,6 +74,11 @@ impl ServerView {
                     c.role.clone_from(role);
                 }
             }
+            S2C::ClientSpeech { id, speech } => {
+                if let Some(c) = self.clients.get_mut(id) {
+                    c.speech = *speech;
+                }
+            }
             S2C::Permissions(permissions) => self.set_permissions(permissions.clone()),
             S2C::Roles(roles) => self.roles = Some(roles.clone()),
             S2C::Channels(list) => {
@@ -102,6 +107,10 @@ impl ServerView {
     /// Whether the server lets this client do it in `channel`.
     pub fn may_in(&self, channel: ChannelId, perm: Perm) -> bool {
         self.permissions.may_in(channel, perm)
+    }
+
+    pub fn may_rename(&self, channel: ChannelId) -> bool {
+        self.permissions.may_rename(channel)
     }
 
     pub fn is_owner(&self) -> bool {
@@ -200,7 +209,7 @@ impl ChannelTree for ServerView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perms::Perms;
+    use crate::perms::{ChannelPerms, Perms};
     use crate::{ClientStatus, LeaveReason};
 
     fn chan(id: u32, parent: Option<u32>, order: u32) -> ChannelInfo {
@@ -214,7 +223,7 @@ mod tests {
             temporary: false,
             has_password: false,
             default: false,
-            creator: None,
+            owner: None,
             moderators: Vec::new(),
             kind: crate::ChannelKind::Voice,
             overrides: Vec::new(),
@@ -231,8 +240,10 @@ mod tests {
             status: ClientStatus::default(),
             role: None,
             identity: Identity([1; 32]),
+            speech: crate::Speech::Allowed,
         };
-        let channels = [1, 3].map(|c| (c, Perms::NONE)).into_iter().chain([(2, Perms::of(&[Perm::Kick]))]).collect();
+        let kick = ChannelPerms { perms: Perms::of(&[Perm::Kick]), rename: false };
+        let channels = [1, 3].map(|c| (c, ChannelPerms::default())).into_iter().chain([(2, kick)]).collect();
         let permissions = Permissions { server: Perms::NONE, channels };
         let channels = vec![chan(3, None, 1), chan(1, None, 0), chan(2, Some(1), 0)];
         let mut v = ServerView::new(1, info, channels, vec![me], permissions);

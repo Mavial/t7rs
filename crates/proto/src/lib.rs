@@ -84,8 +84,9 @@ pub struct ChannelInfo {
     pub has_password: bool,
     /// Where new clients land.
     pub default: bool,
-    /// Who made a temporary channel: they moderate it, and may edit and delete it.
-    pub creator: Option<ClientId>,
+    /// Who owns a temporary channel: they moderate it, and may edit and
+    /// delete it. Its creator, then whoever has been in it longest.
+    pub owner: Option<ClientId>,
     /// They hold the Moderator role in this channel and every channel below it.
     pub moderators: Vec<Identity>,
     pub kind: ChannelKind,
@@ -101,6 +102,15 @@ pub enum ChannelKind {
     Voice,
     /// Groups the channels under it, at the top level. Nobody joins it.
     Category,
+    /// Joining it makes you a temporary room of your own under it, which you
+    /// own. Nobody stays in it.
+    Lobby,
+}
+
+impl ChannelKind {
+    pub fn levels_including_rooms(self) -> usize {
+        if self == ChannelKind::Lobby { 2 } else { 1 }
+    }
 }
 
 /// The editable part of a channel.
@@ -130,6 +140,19 @@ pub struct ClientInfo {
     pub role: Option<String>,
     /// The same on every connection with the same key; two connections may share one.
     pub identity: Identity,
+    pub speech: Speech,
+}
+
+/// Whether the server passes someone's voice on, and if not, why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum Speech {
+    #[default]
+    Allowed,
+    /// They may not speak in the channel they are in.
+    NotHere,
+    /// A moderator muted them on the server, until one unmutes them or the
+    /// server restarts.
+    ServerMuted,
 }
 
 /// A ban on the server: the identity, and the IP address if that was banned too.
@@ -195,7 +218,7 @@ pub enum C2S {
         target: ClientId,
         message: String,
     },
-    /// The creator moves into the new channel, unless it is a category.
+    /// The creator moves into the new channel, if it is a voice channel.
     CreateChannel {
         parent: Option<ChannelId>,
         settings: ChannelSettings,
@@ -257,6 +280,20 @@ pub enum C2S {
         role: perms::RoleId,
         allow: perms::Perms,
         deny: perms::Perms,
+    },
+    /// Mutes someone on the server, or lifts it, if you may mute people where
+    /// they are and their role is below yours. It sticks to their identity
+    /// across reconnects.
+    ServerMute {
+        target: ClientId,
+        muted: bool,
+    },
+    /// Moves someone into `channel`, if you may move people out of where they
+    /// are and into `channel`, their role is below yours, and they may see
+    /// it. A full channel, or one with a password, needs your Bypass.
+    MoveMember {
+        target: ClientId,
+        channel: ChannelId,
     },
 }
 
@@ -339,6 +376,11 @@ pub enum S2C {
     /// Someone went out of view, the other way around. They are still connected.
     ClientHidden {
         id: ClientId,
+    },
+    /// Whether the server passes someone's voice on changed.
+    ClientSpeech {
+        id: ClientId,
+        speech: Speech,
     },
 }
 

@@ -153,9 +153,9 @@ fn depth(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
     depth
 }
 
-/// Levels in the subtree under and including `id`.
 fn height(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
-    1 + children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0)
+    let below = children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0);
+    (1 + below).max(channels.get(&id).map_or(1, |c| c.kind.levels_including_rooms()))
 }
 
 #[cfg(test)]
@@ -173,7 +173,7 @@ mod tests {
             temporary: false,
             has_password: false,
             default: false,
-            creator: None,
+            owner: None,
             moderators: Vec::new(),
             kind: ChannelKind::Voice,
             overrides: Vec::new(),
@@ -271,6 +271,14 @@ mod tests {
         assert_eq!(drop_target(&t, 5, 1, Zone::Into), Outcome::NotAllowed(Refusal::CategoryPlacement));
         assert_eq!(drop_target(&t, 5, 1, Zone::Before), to(None, 0));
         assert_eq!(drop_target(&t, 6, 5, Zone::Into), to(Some(5), 0));
+    }
+
+    #[test]
+    fn a_lobby_keeps_a_level_for_its_rooms() {
+        let mut t = tree();
+        t.get_mut(&6).unwrap().kind = ChannelKind::Lobby;
+        assert_eq!(drop_target(&t, 6, 3, Zone::Into), Outcome::NotAllowed(Refusal::TooDeep));
+        assert_eq!(drop_target(&t, 6, 2, Zone::Into), to(Some(2), 1));
     }
 
     #[test]

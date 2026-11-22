@@ -10,6 +10,7 @@ pub enum Icon {
     Speaker,
     Mic,
     MicOff,
+    MicLocked,
     Headphones,
     HeadphonesOff,
     Moon,
@@ -24,6 +25,8 @@ pub enum Icon {
     Check,
     Cross,
     Dash,
+    Crown,
+    SpeakerPlus,
 }
 
 struct Pen<'a> {
@@ -107,6 +110,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 pen.poly(&Pen::arc_points(knob, y, 2.5, 0.0, 360.0), true);
             }
         }
+        Icon::MicLocked => {
+            pen.rrect(5.0, 2.0, 10.5, 12.0, 2.75);
+            pen.arc(7.75, 9.0, 5.0, 0.0, 180.0);
+            pen.line((7.75, 14.0), (7.75, 20.0));
+            pen.rrect(14.0, 14.5, 22.0, 21.5, 1.5);
+            pen.arc(18.0, 14.5, 2.6, 180.0, 360.0);
+        }
         Icon::Lock => {
             pen.rrect(5.0, 11.0, 19.0, 21.0, 2.0);
             pen.arc(12.0, 11.0, 4.0, 180.0, 360.0);
@@ -144,6 +154,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line((17.5, 6.5), (6.5, 17.5));
         }
         Icon::Dash => pen.line((6.5, 12.0), (17.5, 12.0)),
+        Icon::SpeakerPlus => {
+            pen.poly(&[(2.0, 9.0), (6.0, 9.0), (11.0, 5.0), (11.0, 19.0), (6.0, 15.0), (2.0, 15.0)], true);
+            pen.line((14.5, 12.0), (21.5, 12.0));
+            pen.line((18.0, 8.5), (18.0, 15.5));
+        }
+        Icon::Crown => pen
+            .poly(&[(3.0, 18.5), (3.0, 7.5), (8.0, 12.0), (12.0, 5.0), (16.0, 12.0), (21.0, 7.5), (21.0, 18.5)], true),
         Icon::Moon => {
             // Crescent: big circle arc from (21,12) round to (12,3), back along a smaller arc.
             let mut pts = Pen::arc_points(12.0, 12.0, 9.0, 0.0, 270.0);

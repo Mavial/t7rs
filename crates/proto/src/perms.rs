@@ -219,11 +219,21 @@ pub struct Member {
 
 /// Height in the role order. You may only act on people, and roles, below your own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Rank(u32);
+pub struct Rank {
+    role_height: u32,
+    room_owner: bool,
+}
 
 impl Rank {
-    pub const EVERYONE: Rank = Rank(0);
-    pub const OWNER: Rank = Rank(u32::MAX);
+    pub const EVERYONE: Rank = Rank::of_role(0);
+    /// A room's owner, in it: above Everyone, below every role, so that
+    /// moderators keep their say over people in rooms of their own.
+    pub const ROOM_OWNER: Rank = Rank { role_height: 0, room_owner: true };
+    pub const OWNER: Rank = Rank::of_role(u32::MAX);
+
+    const fn of_role(role_height: u32) -> Rank {
+        Rank { role_height, room_owner: false }
+    }
 }
 
 const EVERYONE_PERMS: Perms =
@@ -316,6 +326,10 @@ impl Scope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Standing {
     pub perms: Perms,
+    /// Change a channel's name and topic. No role or channel holds it:
+    /// [`Roles::resolve`] gives it in a channel to whoever may manage
+    /// channels there, and to the channel's listed moderators.
+    pub rename: bool,
     pub rank: Rank,
 }
 
@@ -431,7 +445,7 @@ impl Roles {
     /// one moved there.
     pub fn height_at(&self, position: usize) -> Rank {
         let len = self.ranked.len();
-        Rank((len - position.min(len.saturating_sub(1))) as u32)
+        Rank::of_role((len - position.min(len.saturating_sub(1))) as u32)
     }
 
     /// Their highest standing on the server, wherever they are.
@@ -466,29 +480,36 @@ impl Roles {
     ///
     /// The owner may do everything. Anyone else has what their roles grant,
     /// Everyone's included. In a channel, and every channel below it, its
-    /// moderators and the owner of a temporary channel also hold the Moderator
-    /// role. Then each permission a channel sets for one of their roles
+    /// moderators also hold the Moderator role, and so does the owner of a
+    /// temporary channel, though ranked just above Everyone. Then each permission a channel sets for one of their roles
     /// overrides what the roles grant; the closest channel that sets it wins,
-    /// and there an allow beats a deny.
+    /// and there an allow beats a deny. In a channel, its moderators and
+    /// whoever may manage it may rename it.
     pub fn resolve(&self, who: Subject, scope: Scope, tree: &impl ChannelTree) -> Standing {
-        if self.owner == Some(who.identity) {
-            return Standing { perms: Perms::ALL, rank: Rank::OWNER };
-        }
         let path = self_then_ancestors(scope, tree);
-        let owns_room = path.iter().any(|c| c.temporary && c.creator == Some(who.client));
         let moderates = path.iter().any(|c| c.moderators.contains(&who.identity));
-
-        let mut held = vec![RoleId::EVERYONE];
-        held.extend_from_slice(self.assigned(who.identity));
-        if owns_room || moderates {
-            held.push(RoleId::MODERATOR);
-        }
-        let mut perms = self.grant(&held, &path);
-        if owns_room {
-            perms |= ROOM_OWNER_PERMS;
-        }
-        let rank = held.iter().map(|r| self.height(*r)).max().unwrap_or(Rank::EVERYONE);
-        Standing { perms, rank }
+        let (perms, rank) = if self.owner == Some(who.identity) {
+            (Perms::ALL, Rank::OWNER)
+        } else {
+            let owns_room = path.iter().any(|c| c.temporary && c.owner == Some(who.client));
+            let mut held = vec![RoleId::EVERYONE];
+            held.extend_from_slice(self.assigned(who.identity));
+            if moderates {
+                held.push(RoleId::MODERATOR);
+            }
+            let mut rank = held.iter().map(|r| self.height(*r)).max().unwrap_or(Rank::EVERYONE);
+            if owns_room {
+                held.push(RoleId::MODERATOR);
+                rank = rank.max(Rank::ROOM_OWNER);
+            }
+            let mut perms = self.grant(&held, &path);
+            if owns_room {
+                perms |= ROOM_OWNER_PERMS;
+            }
+            (perms, rank)
+        };
+        let rename = !path.is_empty() && (moderates || perms.has(Perm::ManageChannels));
+        Standing { perms, rename, rank }
     }
 
     fn grant(&self, held: &[RoleId], path: &[&ChannelInfo]) -> Perms {
@@ -528,9 +549,14 @@ impl Roles {
     /// see a channel they may view or manage, if they see the one above it:
     /// a hidden channel hides everything below it.
     pub fn permissions(&self, who: Subject, tree: &impl ChannelTree) -> Permissions {
-        let all: BTreeMap<ChannelId, Perms> =
-            tree.channels().map(|c| (c.id, self.resolve(who, Scope::Channel(c.id), tree).perms)).collect();
-        let shows = |id| all.get(&id).is_some_and(|p| p.has(Perm::View) || p.has(Perm::ManageChannels));
+        let all: BTreeMap<ChannelId, ChannelPerms> = tree
+            .channels()
+            .map(|c| {
+                let Standing { perms, rename, .. } = self.resolve(who, Scope::Channel(c.id), tree);
+                (c.id, ChannelPerms { perms, rename })
+            })
+            .collect();
+        let shows = |id| all.get(&id).is_some_and(|p| p.perms.has(Perm::View) || p.perms.has(Perm::ManageChannels));
         let sees = |c: &ChannelInfo| self_then_ancestors(Scope::Channel(c.id), tree).iter().all(|c| shows(c.id));
         let channels = tree.channels().filter(|c| sees(c)).map(|c| (c.id, all[&c.id])).collect();
         Permissions { server: self.resolve(who, Scope::Server, tree).perms, channels }
@@ -542,7 +568,28 @@ impl Roles {
 pub struct Permissions {
     pub server: Perms,
     /// Exactly the channels it sees.
-    pub channels: BTreeMap<ChannelId, Perms>,
+    pub channels: BTreeMap<ChannelId, ChannelPerms>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "u16", into = "u16")]
+pub struct ChannelPerms {
+    pub perms: Perms,
+    pub rename: bool,
+}
+
+const RENAME_BIT: u16 = 1 << Perm::ALL.len();
+
+impl From<ChannelPerms> for u16 {
+    fn from(c: ChannelPerms) -> u16 {
+        if c.rename { c.perms.0 | RENAME_BIT } else { c.perms.0 }
+    }
+}
+
+impl From<u16> for ChannelPerms {
+    fn from(bits: u16) -> Self {
+        ChannelPerms { perms: Perms::from_bits_truncate(bits), rename: bits & RENAME_BIT != 0 }
+    }
 }
 
 impl Permissions {
@@ -551,14 +598,18 @@ impl Permissions {
     }
 
     pub fn may_in(&self, channel: ChannelId, perm: Perm) -> bool {
-        self.channels.get(&channel).is_some_and(|p| p.has(perm))
+        self.channels.get(&channel).is_some_and(|p| p.perms.has(perm))
+    }
+
+    pub fn may_rename(&self, channel: ChannelId) -> bool {
+        self.channels.get(&channel).is_some_and(|p| p.rename)
     }
 
     /// Whether it gets every role and what each channel sets for them, to
     /// edit those: it may manage roles, or some channel's permissions.
     pub fn edits_permissions(&self) -> bool {
         let edits = |p: &Perms| p.has(Perm::ManageRoles) || p.has(Perm::ManagePermissions);
-        edits(&self.server) || self.channels.values().any(edits)
+        edits(&self.server) || self.channels.values().any(|c| edits(&c.perms))
     }
 }
 
@@ -617,12 +668,12 @@ mod tests {
             temporary: false,
             has_password: false,
             default: id == LOBBY,
-            creator: None,
+            owner: None,
             moderators: moderators.to_vec(),
             kind: ChannelKind::Voice,
             overrides: Vec::new(),
         };
-        let raid = ChannelInfo { temporary: true, creator: Some(9), ..ch(RAID, None, &[]) };
+        let raid = ChannelInfo { temporary: true, owner: Some(9), ..ch(RAID, None, &[]) };
         let channels = [
             ch(LOBBY, None, &[]),
             ch(GAMING, None, &[M]),
@@ -666,6 +717,12 @@ mod tests {
         assert_eq!(postcard::from_bytes::<Perms>(&wire).unwrap(), file.perms);
         let unknown = postcard::to_allocvec(&u16::MAX).unwrap();
         assert_eq!(postcard::from_bytes::<Perms>(&unknown).unwrap(), Perms::ALL, "unknown bits are dropped");
+
+        let renames = ChannelPerms { perms: file.perms, rename: true };
+        let wire = postcard::to_allocvec(&renames).unwrap();
+        assert_eq!(postcard::from_bytes::<ChannelPerms>(&wire).unwrap(), renames);
+        let everything = ChannelPerms { perms: Perms::ALL, rename: true };
+        assert_eq!(postcard::from_bytes::<ChannelPerms>(&unknown).unwrap(), everything, "unknown bits are dropped");
     }
 
     #[test]
@@ -705,7 +762,11 @@ mod tests {
         let moderator = roles.role(RoleId::MODERATOR).unwrap().perms;
         for channel in [GAMING, SQUAD, DEEP] {
             let standing = roles.resolve(who(M), Scope::Channel(channel), &t);
-            assert_eq!(standing, Standing { perms: moderator, rank: roles.height(RoleId::MODERATOR) }, "{channel}");
+            assert_eq!(
+                standing,
+                Standing { perms: moderator, rename: true, rank: roles.height(RoleId::MODERATOR) },
+                "{channel}"
+            );
         }
         for scope in [Scope::Server, Scope::Channel(LOBBY), Scope::Channel(AFK)] {
             assert_eq!(roles.resolve(who(M), scope, &t).rank, Rank::EVERYONE, "{scope:?}");
@@ -719,14 +780,42 @@ mod tests {
     }
 
     #[test]
+    fn listed_moderators_and_channel_managers_rename_channels() {
+        let (roles, t) = (roles(), tree());
+        let renames = |identity, scope| roles.resolve(who(identity), scope, &t).rename;
+        assert!(
+            renames(M, Scope::Channel(GAMING)) && renames(M, Scope::Channel(DEEP)),
+            "where they are listed, and below"
+        );
+        assert!(!renames(M, Scope::Channel(LOBBY)), "elsewhere");
+        let listed = perms(&roles, &t, M, Scope::Channel(GAMING));
+        assert!(!listed.has(Perm::ManageChannels) && !listed.has(Perm::ManagePermissions), "nothing more");
+        assert!(!renames(MODERATOR, Scope::Channel(GAMING)), "holding the role isn't being listed");
+        assert!(renames(ADMIN, Scope::Channel(LOBBY)) && renames(OWNER, Scope::Channel(LOBBY)));
+        assert!(!renames(ADMIN, Scope::Server), "only a channel is renamed");
+        let room_owner = Subject { client: 9, identity: NOBODY };
+        assert!(roles.resolve(room_owner, Scope::Channel(RAID), &t).rename, "a room's owner manages it");
+        assert!(toml::from_str::<Role>("id = 7\nname = \"x\"\nperms = [\"rename\"]").is_err());
+    }
+
+    #[test]
     fn room_owners_moderate_and_manage_their_room() {
         let (roles, t) = (roles(), tree());
-        let creator = Subject { client: 9, identity: NOBODY };
-        let room = roles.resolve(creator, Scope::Channel(RAID), &t);
+        let room_owner = Subject { client: 9, identity: NOBODY };
+        let room = roles.resolve(room_owner, Scope::Channel(RAID), &t);
         assert!(room.perms.has(Perm::Kick) && room.perms.has(Perm::ManageChannels));
         assert!(!room.perms.has(Perm::Ban));
-        assert_eq!(room.rank, roles.height(RoleId::MODERATOR));
-        assert!(!roles.resolve(creator, Scope::Channel(LOBBY), &t).perms.has(Perm::Kick), "elsewhere");
+        assert!(room.rank > Rank::EVERYONE && room.rank < roles.height(RoleId::MODERATOR));
+        let mut lowest = roles.clone();
+        lowest.ranked.push(Role { id: RoleId(7), name: "DJ".into(), perms: Perms::NONE });
+        assert!(room.rank < lowest.height(RoleId(7)));
+        let moderator = Subject { client: 9, identity: MODERATOR };
+        assert_eq!(
+            roles.resolve(moderator, Scope::Channel(RAID), &t).rank,
+            roles.height(RoleId::MODERATOR),
+            "a role counts"
+        );
+        assert!(!roles.resolve(room_owner, Scope::Channel(LOBBY), &t).perms.has(Perm::Kick), "elsewhere");
         let other = Subject { client: 8, identity: NOBODY };
         assert!(!roles.resolve(other, Scope::Channel(RAID), &t).perms.has(Perm::Kick), "another connection");
     }

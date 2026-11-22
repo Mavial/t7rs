@@ -7,7 +7,7 @@ RUN cargo build --release --locked -p t7-server
 
 FROM gcr.io/distroless/cc-debian12
 COPY --from=build /src/target/release/t7-server /usr/local/bin/t7-server
-# Config, channel tree, admin token and TLS certificate live in this volume;
+# Config, channel tree, roles, bans and TLS certificate live in this volume;
 # a default t7-server.toml and a new certificate are made on first start.
 VOLUME /data
 WORKDIR /data

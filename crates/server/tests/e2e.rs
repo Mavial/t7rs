@@ -1,5 +1,6 @@
 //! Spins up a real server on localhost and drives it with raw protocol clients.
 
+use std::fmt::Write as _;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -108,7 +109,7 @@ async fn join_move_chat_leave() {
     let (mut a, welcome) = TestClient::connect(addr, "alice", None).await;
     let S2C::Welcome { your_id: a_id, channels, clients, .. } = welcome else { panic!("{welcome:?}") };
     assert_eq!(clients.len(), 1);
-    assert_eq!(channels.len(), 6);
+    assert_eq!(channels.len(), 7);
 
     // Duplicate nickname is auto-suffixed.
     let (mut b, welcome) = TestClient::connect(addr, "Alice", None).await;
@@ -403,7 +404,7 @@ async fn error(c: &mut TestClient) -> String {
 
 fn may_in(welcome: &S2C, channel: ChannelId) -> Perms {
     let S2C::Welcome { permissions, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
-    *permissions.channels.get(&channel).unwrap_or_else(|| panic!("no channel {channel}"))
+    permissions.channels.get(&channel).unwrap_or_else(|| panic!("no channel {channel}")).perms
 }
 
 #[tokio::test]
@@ -1273,6 +1274,33 @@ async fn overrides_take_effect_at_once_and_survive_a_restart() {
 }
 
 #[tokio::test]
+async fn deleting_a_role_drops_its_overrides_on_temporary_channels_from_editors_views() {
+    let (_, mut owner, _, _) = start_owned("forget-room-override", HOME).await;
+    let roles = owner.change_roles(RoleChange::Create { name: "DJ".into() }).await;
+    let dj = roles.ranked.last().unwrap().id;
+    owner
+        .send(C2S::CreateChannel {
+            parent: None,
+            settings: settings("Raid"),
+            temporary: true,
+            kind: ChannelKind::Voice,
+        })
+        .await;
+    let raid = id_of(&owner.channels().await, "Raid");
+    owner.send(set(raid, dj, &[Perm::Speak], &[])).await;
+    assert_eq!(owner.overrides(raid).await, [perms::Override::allowing(dj, Perms::of(&[Perm::Speak]))]);
+
+    owner.sync().await;
+    owner.send(C2S::ChangeRoles(RoleChange::Delete { id: dj })).await;
+    let arrived = owner.sync().await;
+    let latest = arrived.iter().rev().find_map(|m| match m {
+        S2C::Channels(list) => Some(list),
+        _ => None,
+    });
+    assert_eq!(overrides_in(latest.expect("a fresh channel list"), raid), []);
+}
+
+#[tokio::test]
 async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs() {
     let (addr, mut owner, _, channels) = start_owned("override-hierarchy", HOME).await;
     let [lobby, hangout] = ["Lobby", "Hangout"].map(|name| id_of(&channels, name));
@@ -1301,4 +1329,275 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     moder.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
     let muted = perms::Override::denying(RoleId::EVERYONE, Perms::of(&[Perm::Speak]));
     assert_eq!(owner.overrides(hangout).await, [muted, granted]);
+}
+
+#[tokio::test]
+async fn listed_moderators_rename_their_channels_and_do_nothing_more() {
+    let (addr, mut owner, _, channels) = start_owned("moderator-rename", HOME).await;
+    let [gaming, squad, hangout] = ["Gaming", "Squad 1", "Hangout"].map(|name| id_of(&channels, name));
+    let (mut listed, _) = TestClient::connect(addr, "listed", None).await;
+    let (mut holder, _) = TestClient::connect(addr, "holder", None).await;
+    owner.send(C2S::SetModerator { channel: gaming, identity: key("listed").identity(), moderator: true }).await;
+    owner.channels().await;
+    owner.change_roles(assign("holder", RoleId::MODERATOR, true)).await;
+
+    let games = ChannelSettings { topic: "Squad up, again".into(), ..settings("Games") };
+    listed.send(C2S::EditChannel { id: gaming, settings: games }).await;
+    let renamed = owner.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.name == "Games"))).await;
+    let S2C::Channels(list) = renamed else { unreachable!() };
+    assert_eq!(list.iter().find(|c| c.id == gaming).unwrap().topic, "Squad up, again");
+    let squad_a = ChannelSettings { max_clients: Some(5), ..settings("Squad A") };
+    listed.send(C2S::EditChannel { id: squad, settings: squad_a }).await;
+    owner.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.name == "Squad A"))).await;
+
+    let limited = ChannelSettings { max_clients: Some(3), ..settings("Games") };
+    listed.send(C2S::EditChannel { id: gaming, settings: limited }).await;
+    assert!(error(&mut listed).await.contains("only change this channel's name and topic"));
+    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Games") };
+    listed.send(C2S::EditChannel { id: gaming, settings: locked }).await;
+    assert!(error(&mut listed).await.contains("only change this channel's name and topic"));
+    listed.send(C2S::DeleteChannel { id: squad }).await;
+    assert!(error(&mut listed).await.contains("can't delete"));
+    listed.send(C2S::MoveChannel { id: squad, parent: None, position: 0 }).await;
+    assert!(error(&mut listed).await.contains("can't move this channel"));
+    listed.send(set(gaming, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
+    assert!(error(&mut listed).await.contains("can't change this channel's permissions"));
+    listed.send(new_channel("Ranked", Some(gaming), ChannelKind::Voice)).await;
+    assert!(error(&mut listed).await.contains("can't create permanent channels"));
+    listed.send(C2S::EditChannel { id: hangout, settings: settings("Mine") }).await;
+    assert_eq!(error(&mut listed).await, "you can't edit this channel", "elsewhere");
+
+    holder.send(C2S::EditChannel { id: gaming, settings: settings("Holder's") }).await;
+    assert_eq!(error(&mut holder).await, "you can't edit this channel");
+}
+
+async fn until_owned_by(c: &mut TestClient, channel: ChannelId, owner: Option<ClientId>) {
+    c.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|ch| ch.id == channel && ch.owner == owner))).await;
+}
+
+#[tokio::test]
+async fn a_room_passes_to_whoever_has_been_in_it_longest() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut a, wa) = TestClient::connect(addr, "a", None).await;
+    let (mut b, wb) = TestClient::connect(addr, "b", None).await;
+    let (mut c, wc) = TestClient::connect(addr, "c", None).await;
+    let (a_id, b_id, c_id) = (welcomed_id(&wa), welcomed_id(&wb), welcomed_id(&wc));
+    let S2C::Welcome { channels, .. } = &wa else { unreachable!() };
+    let lobby = id_of(channels, "Lobby");
+    let raid =
+        C2S::CreateChannel { parent: None, settings: settings("Raid"), temporary: true, kind: ChannelKind::Voice };
+    a.send(raid).await;
+    let raid = id_of(&a.channels().await, "Raid");
+    for (t, id) in [(&mut b, b_id), (&mut c, c_id)] {
+        t.send(C2S::JoinChannel { channel: raid, password: None }).await;
+        a.until(|m| *m == S2C::ClientMoved { id, channel: raid }).await;
+    }
+
+    a.send(C2S::JoinChannel { channel: lobby, password: None }).await;
+    until_owned_by(&mut c, raid, Some(b_id)).await;
+    let powers = |m: &S2C| matches!(m, S2C::Permissions(p) if p.may_in(raid, Perm::Kick));
+    let S2C::Permissions(p) = b.until(powers).await else { unreachable!() };
+    assert!(p.may_in(raid, Perm::ManageChannels) && !p.may_in(lobby, Perm::Kick));
+    a.send(C2S::JoinChannel { channel: raid, password: None }).await;
+    c.until(|m| *m == S2C::ClientMoved { id: a_id, channel: raid }).await;
+    let heard = c.sync().await;
+    assert!(heard.iter().all(|m| !matches!(m, S2C::Channels(_))), "{heard:?}");
+
+    drop(b);
+    until_owned_by(&mut a, raid, Some(c_id)).await;
+}
+
+#[tokio::test]
+async fn joining_a_lobby_opens_a_room_of_your_own() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut ana, wa) = TestClient::connect(addr, "ana", None).await;
+    let (mut ben, wb) = TestClient::connect(addr, "ben", None).await;
+    let (ana_id, ben_id) = (welcomed_id(&wa), welcomed_id(&wb));
+    let S2C::Welcome { channels, .. } = &wa else { unreachable!() };
+    let [lobby, rooms] = ["Lobby", "Create a room"].map(|name| id_of(channels, name));
+
+    ana.send(C2S::JoinChannel { channel: rooms, password: None }).await;
+    let list = ben.channels().await;
+    let room = list.iter().find(|c| c.parent == Some(rooms)).expect("a room in the lobby");
+    assert_eq!((room.name.as_str(), room.temporary, room.owner), ("ana's room", true, Some(ana_id)));
+    let room = room.id;
+    assert_eq!(
+        ben.until(|m| matches!(m, S2C::ClientMoved { .. })).await,
+        S2C::ClientMoved { id: ana_id, channel: room }
+    );
+    let S2C::Permissions(p) = ana.until(|m| matches!(m, S2C::Permissions(p) if p.sees(room))).await else {
+        unreachable!()
+    };
+    assert!(p.may_in(room, Perm::Kick) && p.may_in(room, Perm::ManageChannels) && !p.may_in(rooms, Perm::Kick));
+
+    ben.send(C2S::JoinChannel { channel: rooms, password: None }).await;
+    let S2C::ClientMoved { channel: bens, .. } =
+        ana.until(|m| matches!(m, S2C::ClientMoved { id, .. } if *id == ben_id)).await
+    else {
+        unreachable!()
+    };
+    assert_ne!(bens, room);
+    let S2C::Welcome { clients, channels, .. } = TestClient::connect(addr, "cid", None).await.1 else { unreachable!() };
+    assert!(clients.iter().all(|c| c.channel != rooms), "{clients:?}");
+    assert_eq!(channels.iter().find(|c| c.id == bens).unwrap().name, "ben's room");
+
+    ana.send(C2S::JoinChannel { channel: lobby, password: None }).await;
+    let gone = |m: &S2C| matches!(m, S2C::Channels(l) if l.iter().all(|c| c.id != room));
+    let S2C::Channels(list) = ben.until(gone).await else { unreachable!() };
+    assert!(list.iter().any(|c| c.id == bens), "Ben's stays");
+}
+
+#[tokio::test]
+async fn a_full_server_opens_no_room() {
+    let mut cfg = String::from("[[channels]]\nname = \"Lobby\"\n\n[[channels]]\nname = \"Rooms\"\nkind = \"lobby\"\n");
+    for i in 2..MAX_CHANNELS {
+        writeln!(cfg, "\n[[channels]]\nname = \"Channel {i}\"").unwrap();
+    }
+    let addr = start(&cfg).await;
+    let (mut ana, wa) = TestClient::connect(addr, "ana", None).await;
+    let S2C::Welcome { channels, .. } = &wa else { unreachable!() };
+    assert_eq!(channels.len(), MAX_CHANNELS);
+    ana.send(C2S::JoinChannel { channel: id_of(channels, "Rooms"), password: None }).await;
+    let refusal = error(&mut ana).await;
+    assert!(refusal.contains("no room for you there") && refusal.contains("maximum of 200 channels"), "{refusal}");
+    let after = ana.sync().await;
+    assert!(after.iter().all(|m| !matches!(m, S2C::ClientMoved { .. } | S2C::Channels(_))), "{after:?}");
+}
+
+#[tokio::test]
+async fn voice_is_dropped_from_those_who_may_not_speak_or_are_server_muted() {
+    let (addr, mut owner, _, channels) = start_owned("speak", HOME).await;
+    let [lobby, hangout] = ["Lobby", "Hangout"].map(|name| id_of(&channels, name));
+    let (_talker, wt) = TestClient::connect(addr, "talker", None).await;
+    let (_loud, wl) = TestClient::connect(addr, "loud", None).await;
+    let (mut quiet, wq) = TestClient::connect(addr, "quiet", None).await;
+    let (mut ear, we) = TestClient::connect(addr, "ear", None).await;
+    let (loud_id, quiet_id) = (welcomed_id(&wl), welcomed_id(&wq));
+    let mut v = Vec::new();
+    for welcome in [&wt, &wl, &wq, &we] {
+        v.push(Voice::open(addr, welcome).await);
+    }
+    let [vt, vl, vq, ve] = &mut v[..] else { unreachable!() };
+    vq.send(voice::ToServer::Audio { seq: 1, payload: &[1] }).await;
+    assert_eq!(ve.recv_owned().await, Some(Got::Audio(vq.id, 1, vec![1])), "everyone may speak at first");
+
+    owner.change_roles(assign("talker", RoleId::MODERATOR, true)).await;
+    owner.change_roles(assign("loud", RoleId::MODERATOR, true)).await;
+    owner.send(set(lobby, RoleId::MODERATOR, &[Perm::Speak], &[])).await;
+    owner.send(set(lobby, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
+    let silenced = S2C::ClientSpeech { id: quiet_id, speech: Speech::NotHere };
+    for c in [&mut ear, &mut quiet] {
+        c.until(|m| *m == silenced).await;
+    }
+    vq.send(voice::ToServer::Audio { seq: 2, payload: &[2] }).await;
+    assert_eq!(ve.recv_owned().await, None, "Speak-denied voice was forwarded");
+    vt.send(voice::ToServer::Audio { seq: 1, payload: &[3] }).await;
+    assert_eq!(ve.recv_owned().await, Some(Got::Audio(vt.id, 1, vec![3])));
+    let S2C::Welcome { clients, .. } = TestClient::connect(addr, "late", None).await.1 else { unreachable!() };
+    assert_eq!(clients.iter().find(|c| c.id == quiet_id).unwrap().speech, Speech::NotHere);
+
+    vl.send(voice::ToServer::Audio { seq: 1, payload: &[4] }).await;
+    assert_eq!(ve.recv_owned().await, Some(Got::Audio(vl.id, 1, vec![4])));
+    owner.send(C2S::ServerMute { target: loud_id, muted: true }).await;
+    ear.until(|m| *m == S2C::ClientSpeech { id: loud_id, speech: Speech::ServerMuted }).await;
+    vl.send(voice::ToServer::Audio { seq: 2, payload: &[5] }).await;
+    assert_eq!(ve.recv_owned().await, None, "server-muted voice was forwarded");
+    vt.send(voice::ToServer::Audio { seq: 2, payload: &[6] }).await;
+    assert_eq!(ve.recv_owned().await, Some(Got::Audio(vt.id, 2, vec![6])));
+
+    quiet.send(C2S::JoinChannel { channel: hangout, password: None }).await;
+    ear.until(|m| *m == S2C::ClientSpeech { id: quiet_id, speech: Speech::Allowed }).await;
+}
+
+#[tokio::test]
+async fn a_server_mute_holds_across_reconnects_until_lifted_or_a_restart() {
+    let dir = data_dir("server-mute");
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (mut owner, owner_id, _) = claim(addr, &dir, HOME).await;
+    let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
+    let (user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
+    moder.until(|m| matches!(m, S2C::Permissions(p) if p.server.has(Perm::MuteMembers))).await;
+
+    moder.send(C2S::ServerMute { target: owner_id, muted: true }).await;
+    assert!(error(&mut moder).await.contains("their role isn't below yours"));
+    moder.send(C2S::ServerMute { target: user_id, muted: true }).await;
+    owner.until(|m| *m == S2C::ClientSpeech { id: user_id, speech: Speech::ServerMuted }).await;
+
+    drop(user);
+    owner.until(|m| matches!(m, S2C::ClientLeft { id, .. } if *id == user_id)).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    let S2C::Welcome { clients, .. } = &wu else { unreachable!() };
+    assert_eq!(clients.iter().find(|c| c.id == user_id).unwrap().speech, Speech::ServerMuted);
+    let (mut vu, mut vm) = (Voice::open(addr, &wu).await, Voice::open(addr, &wm).await);
+    vu.send(voice::ToServer::Audio { seq: 1, payload: &[1] }).await;
+    assert_eq!(vm.recv_owned().await, None, "server-muted voice was forwarded");
+
+    user.send(C2S::ServerMute { target: user_id, muted: false }).await;
+    assert!(error(&mut user).await.contains("can't unmute"));
+    moder.send(C2S::ServerMute { target: user_id, muted: false }).await;
+    user.until(|m| *m == S2C::ClientSpeech { id: user_id, speech: Speech::Allowed }).await;
+    vu.send(voice::ToServer::Audio { seq: 2, payload: &[2] }).await;
+    assert_eq!(vm.recv_owned().await, Some(Got::Audio(user_id, 2, vec![2])));
+
+    moder.send(C2S::ServerMute { target: user_id, muted: true }).await;
+    user.until(|m| *m == S2C::ClientSpeech { id: user_id, speech: Speech::ServerMuted }).await;
+    task.abort();
+    drop((owner, moder, user));
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (_, wu) = TestClient::connect(addr, "user", None).await;
+    let S2C::Welcome { your_id, clients, .. } = &wu else { panic!("not welcomed: {wu:?}") };
+    assert_eq!(clients.iter().find(|c| c.id == *your_id).unwrap().speech, Speech::Allowed);
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn people_move_only_those_below_them_into_channels_they_can_see() {
+    let dir = data_dir("move-members");
+    let (addr, task) = start_in(PRIVATE, Some(dir.clone())).await;
+    let (mut owner, _, _) = claim(addr, &dir, HOME).await;
+    let S2C::Welcome { channels, .. } = TestClient::connect(addr, "admin", None).await.1 else { unreachable!() };
+    let [lobby, office, afk] = ["Lobby", "Office", "AFK"].map(|name| id_of(&channels, name));
+    let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
+    let (mut mover, _) = TestClient::connect(addr, "mover", None).await;
+    let (_boss, wb) = TestClient::connect(addr, "boss", None).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let (boss_id, user_id) = (welcomed_id(&wb), welcomed_id(&wu));
+    owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
+    owner.change_roles(assign("boss", RoleId::ADMIN, true)).await;
+    let roles = owner.change_roles(RoleChange::Create { name: "Mover".into() }).await;
+    let movers = roles.ranked.last().unwrap().id;
+    let perms = Perms::of(&[Perm::View, Perm::Join, Perm::MoveMembers]);
+    owner.change_roles(RoleChange::SetPermissions { id: movers, perms }).await;
+    owner.change_roles(assign("mover", movers, true)).await;
+    moder.until(|m| matches!(m, S2C::Permissions(p) if p.sees(office))).await;
+
+    moder.send(C2S::MoveMember { target: user_id, channel: afk }).await;
+    user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: afk }).await;
+
+    moder.send(C2S::MoveMember { target: user_id, channel: office }).await;
+    assert_eq!(error(&mut moder).await, "user can't see Office");
+    moder.send(C2S::MoveMember { target: boss_id, channel: afk }).await;
+    assert!(error(&mut moder).await.contains("can't move boss: their role isn't below yours"));
+    user.send(C2S::MoveMember { target: boss_id, channel: afk }).await;
+    assert_eq!(error(&mut user).await, "you can't move boss");
+
+    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Lobby") };
+    owner.send(C2S::EditChannel { id: lobby, settings: locked }).await;
+    mover.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.id == lobby && c.has_password))).await;
+    mover.send(C2S::MoveMember { target: user_id, channel: lobby }).await;
+    assert_eq!(error(&mut mover).await, "Lobby has a password");
+    moder.send(C2S::MoveMember { target: user_id, channel: lobby }).await;
+    user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: lobby }).await;
+
+    let den = C2S::CreateChannel { parent: None, settings: settings("Den"), temporary: true, kind: ChannelKind::Voice };
+    user.send(den).await;
+    moder.until(|m| matches!(m, S2C::ClientMoved { id, channel } if *id == user_id && *channel != lobby)).await;
+    moder.send(C2S::MoveMember { target: user_id, channel: afk }).await;
+    user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: afk }).await;
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
 }
