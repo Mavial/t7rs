@@ -15,6 +15,9 @@ use crate::theme;
 const SETTINGS_KEY: &str = "t7-settings";
 const MAX_LINES: usize = 1000;
 const MAX_RECENT: usize = 8;
+/// Server prefilled for first-time users. Set at build time, e.g.
+/// `T7_DEFAULT_SERVER=example.com cargo build --release -p t7-client`.
+const DEFAULT_SERVER: Option<&str> = option_env!("T7_DEFAULT_SERVER");
 
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -126,6 +129,9 @@ impl App {
         if let Some(l) = launch {
             let nick = l.nickname.unwrap_or_else(|| app.settings.nickname.clone());
             app.connect(l.address, nick, String::new());
+        } else if app.settings.recent.is_empty() && DEFAULT_SERVER.is_some() {
+            // First run of a build with a baked-in server: just ask for a nickname.
+            app.open_connect_form();
         }
         app
     }
@@ -138,7 +144,7 @@ impl App {
             .recent
             .first()
             .map(|r| r.address.clone())
-            .unwrap_or_else(|| "localhost".into());
+            .unwrap_or_else(|| DEFAULT_SERVER.unwrap_or("localhost").into());
         self.form = Some(ConnectForm {
             address,
             nickname: self.settings.nickname.clone(),
@@ -826,11 +832,12 @@ impl App {
             ui.add_space(14.0);
 
             let address = field(ui, "Server address", &mut form.address, false);
+            let nickname = field(ui, "Nickname", &mut form.nickname, false);
             if !form.focus_requested {
-                address.request_focus();
+                // Start where typing is needed: the address, or the nickname if it's prefilled.
+                if form.address.trim().is_empty() { address } else { nickname }.request_focus();
                 form.focus_requested = true;
             }
-            field(ui, "Nickname", &mut form.nickname, false);
             field(ui, "Password (optional)", &mut form.password, true);
 
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {

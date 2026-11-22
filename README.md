@@ -26,6 +26,18 @@ cargo build --release
 
 The default port is **9987/TCP**. When connecting you can leave the port off.
 
+## Sharing the client with friends
+
+Bake your server in as the default, so first-time users only pick a nickname:
+
+```sh
+T7_DEFAULT_SERVER=your.server.ip cargo build --release -p t7-client
+```
+
+On Windows the C runtime is linked statically (`.cargo/config.toml`), so the single
+`t7-client.exe` runs without installing anything. To run several clients on one
+machine with separate settings, set `T7_PROFILE=<name>`.
+
 ## Using the client
 
 | Action | How |
