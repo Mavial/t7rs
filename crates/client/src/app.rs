@@ -6,7 +6,7 @@ use egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, text::LayoutJob, vec2,
 };
 use t7_proto::model::ServerView;
-use t7_proto::perms::{Perm, Perms, Rank, RoleChange, RoleId, Roles};
+use t7_proto::perms::{Perm, Perms, Rank, RoleChange, RoleId, Roles, Scope};
 use t7_proto::tls::Fingerprint;
 use t7_proto::{
     BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason, MAX_CHANNEL_DEPTH,
@@ -389,7 +389,7 @@ impl App {
     fn open_create_channel(&mut self, parent: Option<ChannelId>) {
         let parent_temporary =
             parent.and_then(|p| self.view.as_ref()?.channels.get(&p).map(|c| c.temporary)).unwrap_or(false);
-        let permanent = self.view.as_ref().is_some_and(|v| manages(v, parent));
+        let permanent = self.view.as_ref().is_some_and(|v| manages(v, Scope::within(parent)));
         self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
             editing: None,
             parent,
@@ -1062,7 +1062,7 @@ impl App {
                             color,
                         );
                         egui::Popup::menu(&resp).show(|ui| {
-                            let label = if manages(view, None) {
+                            let label = if manages(view, Scope::Server) {
                                 Some("Create channel…")
                             } else {
                                 view.may(Perm::CreateTemporary).then_some("Create temporary channel…")
@@ -1095,8 +1095,8 @@ impl App {
                     let pointer = ui.input(|i| i.pointer.interact_pos());
                     for &(depth, ch_id) in view.tree() {
                         let ch = &view.channels[&ch_id];
-                        let manages_it = manages(view, Some(ch_id));
-                        let may_rearrange = manages_it && manages(view, ch.parent);
+                        let manages_it = manages(view, Scope::Channel(ch_id));
+                        let may_rearrange = manages_it && manages(view, Scope::within(ch.parent));
                         let clients = view.clients_in(ch_id);
                         let indent = depth as f32 * 18.0;
                         let is_mine = mine == Some(ch_id);
@@ -1108,7 +1108,7 @@ impl App {
                             (Some(dragged), Some(pos)) if resp.contains_pointer() => {
                                 let zone = Zone::at((pos.y - rect.top()) / rect.height());
                                 match channel_drop::drop_target(&view.channels, dragged, ch_id, zone) {
-                                    Outcome::Move(to) if !manages(view, to.parent) => None,
+                                    Outcome::Move(to) if !manages(view, Scope::within(to.parent)) => None,
                                     outcome => Some((zone, outcome)),
                                 }
                             }
@@ -2153,7 +2153,7 @@ impl App {
             ChannelDialog::Form(f) => f.parent,
             _ => None,
         };
-        let may_create_permanent = view.is_some_and(|v| manages(v, parent));
+        let may_create_permanent = view.is_some_and(|v| manages(v, Scope::within(parent)));
         let editing = match dialog {
             ChannelDialog::Form(f) => f.editing,
             _ => None,
@@ -2340,10 +2340,10 @@ impl App {
     }
 }
 
-fn manages(view: &ServerView, place: Option<ChannelId>) -> bool {
-    match place {
-        Some(p) => view.may_in(p, Perm::ManageChannels),
-        None => view.may(Perm::ManageChannels),
+fn manages(view: &ServerView, scope: Scope) -> bool {
+    match scope {
+        Scope::Channel(id) => view.may_in(id, Perm::ManageChannels),
+        Scope::Server => view.may(Perm::ManageChannels),
     }
 }
 

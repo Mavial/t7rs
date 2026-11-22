@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use t7_proto::perms::{Perm, Permissions, Rank, RoleChange, RoleId, Standing, Subject};
+use t7_proto::perms::{Perm, Permissions, Rank, RoleChange, RoleId, Scope, Standing, Subject};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     BanId, BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason,
@@ -355,8 +355,11 @@ impl Server {
             C2S::EditChannel { id: channel, settings } => self.edit_channel(id, channel, &settings),
             C2S::MoveChannel { id: channel, parent, position } => {
                 let old_parent = self.channels.get(channel).and_then(|c| c.parent);
-                let manages = |at| self.may(id, Perm::ManageChannels, at);
-                if !(manages(Some(channel)) && manages(parent) && manages(old_parent)) {
+                let manages = |scope| self.may(id, Perm::ManageChannels, scope);
+                if !(manages(Scope::Channel(channel))
+                    && manages(Scope::within(parent))
+                    && manages(Scope::within(old_parent)))
+                {
                     return self.error(id, "you can't move this channel there");
                 }
                 match self.channels.move_to(channel, parent, position) {
@@ -366,7 +369,7 @@ impl Server {
             }
             C2S::DeleteChannel { id: channel } => self.delete_channel(id, channel),
             C2S::SetDefaultChannel { id: channel } => {
-                if !self.may(id, Perm::ManageChannels, None) {
+                if !self.may(id, Perm::ManageChannels, Scope::Server) {
                     return self.error(id, "you can't change the default channel");
                 }
                 match self.channels.set_default(channel) {
@@ -376,7 +379,7 @@ impl Server {
             }
             C2S::ClaimOwnership { token } => self.claim(id, &token),
             C2S::SetModerator { channel, identity, moderator } => {
-                let mine = self.standing(id, Some(channel));
+                let mine = self.standing(id, Scope::Channel(channel));
                 let roles = self.roles.roles();
                 if !mine.perms.has(Perm::ManagePermissions) || mine.rank <= roles.height(RoleId::MODERATOR) {
                     return self.error(id, "you can't choose who moderates this channel");
@@ -402,7 +405,7 @@ impl Server {
     }
 
     fn change_roles(&mut self, id: ClientId, change: RoleChange) {
-        let mine = self.standing(id, None);
+        let mine = self.standing(id, Scope::Server);
         if !mine.perms.has(Perm::ManageRoles) {
             return self.error(id, "you can't manage roles");
         }
@@ -449,7 +452,7 @@ impl Server {
         if self.clients[&id].info.channel == channel {
             return;
         }
-        let may = self.standing(id, Some(channel)).perms;
+        let may = self.standing(id, Scope::Channel(channel)).perms;
         if !may.has(Perm::Join) {
             return self.error(id, "you can't join this channel");
         }
@@ -469,19 +472,19 @@ impl Server {
         self.broadcast(&S2C::ClientMoved { id, channel }, |_| true);
     }
 
-    fn standing(&self, id: ClientId, channel: Option<ChannelId>) -> Standing {
-        self.roles.roles().resolve(self.clients[&id].subject(), channel, &self.channels)
+    fn standing(&self, id: ClientId, scope: Scope) -> Standing {
+        self.roles.roles().resolve(self.clients[&id].subject(), scope, &self.channels)
     }
 
-    fn may(&self, id: ClientId, perm: Perm, channel: Option<ChannelId>) -> bool {
-        self.standing(id, channel).perms.has(perm)
+    fn may(&self, id: ClientId, perm: Perm, scope: Scope) -> bool {
+        self.standing(id, scope).perms.has(perm)
     }
 
     fn permissions_of(&self, who: Subject) -> Permissions {
         let roles = self.roles.roles();
-        let in_channel = |c| (c, roles.resolve(who, Some(c), &self.channels).perms);
+        let in_channel = |c| (c, roles.resolve(who, Scope::Channel(c), &self.channels).perms);
         Permissions {
-            server: roles.resolve(who, None, &self.channels).perms,
+            server: roles.resolve(who, Scope::Server, &self.channels).perms,
             channels: self.channels.ids().map(in_channel).collect(),
         }
     }
@@ -522,7 +525,7 @@ impl Server {
         } else {
             (Perm::ManageChannels, "you can't create permanent channels here")
         };
-        if !self.may(id, needed, parent) {
+        if !self.may(id, needed, Scope::within(parent)) {
             return self.error(id, refusal);
         }
         if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
@@ -539,7 +542,7 @@ impl Server {
     }
 
     fn edit_channel(&mut self, id: ClientId, channel: ChannelId, settings: &ChannelSettings) {
-        if !self.may(id, Perm::ManageChannels, Some(channel)) {
+        if !self.may(id, Perm::ManageChannels, Scope::Channel(channel)) {
             return self.error(id, "you can't edit this channel");
         }
         let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
@@ -550,7 +553,7 @@ impl Server {
     }
 
     fn delete_channel(&mut self, id: ClientId, channel: ChannelId) {
-        if !self.may(id, Perm::ManageChannels, Some(channel)) {
+        if !self.may(id, Perm::ManageChannels, Scope::Channel(channel)) {
             return self.error(id, "you can't delete this channel");
         }
         let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
@@ -581,14 +584,8 @@ impl Server {
         self.refresh(true);
     }
 
-    fn refusal(
-        &self,
-        id: ClientId,
-        target: ClientId,
-        (perm, verb): (Perm, &str),
-        channel: Option<ChannelId>,
-    ) -> Option<String> {
-        let (mine, theirs) = (self.standing(id, channel), self.standing(target, channel));
+    fn refusal(&self, id: ClientId, target: ClientId, (perm, verb): (Perm, &str), scope: Scope) -> Option<String> {
+        let (mine, theirs) = (self.standing(id, scope), self.standing(target, scope));
         let (actor, target) = (&self.clients[&id].info, &self.clients[&target].info);
         let name = &target.nickname;
         if !mine.perms.has(perm) {
@@ -605,11 +602,11 @@ impl Server {
     fn kick(&mut self, id: ClientId, target: ClientId, from_server: bool, reason: &str) {
         let Some(reason) = self.reason(id, reason) else { return };
         let Some(t) = self.clients.get(&target) else { return self.error(id, "that user is no longer online") };
-        let channel = (!from_server).then_some(t.info.channel);
-        if let Some(msg) = self.refusal(id, target, (Perm::Kick, "kick"), channel) {
+        let scope = if from_server { Scope::Server } else { Scope::Channel(t.info.channel) };
+        if let Some(msg) = self.refusal(id, target, (Perm::Kick, "kick"), scope) {
             return self.error(id, &msg);
         }
-        if channel == Some(self.channels.default_id()) {
+        if scope == Scope::Channel(self.channels.default_id()) {
             let msg = format!("{} is in the default channel: there is nowhere to kick them to", t.info.nickname);
             return self.error(id, &msg);
         }
@@ -646,7 +643,7 @@ impl Server {
     fn ban(&mut self, id: ClientId, target: ClientId, duration_secs: Option<u64>, reason: &str, include_ip: bool) {
         let Some(reason) = self.reason(id, reason) else { return };
         let Some(t) = self.clients.get(&target) else { return self.error(id, "that user is no longer online") };
-        if let Some(msg) = self.refusal(id, target, (Perm::Ban, "ban"), None) {
+        if let Some(msg) = self.refusal(id, target, (Perm::Ban, "ban"), Scope::Server) {
             return self.error(id, &msg);
         }
         if duration_secs == Some(0) {
@@ -688,7 +685,7 @@ impl Server {
     }
 
     fn list_bans(&mut self, id: ClientId) {
-        if !self.may(id, Perm::Ban, None) {
+        if !self.may(id, Perm::Ban, Scope::Server) {
             return self.error(id, "you can't see the ban list");
         }
         if self.bans.prune(unix_now()) {
@@ -698,7 +695,7 @@ impl Server {
     }
 
     fn unban(&mut self, id: ClientId, ban: BanId) {
-        if !self.may(id, Perm::Ban, None) {
+        if !self.may(id, Perm::Ban, Scope::Server) {
             return self.error(id, "you can't lift bans");
         }
         match self.bans.remove(ban) {
@@ -774,8 +771,8 @@ impl Server {
             return self.error(id, "message is too long");
         }
         let channel = self.clients[&id].info.channel;
-        let place = matches!(target, TextTarget::Channel).then_some(channel);
-        if !self.may(id, Perm::SendMessages, place) {
+        let scope = if target == TextTarget::Channel { Scope::Channel(channel) } else { Scope::Server };
+        if !self.may(id, Perm::SendMessages, scope) {
             return self.error(id, "you can't send messages here");
         }
         if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {

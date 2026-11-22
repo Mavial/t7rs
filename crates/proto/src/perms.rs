@@ -296,6 +296,18 @@ pub struct Subject {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Server,
+    Channel(ChannelId),
+}
+
+impl Scope {
+    pub fn within(parent: Option<ChannelId>) -> Scope {
+        parent.map_or(Scope::Server, Scope::Channel)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Standing {
     pub perms: Perms,
     pub rank: Rank,
@@ -369,7 +381,7 @@ impl Roles {
         self.role(role).map_or(Perms::NONE, |r| r.perms)
     }
 
-    /// What `who` may do in `channel`, or on the server as a whole with `None`.
+    /// What `who` may do in a channel, or on the server as a whole.
     ///
     /// The owner may do everything. Anyone else has what their roles grant,
     /// Everyone's included. In a channel, and every channel below it, its
@@ -377,12 +389,15 @@ impl Roles {
     /// role. Then each permission a channel sets for one of their roles
     /// overrides what the roles grant; the closest channel that sets it wins,
     /// and there an allow beats a deny.
-    pub fn resolve(&self, who: Subject, channel: Option<ChannelId>, tree: &impl ChannelTree) -> Standing {
+    pub fn resolve(&self, who: Subject, scope: Scope, tree: &impl ChannelTree) -> Standing {
         if self.owner == Some(who.identity) {
             return Standing { perms: Perms::ALL, rank: Rank::OWNER };
         }
         let mut path = Vec::new();
-        let mut at = channel.and_then(|id| tree.channel(id));
+        let mut at = match scope {
+            Scope::Server => None,
+            Scope::Channel(id) => tree.channel(id),
+        };
         while let Some(c) = at {
             path.push(c);
             at = c.parent.and_then(|p| tree.channel(p));
@@ -500,8 +515,8 @@ mod tests {
         Subject { client: 1, identity }
     }
 
-    fn perms(roles: &Roles, tree: &Tree, identity: Identity, channel: Option<ChannelId>) -> Perms {
-        roles.resolve(who(identity), channel, tree).perms
+    fn perms(roles: &Roles, tree: &Tree, identity: Identity, scope: Scope) -> Perms {
+        roles.resolve(who(identity), scope, tree).perms
     }
 
     #[test]
@@ -526,11 +541,11 @@ mod tests {
     fn a_fresh_server_has_the_default_roles() {
         let (roles, t) = (roles(), tree());
         let everyone = Perms::of(&[Perm::View, Perm::Join, Perm::Speak, Perm::SendMessages, Perm::CreateTemporary]);
-        assert_eq!(perms(&roles, &t, NOBODY, None), everyone);
+        assert_eq!(perms(&roles, &t, NOBODY, Scope::Server), everyone);
         let moderator = everyone | Perms::of(&[Perm::Bypass, Perm::MoveMembers, Perm::MuteMembers, Perm::Kick]);
-        assert_eq!(perms(&roles, &t, MODERATOR, None), moderator);
-        assert_eq!(perms(&roles, &t, ADMIN, None), Perms::ALL);
-        assert_eq!(perms(&roles, &t, OWNER, Some(AFK)), Perms::ALL);
+        assert_eq!(perms(&roles, &t, MODERATOR, Scope::Server), moderator);
+        assert_eq!(perms(&roles, &t, ADMIN, Scope::Server), Perms::ALL);
+        assert_eq!(perms(&roles, &t, OWNER, Scope::Channel(AFK)), Perms::ALL);
     }
 
     #[test]
@@ -558,27 +573,31 @@ mod tests {
         let (roles, t) = (roles(), tree());
         let moderator = roles.role(RoleId::MODERATOR).unwrap().perms;
         for channel in [GAMING, SQUAD, DEEP] {
-            let standing = roles.resolve(who(M), Some(channel), &t);
+            let standing = roles.resolve(who(M), Scope::Channel(channel), &t);
             assert_eq!(standing, Standing { perms: moderator, rank: roles.height(RoleId::MODERATOR) }, "{channel}");
         }
-        for channel in [None, Some(LOBBY), Some(AFK)] {
-            assert_eq!(roles.resolve(who(M), channel, &t).rank, Rank::EVERYONE, "{channel:?}");
-            assert!(!perms(&roles, &t, M, channel).has(Perm::Kick), "{channel:?}");
+        for scope in [Scope::Server, Scope::Channel(LOBBY), Scope::Channel(AFK)] {
+            assert_eq!(roles.resolve(who(M), scope, &t).rank, Rank::EVERYONE, "{scope:?}");
+            assert!(!perms(&roles, &t, M, scope).has(Perm::Kick), "{scope:?}");
         }
-        assert_eq!(roles.resolve(who(ADMIN), Some(GAMING), &t).rank, roles.rank(ADMIN), "an admin stays an admin");
+        assert_eq!(
+            roles.resolve(who(ADMIN), Scope::Channel(GAMING), &t).rank,
+            roles.rank(ADMIN),
+            "an admin stays an admin"
+        );
     }
 
     #[test]
     fn room_owners_moderate_and_manage_their_room() {
         let (roles, t) = (roles(), tree());
         let creator = Subject { client: 9, identity: NOBODY };
-        let room = roles.resolve(creator, Some(RAID), &t);
+        let room = roles.resolve(creator, Scope::Channel(RAID), &t);
         assert!(room.perms.has(Perm::Kick) && room.perms.has(Perm::ManageChannels));
         assert!(!room.perms.has(Perm::Ban));
         assert_eq!(room.rank, roles.height(RoleId::MODERATOR));
-        assert!(!roles.resolve(creator, Some(LOBBY), &t).perms.has(Perm::Kick), "elsewhere");
+        assert!(!roles.resolve(creator, Scope::Channel(LOBBY), &t).perms.has(Perm::Kick), "elsewhere");
         let other = Subject { client: 8, identity: NOBODY };
-        assert!(!roles.resolve(other, Some(RAID), &t).perms.has(Perm::Kick), "another connection");
+        assert!(!roles.resolve(other, Scope::Channel(RAID), &t).perms.has(Perm::Kick), "another connection");
     }
 
     #[test]
@@ -589,21 +608,21 @@ mod tests {
         t.overrides.insert(SQUAD, vec![(RoleId::EVERYONE, Override::allowing(speak))]);
         t.overrides.insert(DEEP, vec![(RoleId::MODERATOR, Override::allowing(view))]);
 
-        assert!(!perms(&roles, &t, NOBODY, Some(GAMING)).has(Perm::View));
-        assert!(!perms(&roles, &t, NOBODY, Some(SQUAD)).has(Perm::View), "inherited from Gaming");
-        assert!(perms(&roles, &t, NOBODY, Some(SQUAD)).has(Perm::Speak), "Squad's own setting is closer");
-        assert!(perms(&roles, &t, NOBODY, Some(LOBBY)).has(Perm::View), "elsewhere");
-        assert!(perms(&roles, &t, MODERATOR, Some(DEEP)).has(Perm::View), "the moderators' allow is closer");
-        assert!(!perms(&roles, &t, NOBODY, Some(DEEP)).has(Perm::View));
+        assert!(!perms(&roles, &t, NOBODY, Scope::Channel(GAMING)).has(Perm::View));
+        assert!(!perms(&roles, &t, NOBODY, Scope::Channel(SQUAD)).has(Perm::View), "inherited from Gaming");
+        assert!(perms(&roles, &t, NOBODY, Scope::Channel(SQUAD)).has(Perm::Speak), "Squad's own setting is closer");
+        assert!(perms(&roles, &t, NOBODY, Scope::Channel(LOBBY)).has(Perm::View), "elsewhere");
+        assert!(perms(&roles, &t, MODERATOR, Scope::Channel(DEEP)).has(Perm::View), "the moderators' allow is closer");
+        assert!(!perms(&roles, &t, NOBODY, Scope::Channel(DEEP)).has(Perm::View));
 
         t.overrides.insert(
             GAMING,
             vec![(RoleId::EVERYONE, Override::denying(view)), (RoleId::MODERATOR, Override::allowing(view))],
         );
-        assert!(perms(&roles, &t, MODERATOR, Some(GAMING)).has(Perm::View));
-        assert!(perms(&roles, &t, M, Some(SQUAD)).has(Perm::View), "listed moderators hold the role there");
-        assert!(!perms(&roles, &t, NOBODY, Some(GAMING)).has(Perm::View));
-        assert_eq!(perms(&roles, &t, OWNER, Some(GAMING)), Perms::ALL, "nothing overrides the owner");
-        assert_eq!(perms(&roles, &t, NOBODY, None), roles.everyone, "nor applies to the server as a whole");
+        assert!(perms(&roles, &t, MODERATOR, Scope::Channel(GAMING)).has(Perm::View));
+        assert!(perms(&roles, &t, M, Scope::Channel(SQUAD)).has(Perm::View), "listed moderators hold the role there");
+        assert!(!perms(&roles, &t, NOBODY, Scope::Channel(GAMING)).has(Perm::View));
+        assert_eq!(perms(&roles, &t, OWNER, Scope::Channel(GAMING)), Perms::ALL, "nothing overrides the owner");
+        assert_eq!(perms(&roles, &t, NOBODY, Scope::Server), roles.everyone, "nor applies to the server as a whole");
     }
 }
