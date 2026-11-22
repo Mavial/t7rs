@@ -683,6 +683,28 @@ async fn ip_bans_eject_everyone_at_that_address() {
 }
 
 #[tokio::test]
+async fn only_admins_rearrange_channels() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    let afk = id_of(&channels, "AFK");
+    // Even a moderator of the channel may not.
+    let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
+    admin.send(C2S::SetModerator { channel: afk, identity: key("mod").identity(), moderator: true }).await;
+    let mut before = moder.channels().await;
+
+    moder.send(C2S::MoveChannel { id: afk, parent: None, position: 0 }).await;
+    assert!(error(&mut moder).await.contains("only admins"));
+    moder.send(C2S::SetDefaultChannel { id: afk }).await;
+    assert!(error(&mut moder).await.contains("only admins"));
+
+    let (_, welcome) = TestClient::connect(addr, "later", None).await;
+    let S2C::Welcome { channels: mut after, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
+    before.sort_by_key(|c| c.id);
+    after.sort_by_key(|c| c.id);
+    assert_eq!(after, before, "the channel tree changed");
+}
+
+#[tokio::test]
 async fn temporary_bans_end() {
     let addr = start(&with_admin_token("t")).await;
     let (mut admin, _, _) = admin_login(addr, ADMIN_IP).await;
