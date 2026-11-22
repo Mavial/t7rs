@@ -47,7 +47,7 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Connect | `Ctrl+S`, the Connect button, or click a recent server |
 | Switch channel | Double-click a channel, drag yourself onto it, or right-click → Join. Channels with a lock ask for a password |
 | New channel | The ⋯ button next to CHANNELS, or right-click a channel → Create sub-channel. Yours are temporary: they disappear once everyone has left |
-| Edit, rearrange, delete | Right-click a channel. Anyone can edit or delete the temporary channels they made. Moderators can edit their channels, and admins can do everything |
+| Edit, rearrange, delete | Right-click a channel. Admins can also drag a channel above, below or into another one. Anyone can edit or delete the temporary channels they made. Moderators can edit their channels, and admins can do everything |
 | Become admin | ⋯ → Admin login, with the server's admin token. T7 remembers it per server |
 | Kick, ban, choose moderators | Right-click a user. The menu shows what your role allows. See [Permissions](#permissions) |
 | Ban list | ⋯ → Bans… (admins), with Unban |
@@ -273,11 +273,6 @@ variable sets the address prefilled for first-time users.
 `cargo run -p t7-release -- keygen FILE` makes a new signing key. Its public
 half goes in `crates/client/src/update.rs`; builds signed with a different key
 are refused, so changing keys means one manual download for everyone.
-
-## Roadmap
-
-1. Permissions beyond admin: kick/ban, channel moderators.
-2. Drag-and-drop to rearrange channels.
 
 ## License
 
