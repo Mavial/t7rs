@@ -21,7 +21,7 @@ use t7_proto::{
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::bans::{Bans, NewBan, describe_duration};
+use crate::bans::{self, Bans, NewBan, describe_duration};
 use crate::channels::Channels;
 
 /// A complete, ready-to-write frame shared between all recipients.
@@ -517,9 +517,8 @@ impl Server {
             banned_by: actor.info.nickname.clone(),
             duration_secs,
         };
-        let ban = self.bans.add(ban, unix_now());
+        let ban = self.bans.add(ban, unix_now()).clone();
         tracing::info!(id = ban.id, identity = %ban.identity.to_hex(), ip = ?ban.ip, by = %ban.banned_by, "ban added");
-        let identity = ban.identity;
         self.save_bans();
 
         let length = match duration_secs {
@@ -527,8 +526,14 @@ impl Server {
             None => "for good".into(),
         };
         let notice = if reason.is_empty() { format!("banned {length}") } else { format!("banned {length} ({reason})") };
-        let connected: Vec<ClientId> =
-            self.clients.values().filter(|c| c.info.identity == identity).map(|c| c.info.id).collect();
+        // Everyone the ban would keep out if they connected now: with an IP
+        // ban, that includes other identities at the address.
+        let connected: Vec<ClientId> = self
+            .clients
+            .values()
+            .filter(|c| bans::covers(&ban, c.info.identity, c.addr.ip()))
+            .map(|c| c.info.id)
+            .collect();
         for client in connected {
             self.eject(client, id, true, notice.clone());
         }

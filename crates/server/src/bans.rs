@@ -71,8 +71,7 @@ impl Bans {
 
     /// The ban that keeps this identity, or anyone at this address, out right now.
     pub fn find(&self, identity: Identity, ip: IpAddr, now: u64) -> Option<&BanInfo> {
-        let ip = ip.to_canonical();
-        self.list.iter().find(|b| active(b, now) && (b.identity == identity || b.ip == Some(ip)))
+        self.list.iter().find(|b| active(b, now) && covers(b, identity, ip))
     }
 
     /// The bans still in force. Expired ones are dropped; returns whether any were.
@@ -89,6 +88,11 @@ impl Bans {
 
 fn active(ban: &BanInfo, now: u64) -> bool {
     ban.expires_unix.is_none_or(|end| now < end)
+}
+
+/// Whether the ban is on this identity, or on everyone at this address.
+pub fn covers(ban: &BanInfo, identity: Identity, ip: IpAddr) -> bool {
+    ban.identity == identity || ban.ip == Some(ip.to_canonical())
 }
 
 /// Rounded down to the largest whole unit: "3 days", "1 hour", "less than a minute".

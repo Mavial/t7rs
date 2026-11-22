@@ -662,6 +662,27 @@ async fn bans_keep_identities_and_addresses_out() {
 }
 
 #[tokio::test]
+async fn ip_bans_eject_everyone_at_that_address() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, admin_id, _) = admin_login(addr, ADMIN_IP).await;
+    let (mut eve, we) = TestClient::connect_from(addr, ELSEWHERE, "eve", &key("eve")).await;
+    let (mut sock, ws) = TestClient::connect_from(addr, ELSEWHERE, "sock", &key("sock")).await;
+    let (mut bystander, _) = TestClient::connect_from(addr, HOME, "bystander", &key("bystander")).await;
+    let (eve_id, sock_id) = (welcomed_id(&we), welcomed_id(&ws));
+
+    admin.send(C2S::Ban { target: eve_id, duration_secs: None, reason: "spam".into(), include_ip: true }).await;
+    for (client, id) in [(&mut eve, eve_id), (&mut sock, sock_id)] {
+        let kicked = client.until(|m| matches!(m, S2C::ClientKicked { id: k, .. } if *k == id)).await;
+        let notice = S2C::ClientKicked { id, by: admin_id, from_server: true, reason: "banned for good (spam)".into() };
+        assert_eq!(kicked, notice);
+        client.closed().await;
+    }
+    // Someone at another address stays.
+    bystander.send(C2S::Ping { nonce: 7 }).await;
+    assert_eq!(bystander.until(|m| matches!(m, S2C::Pong { .. })).await, S2C::Pong { nonce: 7 });
+}
+
+#[tokio::test]
 async fn temporary_bans_end() {
     let addr = start(&with_admin_token("t")).await;
     let (mut admin, _, _) = admin_login(addr, ADMIN_IP).await;

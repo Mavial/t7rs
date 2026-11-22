@@ -108,9 +108,9 @@ The server enforces them, and the client shows only the menu entries they allow.
   themselves.
 - **Ban:** **Ban…** (admins) bans someone for 1 hour, 1 day, 1 week or for good,
   and kicks them off the server. The ban covers their identity from any
-  address. **Also ban IP address** (on by default) also keeps out new
-  identities from their address, which includes everyone else behind it, like
-  a household or a LAN. The server refuses an IP ban on the admin's own
+  address. **Also ban IP address** (on by default) also kicks off and keeps
+  out every other identity at their address, which includes everyone else
+  behind it, like a household or a LAN. The server refuses an IP ban on the admin's own
   address. A banned person who tries to connect sees the reason and how long
   the ban has left.
 

@@ -1819,7 +1819,7 @@ impl App {
                     });
                     ui.add_space(6.0);
                     ui.checkbox(include_ip, "Also ban IP address")
-                        .on_hover_text("Also keeps out new identities from their address, and anyone else who shares it");
+                        .on_hover_text("Also kicks off and keeps out everyone else at their address, under any identity");
                     ui.add_space(14.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.add(danger_button("Ban")).clicked() || enter {

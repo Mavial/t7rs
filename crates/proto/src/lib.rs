@@ -187,7 +187,7 @@ pub enum C2S {
     /// moderators), or off the server (admins). See [`perms`].
     Kick { target: ClientId, from_server: bool, reason: String },
     /// Admins only. Bans their identity, and their IP address with `include_ip`,
-    /// for `duration_secs` (`None`: for good), and kicks them off the server.
+    /// for `duration_secs` (`None`: for good), and kicks off everyone it covers.
     Ban { target: ClientId, duration_secs: Option<u64>, reason: String, include_ip: bool },
     /// Admins only; answered with [`S2C::Bans`].
     ListBans,
