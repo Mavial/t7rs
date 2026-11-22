@@ -4,6 +4,7 @@ mod bans;
 mod channels;
 pub mod config;
 mod conn;
+mod roles;
 mod state;
 
 use std::io::Write;
@@ -17,13 +18,13 @@ use tokio::sync::mpsc;
 use crate::bans::Bans;
 use crate::channels::Channels;
 use crate::config::Config;
+use crate::roles::RoleStore;
 use crate::state::{Event, Server};
 
 /// Accepts connections on `listener`, and voice on UDP at the same address, forever.
 ///
-/// `data_dir` holds `channels.toml` (the live channel tree), `bans.toml`, the
-/// generated admin token and the TLS certificate. Without it, channel edits,
-/// bans, the token and the certificate last only this run.
+/// `data_dir` holds `channels.toml` (the live channel tree), `bans.toml`,
+/// `roles.toml` and the TLS certificate. Without it, they last only this run.
 pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<()> {
     let udp = Arc::new(UdpSocket::bind(listener.local_addr()?).await?);
     let channels_file = data_dir.map(|d| d.join("channels.toml"));
@@ -45,8 +46,7 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
             .map_err(|e| std::io::Error::other(format!("cannot read {}: {e}", file.display())))?,
         _ => Bans::default(),
     };
-    let admin_token = admin_token(cfg, data_dir)?;
-    tracing::info!("admin token: {admin_token}  (in T7: the menu next to CHANNELS, then Admin login)");
+    let roles = load_or_init_roles(cfg, data_dir)?;
     let (cert, key) = tls_certificate(data_dir)?;
     tracing::info!("TLS certificate fingerprint (SHA-256): {}", tls::Fingerprint::of(&cert));
     let acceptor = tls::acceptor(cert, key).map_err(|e| {
@@ -62,7 +62,7 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
         channels,
         bans,
         data_dir.map(Path::to_owned),
-        admin_token,
+        roles,
         udp.clone(),
     );
 
@@ -80,25 +80,51 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
     }
 }
 
-/// The configured token, else the one saved in `admin_token.txt`, else a new one.
-fn admin_token(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<String> {
-    if !cfg.admin_token.trim().is_empty() {
-        return Ok(cfg.admin_token.trim().to_owned());
+fn load_or_init_roles(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<RoleStore> {
+    if cfg.admin_token.is_some() {
+        tracing::warn!("the config's admin_token is no longer used and can be deleted; claim ownership instead");
     }
-    let file = data_dir.map(|d| d.join("admin_token.txt"));
-    if let Some(saved) = file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()) {
-        let saved = saved.trim();
-        if !saved.is_empty() {
-            return Ok(saved.to_owned());
-        }
+    if let Some(old) = data_dir.map(|d| d.join("admin_token.txt")).filter(|f| f.exists()) {
+        std::fs::remove_file(&old)?;
+        tracing::info!("deleted {}: claim ownership instead", old.display());
     }
+    let file = data_dir.map(|d| d.join("roles.toml"));
+    let (mut roles, mut changed) = match &file {
+        Some(file) if file.exists() => (
+            RoleStore::load(file).map_err(|e| std::io::Error::other(format!("cannot read {}: {e}", file.display())))?,
+            false,
+        ),
+        _ => (RoleStore::default(), true),
+    };
+    if roles.roles().owner.is_none() && roles.claim_token().is_none() {
+        roles.set_claim_token(claim_token()?);
+        changed = true;
+    }
+    if let Some(file) = file.filter(|_| changed) {
+        roles.save(&file)?;
+    }
+    if let Some(token) = roles.claim_token() {
+        tracing::info!("claim token: {token}  (in T7: the menu next to CHANNELS, then Claim ownership; it works once)");
+    }
+    Ok(roles)
+}
+
+/// Saves a new claim token in `data_dir`'s `roles.toml` and returns it. Whoever
+/// redeems it becomes the owner in place of the current one, who stays until
+/// then. A running server neither sees it nor keeps it, so stop it first.
+pub fn reset_owner_claim(data_dir: &Path) -> std::io::Result<String> {
+    let file = data_dir.join("roles.toml");
+    let mut roles = if file.exists() { RoleStore::load(&file)? } else { RoleStore::default() };
+    let token = claim_token()?;
+    roles.set_claim_token(token.clone());
+    roles.save(&file)?;
+    Ok(token)
+}
+
+fn claim_token() -> std::io::Result<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(format!("no system randomness: {e}")))?;
-    let token = t7_proto::update::to_hex(&bytes);
-    if let Some(file) = &file {
-        std::fs::write(file, &token)?;
-    }
-    Ok(token)
+    Ok(t7_proto::update::to_hex(&bytes))
 }
 
 /// The certificate and key (DER) saved in `data_dir`, else a new self-signed
@@ -118,6 +144,13 @@ fn tls_certificate(data_dir: Option<&Path>) -> std::io::Result<(Vec<u8>, Vec<u8>
         tracing::info!("wrote a new TLS certificate to {}", cert_file.display());
     }
     Ok((cert, key))
+}
+
+/// Write-then-rename, so a crash never truncates the file.
+fn write_atomic(path: &Path, write: impl FnOnce(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let tmp = path.with_extension("toml.tmp");
+    write(&tmp)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Writes a file only its owner may read, where the OS has such permissions.

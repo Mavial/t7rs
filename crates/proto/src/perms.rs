@@ -1,98 +1,454 @@
-//! Who may do what. The server enforces these rules and the client asks the
-//! same questions to decide which menu entries to show.
-//!
-//! Roles, strongest first: server admins (logged in with the admin token),
-//! channel moderators, everyone. A moderator of a channel moderates it and
-//! every channel below it.
+//! Who may do what: permission bits, the ordered roles that grant them, and
+//! [`Roles::resolve`], the one function that decides what a person may do in a
+//! channel. The server resolves and enforces; clients get their resolved bits
+//! and use them only to decide what to offer.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::ops::{BitAnd, BitOr, BitOrAssign};
 
-use crate::{ChannelId, ChannelInfo, ClientInfo, Identity};
+use serde::de::{self, Deserializer};
+use serde::ser::{SerializeSeq, Serializer};
+use serde::{Deserialize, Serialize};
 
-/// Something one person may or may not do.
-#[derive(Debug, Clone, Copy)]
-pub enum Action<'a> {
-    /// Temporary channels are open to everyone.
-    CreatePermanentChannel,
-    EditChannel(ChannelId),
-    DeleteChannel(ChannelId),
-    /// Move channels and pick the default one.
-    RearrangeChannels,
-    /// Join a password-protected channel without its password.
-    SkipChannelPassword,
-    /// Out of their channel (to where a new client would land), or off the server.
-    Kick {
-        target: &'a ClientInfo,
-        from_server: bool,
-    },
-    Ban(&'a ClientInfo),
-    /// See the ban list and lift bans.
-    ManageBans,
-    SetModerator,
+use crate::{ChannelId, ChannelInfo, ClientId, Identity};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Perm {
+    /// See the channel, its sub-channels and the people in them.
+    View,
+    Join,
+    Speak,
+    SendMessages,
+    /// Join a channel that is full or has a password.
+    Bypass,
+    CreateTemporary,
+    /// Create permanent channels, edit, delete and rearrange them.
+    ManageChannels,
+    /// Change channel permissions and moderator lists.
+    ManagePermissions,
+    MoveMembers,
+    MuteMembers,
+    /// Out of a channel, or off the server.
+    Kick,
+    /// Ban people and manage the ban list.
+    Ban,
+    /// Create, edit and hand out roles.
+    ManageRoles,
 }
 
-/// The channels the rules look at: the server's tree or a client's mirror of it.
+impl Perm {
+    pub const ALL: [Perm; 13] = [
+        Perm::View,
+        Perm::Join,
+        Perm::Speak,
+        Perm::SendMessages,
+        Perm::Bypass,
+        Perm::CreateTemporary,
+        Perm::ManageChannels,
+        Perm::ManagePermissions,
+        Perm::MoveMembers,
+        Perm::MuteMembers,
+        Perm::Kick,
+        Perm::Ban,
+        Perm::ManageRoles,
+    ];
+
+    /// Its name in `roles.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Perm::View => "view",
+            Perm::Join => "join",
+            Perm::Speak => "speak",
+            Perm::SendMessages => "send_messages",
+            Perm::Bypass => "bypass",
+            Perm::CreateTemporary => "create_temporary",
+            Perm::ManageChannels => "manage_channels",
+            Perm::ManagePermissions => "manage_permissions",
+            Perm::MoveMembers => "move_members",
+            Perm::MuteMembers => "mute_members",
+            Perm::Kick => "kick",
+            Perm::Ban => "ban",
+            Perm::ManageRoles => "manage_roles",
+        }
+    }
+
+    const fn bit(self) -> u16 {
+        1 << self as u16
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Perms(u16);
+
+impl Perms {
+    pub const NONE: Perms = Perms(0);
+    pub const ALL: Perms = Perms::of(&Perm::ALL);
+
+    pub const fn of(list: &[Perm]) -> Perms {
+        let mut bits = 0;
+        let mut i = 0;
+        while i < list.len() {
+            bits |= list[i].bit();
+            i += 1;
+        }
+        Perms(bits)
+    }
+
+    const fn from_bits_truncate(bits: u16) -> Perms {
+        Perms(bits & Perms::ALL.0)
+    }
+
+    #[must_use]
+    pub const fn union(self, other: Perms) -> Perms {
+        Perms(self.0 | other.0)
+    }
+
+    pub fn has(self, perm: Perm) -> bool {
+        self.0 & perm.bit() != 0
+    }
+
+    pub fn set(&mut self, perm: Perm, on: bool) {
+        if on {
+            self.0 |= perm.bit();
+        } else {
+            self.0 &= !perm.bit();
+        }
+    }
+
+    #[must_use]
+    pub fn without(self, other: Perms) -> Perms {
+        Perms(self.0 & !other.0)
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Perm> {
+        Perm::ALL.into_iter().filter(move |p| self.has(*p))
+    }
+}
+
+impl BitOr for Perms {
+    type Output = Perms;
+    fn bitor(self, other: Perms) -> Perms {
+        self.union(other)
+    }
+}
+
+impl BitOrAssign for Perms {
+    fn bitor_assign(&mut self, other: Perms) {
+        self.0 |= other.0;
+    }
+}
+
+impl BitAnd for Perms {
+    type Output = Perms;
+    fn bitand(self, other: Perms) -> Perms {
+        Perms(self.0 & other.0)
+    }
+}
+
+impl fmt::Debug for Perms {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.iter().map(Perm::key)).finish()
+    }
+}
+
+/// A list of names in text formats like TOML, the bits on the wire.
+impl Serialize for Perms {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if !s.is_human_readable() {
+            return self.0.serialize(s);
+        }
+        let mut seq = s.serialize_seq(None)?;
+        for perm in self.iter() {
+            seq.serialize_element(perm.key())?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Perms {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if !d.is_human_readable() {
+            return u16::deserialize(d).map(Perms::from_bits_truncate);
+        }
+        let mut perms = Perms::NONE;
+        for name in Vec::<String>::deserialize(d)? {
+            let perm = Perm::ALL
+                .into_iter()
+                .find(|p| p.key() == name)
+                .ok_or_else(|| de::Error::custom(format!("unknown permission {name:?}")))?;
+            perms.set(perm, true);
+        }
+        Ok(perms)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RoleId(pub u32);
+
+impl RoleId {
+    /// Held by everyone, never assigned, and below every other role.
+    pub const EVERYONE: RoleId = RoleId(0);
+    pub const ADMIN: RoleId = RoleId(1);
+    /// Also held by channel moderators where they moderate, and by the owner of
+    /// a temporary channel in it.
+    pub const MODERATOR: RoleId = RoleId(2);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    pub id: RoleId,
+    pub name: String,
+    pub perms: Perms,
+}
+
+/// Someone who owns the server or holds roles, remembered while they are offline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    /// Their nickname when last seen.
+    pub nickname: String,
+    pub roles: Vec<RoleId>,
+}
+
+/// Height in the role order. You may only act on people, and roles, below your own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Rank(u32);
+
+impl Rank {
+    pub const EVERYONE: Rank = Rank(0);
+    pub const OWNER: Rank = Rank(u32::MAX);
+}
+
+const EVERYONE_PERMS: Perms =
+    Perms::of(&[Perm::View, Perm::Join, Perm::Speak, Perm::SendMessages, Perm::CreateTemporary]);
+const MODERATOR_PERMS: Perms =
+    EVERYONE_PERMS.union(Perms::of(&[Perm::Bypass, Perm::MoveMembers, Perm::MuteMembers, Perm::Kick]));
+const ADMIN_PERMS: Perms =
+    MODERATOR_PERMS.union(Perms::of(&[Perm::ManageChannels, Perm::ManagePermissions, Perm::Ban, Perm::ManageRoles]));
+const ROOM_OWNER_PERMS: Perms = Perms::of(&[Perm::ManageChannels]);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Roles {
+    /// Above every role, with every permission.
+    pub owner: Option<Identity>,
+    /// Highest first. Everyone sits below them all.
+    pub ranked: Vec<Role>,
+    pub everyone: Perms,
+    /// Everyone who owns the server or holds a role.
+    pub members: BTreeMap<Identity, Member>,
+}
+
+impl Default for Roles {
+    /// A fresh server's: Admin above Moderator, and no owner yet.
+    fn default() -> Self {
+        Self {
+            owner: None,
+            ranked: vec![
+                Role { id: RoleId::ADMIN, name: "Admin".into(), perms: ADMIN_PERMS },
+                Role { id: RoleId::MODERATOR, name: "Moderator".into(), perms: MODERATOR_PERMS },
+            ],
+            everyone: EVERYONE_PERMS,
+            members: BTreeMap::new(),
+        }
+    }
+}
+
+/// A change to the roles, by someone who may manage them, to roles and
+/// people below their own role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoleChange {
+    /// A new role without permissions, at the bottom, just above Everyone.
+    Create {
+        name: String,
+    },
+    Rename {
+        id: RoleId,
+        name: String,
+    },
+    /// Everyone's too.
+    SetPermissions {
+        id: RoleId,
+        perms: Perms,
+    },
+    /// `position` is the index among the roles, highest first.
+    Move {
+        id: RoleId,
+        position: u32,
+    },
+    /// Whoever holds it loses it.
+    Delete {
+        id: RoleId,
+    },
+    /// By identity, so someone offline can lose a role. Only someone online can get one.
+    Assign {
+        identity: Identity,
+        role: RoleId,
+        held: bool,
+    },
+}
+
+/// Who is asking: the person, and the connection, which may own a temporary channel.
+#[derive(Debug, Clone, Copy)]
+pub struct Subject {
+    pub client: ClientId,
+    pub identity: Identity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Server,
+    Channel(ChannelId),
+}
+
+impl Scope {
+    pub fn within(parent: Option<ChannelId>) -> Scope {
+        parent.map_or(Scope::Server, Scope::Channel)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Standing {
+    pub perms: Perms,
+    pub rank: Rank,
+}
+
+/// A channel's explicit setting for one role: each permission allowed,
+/// denied, or (in neither) inherited from the channel above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Override {
+    allow: Perms,
+    deny: Perms,
+}
+
+impl Override {
+    pub fn allowing(perms: Perms) -> Self {
+        Self { allow: perms, deny: Perms::NONE }
+    }
+
+    pub fn denying(perms: Perms) -> Self {
+        Self { allow: Perms::NONE, deny: perms }
+    }
+}
+
 pub trait ChannelTree {
     fn channel(&self, id: ChannelId) -> Option<&ChannelInfo>;
+    /// The channel's explicit settings, per role.
+    fn overrides(&self, id: ChannelId) -> &[(RoleId, Override)];
 }
 
-impl ChannelTree for HashMap<ChannelId, ChannelInfo> {
-    fn channel(&self, id: ChannelId) -> Option<&ChannelInfo> {
-        self.get(&id)
+impl Roles {
+    pub fn role(&self, id: RoleId) -> Option<&Role> {
+        self.ranked.iter().find(|r| r.id == id)
     }
-}
 
-pub fn allowed(actor: &ClientInfo, action: Action<'_>, tree: &impl ChannelTree) -> bool {
-    match action {
-        Action::Kick { target, .. } | Action::Ban(target) if same_person(actor, target) => false,
-        // There is nowhere to kick them to.
-        Action::Kick { target, from_server: false } if tree.channel(target.channel).is_none_or(|c| c.default) => false,
-        _ if actor.admin => true,
-        Action::EditChannel(id) => created(actor, id, tree) || moderated_from(actor.identity, id, tree).is_some(),
-        Action::DeleteChannel(id) => created(actor, id, tree),
-        Action::Kick { target, from_server: false } => {
-            let Some(mine) = moderated_from(actor.identity, target.channel, tree) else { return false };
-            let theirs = moderated_from(target.identity, target.channel, tree);
-            // A moderator outranks only moderators of channels below their own.
-            !target.admin && theirs.is_none_or(|theirs| theirs > mine)
+    pub fn height(&self, role: RoleId) -> Rank {
+        self.ranked.iter().position(|r| r.id == role).map_or(Rank::EVERYONE, |i| self.height_at(i))
+    }
+
+    /// The height of the role at `position` among them, highest first, or of
+    /// one moved there.
+    pub fn height_at(&self, position: usize) -> Rank {
+        let len = self.ranked.len();
+        Rank((len - position.min(len.saturating_sub(1))) as u32)
+    }
+
+    /// Their highest standing on the server, wherever they are.
+    pub fn rank(&self, identity: Identity) -> Rank {
+        if self.owner == Some(identity) {
+            return Rank::OWNER;
         }
-        _ => false,
+        self.assigned(identity).iter().map(|r| self.height(*r)).max().unwrap_or(Rank::EVERYONE)
+    }
+
+    /// What the channel tree shows next to their name: their highest role.
+    pub fn title(&self, identity: Identity) -> Option<String> {
+        if self.owner == Some(identity) {
+            return Some("Owner".into());
+        }
+        let held = self.assigned(identity);
+        self.ranked.iter().find(|r| held.contains(&r.id)).map(|r| r.name.clone())
+    }
+
+    fn assigned(&self, identity: Identity) -> &[RoleId] {
+        self.members.get(&identity).map_or(&[], |m| &m.roles)
+    }
+
+    fn base(&self, role: RoleId) -> Perms {
+        if role == RoleId::EVERYONE {
+            return self.everyone;
+        }
+        self.role(role).map_or(Perms::NONE, |r| r.perms)
+    }
+
+    /// What `who` may do in a channel, or on the server as a whole.
+    ///
+    /// The owner may do everything. Anyone else has what their roles grant,
+    /// Everyone's included. In a channel, and every channel below it, its
+    /// moderators and the owner of a temporary channel also hold the Moderator
+    /// role. Then each permission a channel sets for one of their roles
+    /// overrides what the roles grant; the closest channel that sets it wins,
+    /// and there an allow beats a deny.
+    pub fn resolve(&self, who: Subject, scope: Scope, tree: &impl ChannelTree) -> Standing {
+        if self.owner == Some(who.identity) {
+            return Standing { perms: Perms::ALL, rank: Rank::OWNER };
+        }
+        let mut path = Vec::new();
+        let mut at = match scope {
+            Scope::Server => None,
+            Scope::Channel(id) => tree.channel(id),
+        };
+        while let Some(c) = at {
+            path.push(c);
+            at = c.parent.and_then(|p| tree.channel(p));
+        }
+        let owns_room = path.iter().any(|c| c.temporary && c.creator == Some(who.client));
+        let moderates = path.iter().any(|c| c.moderators.contains(&who.identity));
+
+        let mut held = vec![RoleId::EVERYONE];
+        held.extend_from_slice(self.assigned(who.identity));
+        if owns_room || moderates {
+            held.push(RoleId::MODERATOR);
+        }
+        let mut perms = held.iter().fold(Perms::NONE, |p, r| p | self.base(*r));
+        let mut settled = Perms::NONE;
+        for c in &path {
+            let (mut allow, mut deny) = (Perms::NONE, Perms::NONE);
+            for (role, o) in tree.overrides(c.id) {
+                if held.contains(role) {
+                    allow |= o.allow;
+                    deny |= o.deny;
+                }
+            }
+            let (allow, deny) = (allow.without(settled), deny.without(allow).without(settled));
+            perms = (perms | allow).without(deny);
+            settled = settled | allow | deny;
+        }
+        if owns_room {
+            perms |= ROOM_OWNER_PERMS;
+        }
+        let rank = held.iter().map(|r| self.height(*r)).max().unwrap_or(Rank::EVERYONE);
+        Standing { perms, rank }
     }
 }
 
-/// The depth (top level 1) of the highest channel at or above `channel` that
-/// `identity` moderates, or `None` if they don't moderate it.
-pub fn moderated_from(identity: Identity, channel: ChannelId, tree: &impl ChannelTree) -> Option<usize> {
-    let mut path = Vec::new();
-    let mut at = tree.channel(channel);
-    while let Some(c) = at {
-        path.push(c);
-        at = c.parent.and_then(|p| tree.channel(p));
-    }
-    // `path` runs from `channel` up to the top level.
-    path.iter().rev().position(|c| c.moderators.contains(&identity)).map(|i| i + 1)
-}
-
-/// The creator of a temporary channel keeps managing it.
-fn created(actor: &ClientInfo, channel: ChannelId, tree: &impl ChannelTree) -> bool {
-    tree.channel(channel).is_some_and(|c| c.temporary && c.creator == Some(actor.id))
-}
-
-/// One person may be connected twice with the same identity.
-fn same_person(a: &ClientInfo, b: &ClientInfo) -> bool {
-    a.id == b.id || a.identity == b.identity
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Permissions {
+    pub server: Perms,
+    pub channels: Vec<(ChannelId, Perms)>,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use crate::ClientStatus;
 
     // Lobby (default)
-    // Gaming            moderated by G and G2
-    //   Squad           moderated by S
+    // Gaming            moderated by M
+    //   Squad
     //     Deep
-    // AFK               moderated by A
+    // AFK
     // Raid (temporary, made by client 9)
     const LOBBY: ChannelId = 1;
     const GAMING: ChannelId = 2;
@@ -100,12 +456,28 @@ mod tests {
     const DEEP: ChannelId = 4;
     const AFK: ChannelId = 5;
     const RAID: ChannelId = 6;
-    const G: Identity = Identity([0xa; 32]);
-    const G2: Identity = Identity([0xd; 32]);
-    const S: Identity = Identity([0xb; 32]);
-    const A: Identity = Identity([0xc; 32]);
+    const OWNER: Identity = Identity([0xf; 32]);
+    const ADMIN: Identity = Identity([0xa; 32]);
+    const MODERATOR: Identity = Identity([0xd; 32]);
+    const M: Identity = Identity([0xb; 32]);
+    const NOBODY: Identity = Identity([0xc; 32]);
 
-    fn tree() -> HashMap<ChannelId, ChannelInfo> {
+    #[derive(Default)]
+    struct Tree {
+        channels: HashMap<ChannelId, ChannelInfo>,
+        overrides: HashMap<ChannelId, Vec<(RoleId, Override)>>,
+    }
+
+    impl ChannelTree for Tree {
+        fn channel(&self, id: ChannelId) -> Option<&ChannelInfo> {
+            self.channels.get(&id)
+        }
+        fn overrides(&self, id: ChannelId) -> &[(RoleId, Override)] {
+            self.overrides.get(&id).map_or(&[], Vec::as_slice)
+        }
+    }
+
+    fn tree() -> Tree {
         let ch = |id, parent, moderators: &[Identity]| ChannelInfo {
             id,
             parent,
@@ -120,136 +492,137 @@ mod tests {
             moderators: moderators.to_vec(),
         };
         let raid = ChannelInfo { temporary: true, creator: Some(9), ..ch(RAID, None, &[]) };
-        [
+        let channels = [
             ch(LOBBY, None, &[]),
-            ch(GAMING, None, &[G, G2]),
-            ch(SQUAD, Some(GAMING), &[S]),
+            ch(GAMING, None, &[M]),
+            ch(SQUAD, Some(GAMING), &[]),
             ch(DEEP, Some(SQUAD), &[]),
-            ch(AFK, None, &[A]),
+            ch(AFK, None, &[]),
             raid,
-        ]
-        .into_iter()
-        .map(|c| (c.id, c))
-        .collect()
+        ];
+        Tree { channels: channels.into_iter().map(|c| (c.id, c)).collect(), overrides: HashMap::new() }
     }
 
-    fn client(id: u32, identity: Identity, channel: ChannelId) -> ClientInfo {
-        ClientInfo { id, nickname: format!("u{id}"), channel, status: ClientStatus::default(), admin: false, identity }
-    }
-
-    fn admin(id: u32, channel: ChannelId) -> ClientInfo {
-        ClientInfo { admin: true, ..client(id, Identity([id as u8; 32]), channel) }
-    }
-
-    fn user(id: u32, channel: ChannelId) -> ClientInfo {
-        client(id, Identity([id as u8; 32]), channel)
-    }
-
-    fn can(actor: &ClientInfo, action: Action<'_>) -> bool {
-        allowed(actor, action, &tree())
-    }
-
-    fn kick(target: &ClientInfo) -> Action<'_> {
-        Action::Kick { target, from_server: false }
-    }
-
-    #[test]
-    fn moderation_reaches_down_the_tree() {
-        let t = tree();
-        assert_eq!(moderated_from(G, GAMING, &t), Some(1));
-        assert_eq!(moderated_from(G, DEEP, &t), Some(1));
-        assert_eq!(moderated_from(S, DEEP, &t), Some(2));
-        assert_eq!(moderated_from(S, GAMING, &t), None, "not up the tree");
-        assert_eq!(moderated_from(G, AFK, &t), None, "not sideways");
-        assert_eq!(moderated_from(G, 99, &t), None);
-    }
-
-    #[test]
-    fn moderators_edit_their_channels_and_nothing_else() {
-        let g = client(1, G, LOBBY);
-        for (channel, may) in [(GAMING, true), (SQUAD, true), (DEEP, true), (AFK, false), (LOBBY, false)] {
-            assert_eq!(can(&g, Action::EditChannel(channel)), may, "edit channel {channel}");
-            assert!(!can(&g, Action::DeleteChannel(channel)), "delete channel {channel}");
+    fn roles() -> Roles {
+        let mut roles = Roles { owner: Some(OWNER), ..Roles::default() };
+        for (identity, role) in [(ADMIN, RoleId::ADMIN), (MODERATOR, RoleId::MODERATOR)] {
+            roles.members.insert(identity, Member { nickname: "x".into(), roles: vec![role] });
         }
-        for action in [
-            Action::CreatePermanentChannel,
-            Action::RearrangeChannels,
-            Action::SkipChannelPassword,
-            Action::ManageBans,
-            Action::SetModerator,
-            Action::Ban(&user(2, GAMING)),
-            Action::Kick { target: &user(2, GAMING), from_server: true },
-        ] {
-            assert!(!can(&g, action), "{action:?}");
+        roles
+    }
+
+    fn who(identity: Identity) -> Subject {
+        Subject { client: 1, identity }
+    }
+
+    fn perms(roles: &Roles, tree: &Tree, identity: Identity, scope: Scope) -> Perms {
+        roles.resolve(who(identity), scope, tree).perms
+    }
+
+    #[test]
+    fn bits_are_names_in_files_and_bits_on_the_wire() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct File {
+            perms: Perms,
         }
+        let file = File { perms: Perms::of(&[Perm::Kick, Perm::View]) };
+        let text = toml::to_string(&file).unwrap();
+        assert_eq!(text.trim(), r#"perms = ["view", "kick"]"#);
+        assert_eq!(toml::from_str::<File>(&text).unwrap(), file);
+        assert!(toml::from_str::<File>(r#"perms = ["fly"]"#).is_err());
+
+        let wire = postcard::to_allocvec(&file.perms).unwrap();
+        assert_eq!(postcard::from_bytes::<Perms>(&wire).unwrap(), file.perms);
+        let unknown = postcard::to_allocvec(&u16::MAX).unwrap();
+        assert_eq!(postcard::from_bytes::<Perms>(&unknown).unwrap(), Perms::ALL, "unknown bits are dropped");
     }
 
     #[test]
-    fn creators_keep_their_temporary_channels() {
-        let creator = user(9, RAID);
-        assert!(can(&creator, Action::EditChannel(RAID)));
-        assert!(can(&creator, Action::DeleteChannel(RAID)));
-        assert!(!can(&user(8, RAID), Action::EditChannel(RAID)));
-        assert!(!can(&creator, kick(&user(8, RAID))), "making a channel doesn't make you its moderator");
+    fn a_fresh_server_has_the_default_roles() {
+        let (roles, t) = (roles(), tree());
+        let everyone = Perms::of(&[Perm::View, Perm::Join, Perm::Speak, Perm::SendMessages, Perm::CreateTemporary]);
+        assert_eq!(perms(&roles, &t, NOBODY, Scope::Server), everyone);
+        let moderator = everyone | Perms::of(&[Perm::Bypass, Perm::MoveMembers, Perm::MuteMembers, Perm::Kick]);
+        assert_eq!(perms(&roles, &t, MODERATOR, Scope::Server), moderator);
+        assert_eq!(perms(&roles, &t, ADMIN, Scope::Server), Perms::ALL);
+        assert_eq!(perms(&roles, &t, OWNER, Scope::Channel(AFK)), Perms::ALL);
     }
 
     #[test]
-    fn who_a_moderator_may_kick() {
-        let g = client(1, G, GAMING);
-        let s = client(2, S, SQUAD);
-        // Everyone in the moderated channels, from the top channel down.
+    fn rank_follows_the_role_order() {
+        let mut roles = roles();
+        assert!(roles.rank(OWNER) > roles.rank(ADMIN));
+        assert!(roles.rank(ADMIN) > roles.rank(MODERATOR));
+        assert!(roles.rank(MODERATOR) > roles.rank(NOBODY));
+        assert_eq!(roles.rank(NOBODY), Rank::EVERYONE);
+        assert_eq!(roles.height(RoleId::EVERYONE), Rank::EVERYONE);
+        assert_eq!(
+            [OWNER, ADMIN, MODERATOR, NOBODY].map(|i| roles.title(i)),
+            [Some("Owner".into()), Some("Admin".into()), Some("Moderator".into()), None]
+        );
+
+        roles.members.get_mut(&MODERATOR).unwrap().roles.push(RoleId::ADMIN);
+        assert_eq!(roles.rank(MODERATOR), roles.rank(ADMIN));
+        roles.ranked.reverse();
+        roles.members.get_mut(&MODERATOR).unwrap().roles = vec![RoleId::MODERATOR];
+        assert!(roles.rank(MODERATOR) > roles.rank(ADMIN));
+    }
+
+    #[test]
+    fn channel_moderators_hold_the_moderator_role_down_their_tree() {
+        let (roles, t) = (roles(), tree());
+        let moderator = roles.role(RoleId::MODERATOR).unwrap().perms;
         for channel in [GAMING, SQUAD, DEEP] {
-            assert!(can(&g, kick(&user(3, channel))), "user in channel {channel}");
+            let standing = roles.resolve(who(M), Scope::Channel(channel), &t);
+            assert_eq!(standing, Standing { perms: moderator, rank: roles.height(RoleId::MODERATOR) }, "{channel}");
         }
-        assert!(!can(&g, kick(&user(3, AFK))), "outside their channels");
-        assert!(!can(&g, kick(&user(3, LOBBY))));
-        // A moderator of a lower channel, but not of an equal or higher one.
-        assert!(can(&g, kick(&s)));
-        assert!(!can(&s, kick(&g)), "g moderates a higher channel");
-        assert!(!can(&s, kick(&client(4, G, SQUAD))), "g moderates Squad from higher up");
-        assert!(!can(&s, kick(&client(4, S, DEEP))), "same identity, other connection");
-        assert!(!can(&g, kick(&client(5, G2, GAMING))), "another moderator of Gaming");
-        // A moderator elsewhere is an ordinary user here.
-        assert!(can(&g, kick(&client(4, A, GAMING))));
-        assert!(!can(&g, kick(&admin(6, GAMING))), "admins");
-        assert!(!can(&g, kick(&g)), "themselves");
-        assert!(!can(&user(7, GAMING), kick(&user(3, GAMING))), "everyone else");
+        for scope in [Scope::Server, Scope::Channel(LOBBY), Scope::Channel(AFK)] {
+            assert_eq!(roles.resolve(who(M), scope, &t).rank, Rank::EVERYONE, "{scope:?}");
+            assert!(!perms(&roles, &t, M, scope).has(Perm::Kick), "{scope:?}");
+        }
+        assert_eq!(
+            roles.resolve(who(ADMIN), Scope::Channel(GAMING), &t).rank,
+            roles.rank(ADMIN),
+            "an admin stays an admin"
+        );
     }
 
     #[test]
-    fn admins_may_everything_but_kick_or_ban_themselves() {
-        let a = admin(1, LOBBY);
-        let other_admin = admin(2, GAMING);
-        let target = user(3, GAMING);
-        for action in [
-            Action::CreatePermanentChannel,
-            Action::EditChannel(AFK),
-            Action::DeleteChannel(AFK),
-            Action::RearrangeChannels,
-            Action::SkipChannelPassword,
-            Action::ManageBans,
-            Action::SetModerator,
-            kick(&target),
-            Action::Kick { target: &target, from_server: true },
-            Action::Ban(&target),
-            Action::Ban(&other_admin),
-        ] {
-            assert!(can(&a, action), "{action:?}");
-        }
-        let twin = ClientInfo { id: 4, ..a.clone() };
-        for target in [&a, &twin] {
-            assert!(!can(&a, Action::Kick { target, from_server: true }));
-            assert!(!can(&a, Action::Ban(target)));
-        }
+    fn room_owners_moderate_and_manage_their_room() {
+        let (roles, t) = (roles(), tree());
+        let creator = Subject { client: 9, identity: NOBODY };
+        let room = roles.resolve(creator, Scope::Channel(RAID), &t);
+        assert!(room.perms.has(Perm::Kick) && room.perms.has(Perm::ManageChannels));
+        assert!(!room.perms.has(Perm::Ban));
+        assert_eq!(room.rank, roles.height(RoleId::MODERATOR));
+        assert!(!roles.resolve(creator, Scope::Channel(LOBBY), &t).perms.has(Perm::Kick), "elsewhere");
+        let other = Subject { client: 8, identity: NOBODY };
+        assert!(!roles.resolve(other, Scope::Channel(RAID), &t).perms.has(Perm::Kick), "another connection");
     }
 
     #[test]
-    fn channel_kicks_need_somewhere_to_send_people() {
-        let mut t = tree();
-        t.get_mut(&LOBBY).unwrap().moderators.push(G);
-        let in_lobby = user(3, LOBBY);
-        assert!(!allowed(&client(1, G, GAMING), kick(&in_lobby), &t), "moderator of the default channel");
-        assert!(!allowed(&admin(2, GAMING), kick(&in_lobby), &t), "admin");
-        assert!(allowed(&admin(2, GAMING), Action::Kick { target: &in_lobby, from_server: true }, &t));
+    fn the_closest_channel_setting_wins_and_there_allow_beats_deny() {
+        let (roles, mut t) = (roles(), tree());
+        let (view, speak) = (Perms::of(&[Perm::View]), Perms::of(&[Perm::Speak]));
+        t.overrides.insert(GAMING, vec![(RoleId::EVERYONE, Override::denying(view | speak))]);
+        t.overrides.insert(SQUAD, vec![(RoleId::EVERYONE, Override::allowing(speak))]);
+        t.overrides.insert(DEEP, vec![(RoleId::MODERATOR, Override::allowing(view))]);
+
+        assert!(!perms(&roles, &t, NOBODY, Scope::Channel(GAMING)).has(Perm::View));
+        assert!(!perms(&roles, &t, NOBODY, Scope::Channel(SQUAD)).has(Perm::View), "inherited from Gaming");
+        assert!(perms(&roles, &t, NOBODY, Scope::Channel(SQUAD)).has(Perm::Speak), "Squad's own setting is closer");
+        assert!(perms(&roles, &t, NOBODY, Scope::Channel(LOBBY)).has(Perm::View), "elsewhere");
+        assert!(perms(&roles, &t, MODERATOR, Scope::Channel(DEEP)).has(Perm::View), "the moderators' allow is closer");
+        assert!(!perms(&roles, &t, NOBODY, Scope::Channel(DEEP)).has(Perm::View));
+
+        t.overrides.insert(
+            GAMING,
+            vec![(RoleId::EVERYONE, Override::denying(view)), (RoleId::MODERATOR, Override::allowing(view))],
+        );
+        assert!(perms(&roles, &t, MODERATOR, Scope::Channel(GAMING)).has(Perm::View));
+        assert!(perms(&roles, &t, M, Scope::Channel(SQUAD)).has(Perm::View), "listed moderators hold the role there");
+        assert!(!perms(&roles, &t, NOBODY, Scope::Channel(GAMING)).has(Perm::View));
+        assert_eq!(perms(&roles, &t, OWNER, Scope::Channel(GAMING)), Perms::ALL, "nothing overrides the owner");
+        assert_eq!(perms(&roles, &t, NOBODY, Scope::Server), roles.everyone, "nor applies to the server as a whole");
     }
 }

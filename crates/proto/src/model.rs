@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 
-use crate::perms::{self, Action};
-use crate::{ChannelId, ChannelInfo, ClientId, ClientInfo, S2C, ServerInfo};
+use crate::perms::{Perm, Permissions, Perms, Roles};
+use crate::{ChannelId, ChannelInfo, ClientId, ClientInfo, Identity, S2C, ServerInfo};
 
 #[derive(Debug, Clone)]
 pub struct ServerView {
@@ -13,21 +13,43 @@ pub struct ServerView {
     pub info: ServerInfo,
     pub channels: HashMap<ChannelId, ChannelInfo>,
     pub clients: HashMap<ClientId, ClientInfo>,
+    /// Every role and who holds them, while this client may manage roles.
+    pub roles: Option<Roles>,
+    server_perms: Perms,
+    channel_perms: HashMap<ChannelId, Perms>,
     /// Channel tree in display order: (depth, channel id).
     tree: Vec<(usize, ChannelId)>,
 }
 
 impl ServerView {
-    pub fn new(my_id: ClientId, info: ServerInfo, channels: Vec<ChannelInfo>, clients: Vec<ClientInfo>) -> Self {
+    pub fn new(
+        my_id: ClientId,
+        info: ServerInfo,
+        channels: Vec<ChannelInfo>,
+        clients: Vec<ClientInfo>,
+        permissions: Permissions,
+    ) -> Self {
         let mut view = Self {
             my_id,
             info,
             channels: channels.into_iter().map(|c| (c.id, c)).collect(),
             clients: clients.into_iter().map(|c| (c.id, c)).collect(),
+            roles: None,
+            server_perms: Perms::NONE,
+            channel_perms: HashMap::new(),
             tree: Vec::new(),
         };
+        view.set_permissions(permissions);
         view.rebuild_tree();
         view
+    }
+
+    fn set_permissions(&mut self, permissions: Permissions) {
+        self.server_perms = permissions.server;
+        self.channel_perms = permissions.channels.into_iter().collect();
+        if !self.server_perms.has(Perm::ManageRoles) {
+            self.roles = None;
+        }
     }
 
     /// Applies an event. Returns `false` for events that don't touch state.
@@ -49,11 +71,13 @@ impl ServerView {
                     c.status = *status;
                 }
             }
-            S2C::ClientAdmin { id, admin } => {
+            S2C::ClientRole { id, role } => {
                 if let Some(c) = self.clients.get_mut(id) {
-                    c.admin = *admin;
+                    c.role.clone_from(role);
                 }
             }
+            S2C::Permissions(permissions) => self.set_permissions(permissions.clone()),
+            S2C::Roles(roles) => self.roles = Some(roles.clone()),
             S2C::Channels(list) => {
                 self.channels = list.iter().map(|c| (c.id, c.clone())).collect();
                 self.rebuild_tree();
@@ -71,9 +95,32 @@ impl ServerView {
         self.me().map(|c| c.channel)
     }
 
-    /// Whether the rules let this client do it: what the UI offers.
-    pub fn allowed(&self, action: Action<'_>) -> bool {
-        self.me().is_some_and(|me| perms::allowed(me, action, &self.channels))
+    /// Whether the server lets this client do it on the server as a whole:
+    /// what the UI offers. The server checks again.
+    pub fn may(&self, perm: Perm) -> bool {
+        self.server_perms.has(perm)
+    }
+
+    /// Whether the server lets this client do it in `channel`.
+    pub fn may_in(&self, channel: ChannelId, perm: Perm) -> bool {
+        self.channel_perms.get(&channel).is_some_and(|p| p.has(perm))
+    }
+
+    pub fn is_owner(&self) -> bool {
+        let owner = self.roles.as_ref().and_then(|r| r.owner);
+        owner.is_some_and(|o| self.me().is_some_and(|me| me.identity == o))
+    }
+
+    /// Whether `identity` is on the moderator list of `channel` or of a channel above it.
+    pub fn moderates(&self, identity: Identity, channel: ChannelId) -> bool {
+        let mut at = self.channels.get(&channel);
+        while let Some(c) = at {
+            if c.moderators.contains(&identity) {
+                return true;
+            }
+            at = c.parent.and_then(|p| self.channels.get(&p));
+        }
+        false
     }
 
     pub fn tree(&self) -> &[(usize, ChannelId)] {
@@ -141,14 +188,23 @@ mod tests {
             nickname: "me".into(),
             channel: 1,
             status: ClientStatus::default(),
-            admin: false,
-            identity: crate::Identity([1; 32]),
+            role: None,
+            identity: Identity([1; 32]),
         };
-        let mut v = ServerView::new(1, info, vec![chan(3, None, 1), chan(1, None, 0), chan(2, Some(1), 0)], vec![me]);
+        let permissions = Permissions { server: Perms::NONE, channels: vec![(2, Perms::of(&[Perm::Kick]))] };
+        let channels = vec![chan(3, None, 1), chan(1, None, 0), chan(2, Some(1), 0)];
+        let mut v = ServerView::new(1, info, channels, vec![me], permissions);
         assert_eq!(v.tree(), &[(0, 1), (1, 2), (0, 3)]);
+        assert!(v.may_in(2, Perm::Kick) && !v.may_in(1, Perm::Kick) && !v.may(Perm::Kick));
 
         v.apply(&S2C::Channels(vec![chan(1, None, 1), chan(3, None, 0)]));
         assert_eq!(v.tree(), &[(0, 3), (0, 1)], "channel list replaced and re-sorted");
+
+        v.apply(&S2C::Permissions(Permissions { server: Perms::ALL, channels: Vec::new() }));
+        v.apply(&S2C::Roles(Roles::default()));
+        assert!(v.may(Perm::Kick) && !v.may_in(2, Perm::Kick) && v.roles.is_some());
+        v.apply(&S2C::Permissions(Permissions::default()));
+        assert!(v.roles.is_none(), "dropped when that ends");
 
         v.apply(&S2C::ClientMoved { id: 1, channel: 3 });
         assert_eq!(v.my_channel(), Some(3));

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use t7_proto::perms::ChannelTree;
+use t7_proto::perms::{ChannelTree, Override, RoleId};
 use t7_proto::{
     ChannelId, ChannelInfo, ChannelSettings, ClientId, Identity, MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN,
     MAX_CHANNEL_TOPIC_LEN, MAX_CHANNELS, PasswordChange,
@@ -112,14 +112,12 @@ impl Channels {
         Ok(Self::from_config(&file.channels))
     }
 
-    /// Writes the permanent channels; write-then-rename, so a crash never truncates the file.
+    /// Writes the permanent channels.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let header = "# The live channel tree, kept up to date by the server as admins edit\n\
                       # channels in T7. Edit it only while the server is stopped.\n\n";
         let body = toml::to_string(&ChannelsFile { channels: self.to_config() }).map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, format!("{header}{body}"))?;
-        std::fs::rename(&tmp, path)
+        crate::write_atomic(path, |tmp| std::fs::write(tmp, format!("{header}{body}")))
     }
 
     /// Permanent channels in the saved format, siblings in display order.
@@ -154,6 +152,10 @@ impl Channels {
 
     pub fn get(&self, id: ChannelId) -> Option<&ChannelInfo> {
         self.map.get(&id).map(|c| &c.info)
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = ChannelId> + '_ {
+        self.map.keys().copied()
     }
 
     /// All channel ids, parents before children, siblings in order.
@@ -394,6 +396,10 @@ impl Channels {
 impl ChannelTree for Channels {
     fn channel(&self, id: ChannelId) -> Option<&ChannelInfo> {
         self.get(id)
+    }
+
+    fn overrides(&self, _: ChannelId) -> &[(RoleId, Override)] {
+        &[]
     }
 }
 

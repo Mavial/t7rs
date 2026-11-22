@@ -20,10 +20,9 @@ pub mod voice;
 
 /// This build's protocol. New messages are only ever appended to the enums
 /// below, so older clients keep working for everything they know about.
-pub const PROTOCOL_VERSION: u16 = 5;
-/// Oldest client protocol a server still accepts. Protocol 5 moved the
-/// control connection into TLS and encrypts voice, so older clients can't connect.
-pub const MIN_PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
+/// Oldest client protocol a server still accepts.
+pub const MIN_PROTOCOL_VERSION: u16 = 6;
 /// Default port of a T7 server (TCP for control, UDP for voice).
 pub const DEFAULT_PORT: u16 = 9988;
 /// Upper bound for a single frame. Protects both sides from memory abuse.
@@ -39,6 +38,9 @@ pub const MAX_CHANNEL_TOPIC_LEN: usize = 200;
 /// Channels nest at most this deep (top level is depth 1).
 pub const MAX_CHANNEL_DEPTH: usize = 3;
 pub const MAX_CHANNELS: usize = 200;
+pub const MAX_ROLE_NAME_LEN: usize = 32;
+/// Roles a server may have, besides Everyone.
+pub const MAX_ROLES: usize = 32;
 
 /// How often the client sends a ping, and how long the server waits for
 /// any traffic before considering the connection dead.
@@ -82,9 +84,9 @@ pub struct ChannelInfo {
     pub has_password: bool,
     /// Where new clients land.
     pub default: bool,
-    /// Who made a temporary channel; they may edit and delete it.
+    /// Who made a temporary channel: they moderate it, and may edit and delete it.
     pub creator: Option<ClientId>,
-    /// They moderate this channel and every channel below it.
+    /// They hold the Moderator role in this channel and every channel below it.
     pub moderators: Vec<Identity>,
 }
 
@@ -110,8 +112,9 @@ pub struct ClientInfo {
     pub nickname: String,
     pub channel: ChannelId,
     pub status: ClientStatus,
-    /// Server admin: may manage every channel.
-    pub admin: bool,
+    /// Their highest role, shown next to their name: "Owner" for the owner,
+    /// `None` with only Everyone.
+    pub role: Option<String>,
     /// The same on every connection with the same key; two connections may share one.
     pub identity: Identity,
 }
@@ -125,7 +128,7 @@ pub struct BanInfo {
     /// Their nickname when they were banned.
     pub nickname: String,
     pub reason: String,
-    /// The admin's nickname.
+    /// Who banned them, by nickname.
     pub banned_by: String,
     pub created_unix: u64,
     /// `None`: permanent.
@@ -160,7 +163,7 @@ pub enum C2S {
         password: Option<String>,
         identity: IdentityProof,
     },
-    /// `password` is needed for password-protected channels (admins skip it).
+    /// `password` is needed for password-protected channels, unless they may bypass it.
     JoinChannel {
         channel: ChannelId,
         password: Option<String>,
@@ -179,63 +182,60 @@ pub enum C2S {
         target: ClientId,
         message: String,
     },
-    /// Anyone may create temporary channels; only admins permanent ones.
     /// The creator moves into the new channel.
     CreateChannel {
         parent: Option<ChannelId>,
         settings: ChannelSettings,
         temporary: bool,
     },
-    /// Admins, or the creator of a temporary channel.
     EditChannel {
         id: ChannelId,
         settings: ChannelSettings,
     },
-    /// Admins only. `position` is the index among the new siblings.
+    /// `position` is the index among the new siblings.
     MoveChannel {
         id: ChannelId,
         parent: Option<ChannelId>,
         position: u32,
     },
-    /// Admins, or the creator of a temporary channel. People inside move to the default channel.
+    /// People inside move to the default channel.
     DeleteChannel {
         id: ChannelId,
     },
-    /// Admins only.
     SetDefaultChannel {
         id: ChannelId,
     },
-    /// Become admin with the server's admin token.
-    Authenticate {
+    /// Become the owner with the claim token the server printed. It works once.
+    ClaimOwnership {
         token: String,
     },
-    /// Admins only. By identity, so someone offline can be removed too.
     SetModerator {
         channel: ChannelId,
         identity: Identity,
         moderator: bool,
     },
-    /// Out of their channel to where a new client would land (admins and the channel's
-    /// moderators), or off the server (admins). See [`perms`].
+    /// Out of their channel to where a new client would land, or off the server.
     Kick {
         target: ClientId,
         from_server: bool,
         reason: String,
     },
-    /// Admins only. Bans their identity, and their IP address with `include_ip`,
-    /// for `duration_secs` (`None`: for good), and kicks off everyone it covers.
+    /// Bans their identity, and their IP address with `include_ip`, for
+    /// `duration_secs` (`None`: for good), and kicks off everyone it covers.
     Ban {
         target: ClientId,
         duration_secs: Option<u64>,
         reason: String,
         include_ip: bool,
     },
-    /// Admins only; answered with [`S2C::Bans`].
+    /// Answered with [`S2C::Bans`].
     ListBans,
-    /// Admins only; answered with the new [`S2C::Bans`].
+    /// Answered with the new [`S2C::Bans`].
     Unban {
         id: BanId,
     },
+    /// Answered, like every change to the roles, with [`S2C::Roles`].
+    ChangeRoles(perms::RoleChange),
 }
 
 /// Server → client.
@@ -249,6 +249,7 @@ pub enum S2C {
         server: ServerInfo,
         channels: Vec<ChannelInfo>,
         clients: Vec<ClientInfo>,
+        permissions: perms::Permissions,
     },
     /// Handshake refused; the server closes the connection afterwards.
     /// Servers also send it, outside TLS, to clients too old for TLS.
@@ -290,9 +291,9 @@ pub enum S2C {
     },
     /// The whole channel list, sent after any change to it.
     Channels(Vec<ChannelInfo>),
-    ClientAdmin {
+    ClientRole {
         id: ClientId,
-        admin: bool,
+        role: Option<String>,
     },
     /// Sent to everyone before the kicked client is moved to the default
     /// channel, or disconnected with [`LeaveReason::Kicked`].
@@ -302,8 +303,13 @@ pub enum S2C {
         from_server: bool,
         reason: String,
     },
-    /// The ban list, for an admin who asked.
+    /// The ban list, for someone who may ban and asked.
     Bans(Vec<BanInfo>),
+    /// What this client may do, sent whenever that changes.
+    Permissions(perms::Permissions),
+    /// Every role and who holds them, for clients that may manage roles,
+    /// sent whenever they change.
+    Roles(perms::Roles),
 }
 
 #[derive(Debug)]

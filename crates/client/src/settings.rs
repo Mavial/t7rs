@@ -18,11 +18,8 @@ pub struct Settings {
     pub recent: Vec<Recent>,
     /// Per-person volume by nickname; only values other than 100% are kept.
     pub user_volumes: std::collections::BTreeMap<String, f32>,
-    /// Admin token per server address, sent automatically on connect.
-    pub admin_tokens: std::collections::BTreeMap<String, String>,
     /// Certificate fingerprint per `net::canonical_address`, pinned on first connect.
     pub server_certs: std::collections::BTreeMap<String, Fingerprint>,
-    /// Who this user is on every server: bans and moderator rights follow it.
     /// Made on the first connect.
     pub identity_key: Option<IdentityKey>,
 }
@@ -118,7 +115,6 @@ mod tests {
             audio: AudioSettings { ptt_key: Some(crate::audio::PttKey { vk: 0x56 }), ..Default::default() },
             recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
             user_volumes: [("Some One".to_owned(), 0.5)].into(),
-            admin_tokens: [("1.2.3.4".to_owned(), "abc".to_owned())].into(),
             server_certs: [("1.2.3.4:9988".to_owned(), Fingerprint([0xab; 32]))].into(),
             identity_key: Some(new_identity_key()),
         };

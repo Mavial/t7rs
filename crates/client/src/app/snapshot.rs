@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
+use t7_proto::perms::{Member, Permissions, Perms, RoleId, Roles};
 use t7_proto::{ChannelInfo, ClientInfo, ClientStatus, Identity, ServerInfo};
 
 use super::*;
@@ -28,7 +29,7 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
 }
 
 fn client(id: u32, name: &str, channel: u32, status: ClientStatus) -> ClientInfo {
-    ClientInfo { id, nickname: name.into(), channel, status, admin: false, identity: Identity([id as u8; 32]) }
+    ClientInfo { id, nickname: name.into(), channel, status, role: None, identity: Identity([id as u8; 32]) }
 }
 
 fn view() -> ServerView {
@@ -48,11 +49,15 @@ fn view() -> ServerView {
     let deaf = ClientStatus { muted: true, deafened: true, ..Default::default() };
     let away = ClientStatus { away: true, ..Default::default() };
     let mut me = client(1, "Santi", 2, ClientStatus::default());
-    me.admin = true;
+    me.role = Some("Owner".into());
+    let mut marta = client(2, "Marta", 2, ClientStatus::default());
+    marta.role = Some("Admin".into());
+    let mut kenji = client(3, "Kenji", 2, muted);
+    kenji.role = Some("Moderator".into());
     let clients = vec![
         me,
-        client(2, "Marta", 2, ClientStatus::default()),
-        client(3, "Kenji", 2, muted),
+        marta,
+        kenji,
         client(4, "Ola", 3, deaf),
         client(5, "Priya", 3, ClientStatus::default()),
         client(6, "Dmitri", 3, ClientStatus::default()),
@@ -60,7 +65,21 @@ fn view() -> ServerView {
         client(8, "Ines", 1, ClientStatus::default()),
     ];
     let info = ServerInfo { name: "Friday Night".into(), welcome: String::new(), max_clients: 32 };
-    ServerView::new(1, info, vec![lobby, games, ranked, duo, afk, music], clients)
+    let channels = vec![lobby, games, ranked, duo, afk, music];
+    let everywhere = channels.iter().map(|c| (c.id, Perms::ALL)).collect();
+    let mut view =
+        ServerView::new(1, info, channels, clients, Permissions { server: Perms::ALL, channels: everywhere });
+    let mut roles = Roles { owner: Some(Identity([1; 32])), ..Roles::default() };
+    for (id, nickname, held) in [
+        (1, "Santi", &[][..]),
+        (2, "Marta", &[RoleId::ADMIN][..]),
+        (3, "Kenji", &[RoleId::MODERATOR][..]),
+        (9, "Jonas", &[RoleId::MODERATOR][..]),
+    ] {
+        roles.members.insert(Identity([id; 32]), Member { nickname: nickname.into(), roles: held.to_vec() });
+    }
+    view.roles = Some(roles);
+    view
 }
 
 fn line(time: &str, kind: LineKind, text: &str) -> Line {
@@ -155,7 +174,10 @@ const SCENES: &[Scene] = &[
     }),
     ("10-bans", (1100, 720), |ctx| {
         let mut app = connected(ctx);
-        app.moderation = Some(Moderation::Bans(Some(vec![BanInfo {
+        app.open_server_settings();
+        let settings = app.server_settings.as_mut().unwrap();
+        settings.tab = SettingsTab::Bans;
+        settings.bans = Some(vec![BanInfo {
             id: 1,
             nickname: "Troll".into(),
             identity: Identity([9; 32]),
@@ -164,7 +186,7 @@ const SCENES: &[Scene] = &[
             banned_by: "Santi".into(),
             created_unix: 1_763_000_000,
             expires_unix: Some(1_763_600_000),
-        }])));
+        }]);
         app
     }),
     ("11-poke", (1100, 720), |ctx| {
@@ -196,27 +218,90 @@ const SCENES: &[Scene] = &[
         });
         app
     }),
-    ("15-admin-login", (1100, 720), |ctx| {
+    ("15-claim-ownership", (1100, 720), |ctx| {
         let mut app = connected(ctx);
-        app.channel_dialog = Some(ChannelDialog::AdminLogin { token: String::new(), focused: false });
+        app.channel_dialog = Some(ChannelDialog::ClaimOwnership { token: String::new(), focused: false });
+        app
+    }),
+    ("17-roles", (1100, 760), |ctx| {
+        let mut app = connected(ctx);
+        app.open_server_settings();
+        app
+    }),
+    ("18-roles-everyone", (1100, 760), |ctx| {
+        let mut app = connected(ctx);
+        app.open_server_settings();
+        app.server_settings.as_mut().unwrap().picked = Pick::Everyone;
         app
     }),
     ("16-connecting", (1100, 720), |ctx| {
         let mut app = disconnected(ctx);
-        app.conn = Conn::Connecting { address: "friday.example.com".into(), password: String::new(), known_cert: true };
+        app.conn = Conn::Connecting { address: "friday.example.com".into(), password: String::new() };
         app
     }),
 ];
 
-fn render(name: &str, (w, h): (u32, u32), make: fn(&egui::Context) -> App, scale: f32, dir: &std::path::Path) {
+#[derive(Clone, Copy)]
+enum RightButton {
+    Press,
+    Release,
+}
+
+#[derive(Clone, Copy)]
+struct Step {
+    x: f32,
+    y: f32,
+    right_button: Option<RightButton>,
+}
+
+struct Menu {
+    name: &'static str,
+    size: (u32, u32),
+    make: fn(&egui::Context) -> App,
+    steps: &'static [Step],
+}
+
+const MENUS: &[Menu] = &[Menu {
+    name: "19-user-roles",
+    size: (1100, 720),
+    make: connected,
+    steps: &[
+        Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Press) },
+        Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Release) },
+        Step { x: 150.0, y: 330.0, right_button: None },
+    ],
+}];
+
+const FRAMES_BEFORE_STEPS: usize = 2;
+
+const FRAMES_PER_SECOND: f64 = 4.0;
+
+fn render(
+    name: &str,
+    (w, h): (u32, u32),
+    make: fn(&egui::Context) -> App,
+    steps: &[Step],
+    scale: f32,
+    dir: &std::path::Path,
+) {
     let ctx = egui::Context::default();
     let mut app = make(&ctx);
     let mut renderer = EguiSoftwareRender::new(ColorFieldOrder::Rgba).with_caching(false);
     let mut px = vec![[0u8; 4]; (w * h) as usize];
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w as f32 / scale, h as f32 / scale));
     // Enough frames for layout to settle and fades to finish.
-    for frame in 0..6 {
-        let mut raw = egui::RawInput { screen_rect: Some(screen), time: Some(f64::from(frame)), ..Default::default() };
+    for frame in 0..6 + steps.len() {
+        let time = Some(frame as f64 / FRAMES_PER_SECOND);
+        let mut raw = egui::RawInput { screen_rect: Some(screen), time, ..Default::default() };
+        if let Some(step) = frame.checked_sub(FRAMES_BEFORE_STEPS).and_then(|step| steps.get(step)) {
+            let pos = egui::pos2(step.x, step.y);
+            raw.events.push(egui::Event::PointerMoved(pos));
+            if let Some(right_button) = step.right_button {
+                let pressed = matches!(right_button, RightButton::Press);
+                let (button, modifiers) = (egui::PointerButton::Secondary, egui::Modifiers::default());
+                raw.events.push(egui::Event::PointerButton { pos, button, pressed, modifiers });
+            }
+        }
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(scale);
         let out = ctx.run_ui(raw, |ui| app.ui(ui));
         let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
@@ -241,9 +326,11 @@ fn snapshots() {
         .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots"), PathBuf::from);
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let only = std::env::var("T7_SNAPSHOT").ok();
-    for &(name, size, make) in SCENES {
+    let scenes = SCENES.iter().map(|&(name, size, make)| (name, size, make, &[][..]));
+    let menus = MENUS.iter().map(|m| (m.name, m.size, m.make, m.steps));
+    for (name, size, make, steps) in scenes.chain(menus) {
         if only.as_deref().is_none_or(|o| name.contains(o)) {
-            render(name, size, make, 1.0, &dir);
+            render(name, size, make, steps, 1.0, &dir);
         }
     }
 }
