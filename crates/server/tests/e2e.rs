@@ -416,7 +416,7 @@ async fn the_first_to_claim_owns_the_server() {
     let alice_id = welcomed_id(&wa);
     let S2C::Welcome { permissions, .. } = &wb else { unreachable!() };
     assert!(!permissions.server.has(Perm::ManageRoles));
-    alice.recv().await;
+    alice.until(|m| matches!(m, S2C::ClientJoined(c) if c.nickname == "bob")).await;
 
     bob.send(C2S::ClaimOwnership { token: "guess".into() }).await;
     assert!(error(&mut bob).await.contains("wrong"));
@@ -856,8 +856,7 @@ async fn moderators_and_bans_survive_a_restart() {
     admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: false }).await;
     assert!(admin.channels().await.iter().all(|c| c.moderators.is_empty()));
     // The server saves after it broadcasts; a round trip waits for that.
-    admin.send(C2S::Ping { nonce: 1 }).await;
-    admin.until(|m| matches!(m, S2C::Pong { .. })).await;
+    admin.sync().await;
     let saved = std::fs::read_to_string(dir.join("channels.toml")).unwrap();
     assert!(!saved.contains("moderators"), "{saved}");
     task.abort();
@@ -865,9 +864,13 @@ async fn moderators_and_bans_survive_a_restart() {
 }
 
 impl TestClient {
-    async fn change_roles(&mut self, change: RoleChange) -> Roles {
+    async fn sync(&mut self) {
         self.send(C2S::Ping { nonce: 0 }).await;
         self.until(|m| matches!(m, S2C::Pong { .. })).await;
+    }
+
+    async fn change_roles(&mut self, change: RoleChange) -> Roles {
+        self.sync().await;
         self.send(C2S::ChangeRoles(change)).await;
         match self.until(|m| matches!(m, S2C::Roles(_) | S2C::Error { .. })).await {
             S2C::Roles(roles) => roles,
