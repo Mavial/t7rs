@@ -267,7 +267,7 @@ To publish a release:
 
 ```sh
 # 1. bump `version` in Cargo.toml, commit
-git tag v0.3.0 && git push origin main v0.3.0
+git tag vX.Y.Z && git push origin main vX.Y.Z
 ```
 
 GitHub Actions (`.github/workflows/release.yml`) then builds Windows, Linux and
