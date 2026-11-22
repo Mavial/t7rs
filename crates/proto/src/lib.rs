@@ -39,6 +39,9 @@ pub const MAX_CHANNEL_TOPIC_LEN: usize = 200;
 /// Channels nest at most this deep (top level is depth 1).
 pub const MAX_CHANNEL_DEPTH: usize = 3;
 pub const MAX_CHANNELS: usize = 200;
+pub const MAX_ROLE_NAME_LEN: usize = 32;
+/// Roles a server may have, besides Everyone.
+pub const MAX_ROLES: usize = 32;
 
 /// How often the client sends a ping, and how long the server waits for
 /// any traffic before considering the connection dead.
@@ -233,6 +236,8 @@ pub enum C2S {
     Unban {
         id: BanId,
     },
+    /// Answered, like every change to the roles, with [`S2C::Roles`].
+    ChangeRoles(perms::RoleChange),
 }
 
 /// Server → client.

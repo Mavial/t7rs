@@ -257,6 +257,40 @@ impl Default for Roles {
     }
 }
 
+/// A change to the roles, by someone who may manage them, to roles and
+/// people below their own role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoleChange {
+    /// A new role without permissions, at the bottom, just above Everyone.
+    Create {
+        name: String,
+    },
+    Rename {
+        id: RoleId,
+        name: String,
+    },
+    /// Everyone's too.
+    SetPermissions {
+        id: RoleId,
+        perms: Perms,
+    },
+    /// `position` is the index among the roles, highest first.
+    Move {
+        id: RoleId,
+        position: u32,
+    },
+    /// Whoever holds it loses it.
+    Delete {
+        id: RoleId,
+    },
+    /// By identity, so someone offline can lose a role. Only someone online can get one.
+    Assign {
+        identity: Identity,
+        role: RoleId,
+        held: bool,
+    },
+}
+
 /// Who is asking: the person, and the connection, which may own a temporary channel.
 #[derive(Debug, Clone, Copy)]
 pub struct Subject {
@@ -299,8 +333,14 @@ impl Roles {
     }
 
     pub fn height(&self, role: RoleId) -> Rank {
-        let below = self.ranked.iter().position(|r| r.id == role).map_or(0, |i| self.ranked.len() - i);
-        Rank(below as u32)
+        self.ranked.iter().position(|r| r.id == role).map_or(Rank::EVERYONE, |i| self.height_at(i))
+    }
+
+    /// The height of the role at `position` among them, highest first, or of
+    /// one moved there.
+    pub fn height_at(&self, position: usize) -> Rank {
+        let len = self.ranked.len();
+        Rank((len - position.min(len.saturating_sub(1))) as u32)
     }
 
     /// Their highest standing on the server, wherever they are.

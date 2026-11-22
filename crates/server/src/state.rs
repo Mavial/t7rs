@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use t7_proto::perms::{Perm, Permissions, RoleId, Standing, Subject};
+use t7_proto::perms::{Perm, Permissions, Rank, RoleChange, RoleId, Standing, Subject};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     BanId, BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason,
@@ -399,6 +399,51 @@ impl Server {
             }
             C2S::ListBans => self.list_bans(id),
             C2S::Unban { id: ban } => self.unban(id, ban),
+            C2S::ChangeRoles(change) => self.change_roles(id, change),
+        }
+    }
+
+    /// Applies a change to roles below `id`'s own, and to people below it, if
+    /// it may manage roles.
+    fn change_roles(&mut self, id: ClientId, change: RoleChange) {
+        let mine = self.standing(id, None);
+        if !mine.perms.has(Perm::ManageRoles) {
+            return self.error(id, "you can't manage roles");
+        }
+        let roles = self.roles.roles();
+        let highest = match &change {
+            // It starts at the bottom, below theirs if they hold any.
+            RoleChange::Create { .. } => Rank::EVERYONE,
+            RoleChange::Rename { id, .. } | RoleChange::SetPermissions { id, .. } | RoleChange::Delete { id } => {
+                roles.height(*id)
+            }
+            RoleChange::Move { id, position } => roles.height(*id).max(roles.height_at(*position as usize)),
+            RoleChange::Assign { identity, role, .. } => roles.height(*role).max(roles.rank(*identity)),
+        };
+        if mine.rank <= highest {
+            return self.error(id, "you can only manage roles, and the roles of people, below your own");
+        }
+        let changed = match change {
+            RoleChange::Create { name } => self.roles.create(&name).map(drop),
+            RoleChange::Rename { id, name } => self.roles.rename(id, &name),
+            RoleChange::SetPermissions { id, perms } => self.roles.set_perms(id, perms),
+            RoleChange::Move { id, position } => self.roles.move_to(id, position as usize),
+            RoleChange::Delete { id } => self.roles.delete(id),
+            RoleChange::Assign { identity, role, held: false } => self.roles.revoke(identity, role).map(drop),
+            RoleChange::Assign { identity, role, held: true } => {
+                let online = self.clients.values().find(|c| c.info.identity == identity);
+                let Some(nickname) = online.map(|c| c.info.nickname.clone()) else {
+                    return self.error(id, "they need to be online to get a role");
+                };
+                self.roles.grant(identity, &nickname, role).map(drop)
+            }
+        };
+        match changed {
+            Ok(()) => {
+                self.save_roles();
+                self.refresh(true);
+            }
+            Err(e) => self.error(id, &e.message()),
         }
     }
 

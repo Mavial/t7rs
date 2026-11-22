@@ -5,8 +5,33 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use t7_proto::Identity;
 use t7_proto::perms::{Member, Perms, Role, RoleId, Roles};
+use t7_proto::{Identity, MAX_ROLE_NAME_LEN, MAX_ROLES};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleError {
+    NotFound,
+    BadName,
+    NameTaken,
+    TooMany,
+    /// Everyone can't be renamed, moved, deleted, given or taken.
+    Everyone,
+    /// Channel moderators hold it.
+    Moderator,
+}
+
+impl RoleError {
+    pub fn message(self) -> String {
+        match self {
+            RoleError::NotFound => "that role does not exist".into(),
+            RoleError::BadName => format!("role names need 1 to {MAX_ROLE_NAME_LEN} characters"),
+            RoleError::NameTaken => "a role with that name already exists".into(),
+            RoleError::TooMany => format!("the server has the maximum of {MAX_ROLES} roles"),
+            RoleError::Everyone => "everyone has the Everyone role; only its permissions change".into(),
+            RoleError::Moderator => "the Moderator role can't be deleted: channel moderators hold it".into(),
+        }
+    }
+}
 
 /// `roles.toml`.
 #[derive(Serialize, Deserialize)]
@@ -118,6 +143,113 @@ impl RoleStore {
         true
     }
 
+    /// A new role without permissions, at the bottom.
+    pub fn create(&mut self, name: &str) -> Result<RoleId, RoleError> {
+        if self.roles.ranked.len() >= MAX_ROLES {
+            return Err(RoleError::TooMany);
+        }
+        let name = self.valid_name(name, None)?;
+        let id = RoleId(self.next_id);
+        self.next_id += 1;
+        self.roles.ranked.push(Role { id, name, perms: Perms::NONE });
+        Ok(id)
+    }
+
+    pub fn rename(&mut self, id: RoleId, name: &str) -> Result<(), RoleError> {
+        let name = self.valid_name(name, Some(id))?;
+        self.role_mut(id)?.name = name;
+        Ok(())
+    }
+
+    pub fn set_perms(&mut self, id: RoleId, perms: Perms) -> Result<(), RoleError> {
+        if id == RoleId::EVERYONE {
+            self.roles.everyone = perms;
+        } else {
+            self.role_mut(id)?.perms = perms;
+        }
+        Ok(())
+    }
+
+    /// To `position` among the roles, highest first.
+    pub fn move_to(&mut self, id: RoleId, position: usize) -> Result<(), RoleError> {
+        let at = self.index(id)?;
+        let role = self.roles.ranked.remove(at);
+        let position = position.min(self.roles.ranked.len());
+        self.roles.ranked.insert(position, role);
+        Ok(())
+    }
+
+    /// Whoever holds it loses it.
+    pub fn delete(&mut self, id: RoleId) -> Result<(), RoleError> {
+        if id == RoleId::MODERATOR {
+            return Err(RoleError::Moderator);
+        }
+        let at = self.index(id)?;
+        self.roles.ranked.remove(at);
+        let owner = self.roles.owner;
+        for member in self.roles.members.values_mut() {
+            member.roles.retain(|r| *r != id);
+        }
+        self.roles.members.retain(|identity, m| !m.roles.is_empty() || owner == Some(*identity));
+        Ok(())
+    }
+
+    /// Gives someone online, known as `nickname`, a role. Returns whether they lacked it.
+    pub fn grant(&mut self, identity: Identity, nickname: &str, role: RoleId) -> Result<bool, RoleError> {
+        self.index(role)?;
+        let member =
+            self.roles.members.entry(identity).or_insert(Member { nickname: String::new(), roles: Vec::new() });
+        nickname.clone_into(&mut member.nickname);
+        if member.roles.contains(&role) {
+            return Ok(false);
+        }
+        member.roles.push(role);
+        member.roles.sort_unstable();
+        Ok(true)
+    }
+
+    /// Returns whether they held it.
+    pub fn revoke(&mut self, identity: Identity, role: RoleId) -> Result<bool, RoleError> {
+        self.index(role)?;
+        let Some(member) = self.roles.members.get_mut(&identity) else { return Ok(false) };
+        if !member.roles.contains(&role) {
+            return Ok(false);
+        }
+        member.roles.retain(|r| *r != role);
+        if member.roles.is_empty() && self.roles.owner != Some(identity) {
+            self.roles.members.remove(&identity);
+        }
+        Ok(true)
+    }
+
+    /// Where the role is among them, highest first.
+    fn index(&self, id: RoleId) -> Result<usize, RoleError> {
+        if id == RoleId::EVERYONE {
+            return Err(RoleError::Everyone);
+        }
+        self.roles.ranked.iter().position(|r| r.id == id).ok_or(RoleError::NotFound)
+    }
+
+    fn role_mut(&mut self, id: RoleId) -> Result<&mut Role, RoleError> {
+        let at = self.index(id)?;
+        Ok(&mut self.roles.ranked[at])
+    }
+
+    /// Trimmed, without control characters, and unlike any other role's,
+    /// Everyone's and Owner's included.
+    fn valid_name(&self, raw: &str, except: Option<RoleId>) -> Result<String, RoleError> {
+        let name: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
+        if name.is_empty() || name.chars().count() > MAX_ROLE_NAME_LEN {
+            return Err(RoleError::BadName);
+        }
+        let reserved = ["Everyone", "Owner"].iter().any(|r| r.eq_ignore_ascii_case(&name));
+        let taken = self.roles.ranked.iter().any(|r| Some(r.id) != except && r.name.eq_ignore_ascii_case(&name));
+        if reserved || taken {
+            return Err(RoleError::NameTaken);
+        }
+        Ok(name)
+    }
+
     /// Remembers the nickname of someone who holds roles. Returns whether it changed.
     pub fn seen(&mut self, identity: Identity, nickname: &str) -> bool {
         match self.roles.members.get_mut(&identity) {
@@ -162,6 +294,66 @@ mod tests {
     }
 
     #[test]
+    fn roles_are_made_ordered_and_removed() {
+        let mut store = RoleStore::default();
+        let dj = store.create("  DJ ").unwrap();
+        assert_eq!(store.roles().role(dj).unwrap().name, "DJ");
+        assert_eq!(store.roles().ranked.last().unwrap().id, dj, "new roles start at the bottom");
+        for name in ["dj", "", "everyone", "OWNER", &"x".repeat(MAX_ROLE_NAME_LEN + 1)] {
+            assert!(store.create(name).is_err(), "{name:?}");
+        }
+        assert_eq!(store.rename(RoleId::ADMIN, "Moderator"), Err(RoleError::NameTaken));
+        store.rename(dj, "Dj").unwrap();
+
+        store.move_to(dj, 0).unwrap();
+        assert_eq!(store.roles().ranked[0].id, dj);
+        store.move_to(dj, 99).unwrap();
+        assert_eq!(store.roles().ranked.last().unwrap().id, dj);
+        assert_eq!(store.move_to(RoleId::EVERYONE, 0), Err(RoleError::Everyone));
+
+        let perms = Perms::of(&[t7_proto::perms::Perm::Kick]);
+        store.set_perms(dj, perms).unwrap();
+        store.set_perms(RoleId::EVERYONE, perms).unwrap();
+        assert_eq!((store.roles().role(dj).unwrap().perms, store.roles().everyone), (perms, perms));
+
+        assert_eq!(store.delete(RoleId::MODERATOR), Err(RoleError::Moderator));
+        assert_eq!(store.delete(RoleId::EVERYONE), Err(RoleError::Everyone));
+        store.grant(ALICE, "alice", dj).unwrap();
+        store.delete(dj).unwrap();
+        assert!(store.roles().role(dj).is_none() && store.roles().members.is_empty(), "nobody holds it");
+        assert_ne!(store.create("DJ").unwrap(), dj, "ids are not reused");
+
+        for i in store.roles().ranked.len()..MAX_ROLES {
+            store.create(&format!("r{i}")).unwrap();
+        }
+        assert_eq!(store.create("one more"), Err(RoleError::TooMany));
+    }
+
+    #[test]
+    fn roles_are_given_and_taken() {
+        let mut store = RoleStore::default();
+        assert_eq!(store.grant(ALICE, "alice", RoleId::MODERATOR), Ok(true));
+        assert_eq!(store.grant(ALICE, "Alice", RoleId::MODERATOR), Ok(false), "already held");
+        assert_eq!(store.roles().members[&ALICE].nickname, "Alice", "the latest nickname");
+        store.grant(ALICE, "Alice", RoleId::ADMIN).unwrap();
+        assert_eq!(store.grant(ALICE, "Alice", RoleId::EVERYONE), Err(RoleError::Everyone));
+        assert_eq!(store.grant(ALICE, "Alice", RoleId(99)), Err(RoleError::NotFound));
+
+        assert_eq!(store.revoke(ALICE, RoleId::ADMIN), Ok(true));
+        assert_eq!(store.revoke(ALICE, RoleId::ADMIN), Ok(false));
+        assert_eq!(store.revoke(BOB, RoleId::ADMIN), Ok(false), "never had it");
+        store.revoke(ALICE, RoleId::MODERATOR).unwrap();
+        assert!(store.roles().members.is_empty(), "forgotten with no roles left");
+
+        // The owner is remembered without roles.
+        store.set_claim_token("t".into());
+        store.claim("t", BOB, "bob");
+        store.grant(BOB, "bob", RoleId::ADMIN).unwrap();
+        store.revoke(BOB, RoleId::ADMIN).unwrap();
+        assert!(store.roles().members.contains_key(&BOB));
+    }
+
+    #[test]
     fn everything_survives_a_restart() {
         let file = temp_file("restart");
         let mut store = RoleStore::default();
@@ -171,12 +363,16 @@ mod tests {
         assert!(store.seen(ALICE, "Alice"));
         assert!(!store.seen(ALICE, "Alice"));
         assert!(!store.seen(BOB, "bob"), "only people with roles are remembered");
+        let dj = store.create("DJ").unwrap();
+        store.move_to(dj, 0).unwrap();
+        store.grant(BOB, "bob", dj).unwrap();
         store.save(&file).unwrap();
 
         let back = RoleStore::load(&file).unwrap();
         assert_eq!(back.roles(), store.roles());
         assert_eq!(back.claim_token(), Some("pending"));
         assert_eq!(back.roles().members[&ALICE].nickname, "Alice");
+        assert_ne!(RoleStore { next_id: back.next_id, ..RoleStore::default() }.create("New"), Ok(dj));
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
