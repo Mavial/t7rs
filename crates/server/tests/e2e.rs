@@ -890,9 +890,15 @@ async fn moderators_and_bans_survive_a_restart() {
 }
 
 impl TestClient {
-    async fn sync(&mut self) {
+    async fn sync(&mut self) -> Vec<S2C> {
         self.send(C2S::Ping { nonce: 0 }).await;
-        self.until(|m| matches!(m, S2C::Pong { .. })).await;
+        let mut before = Vec::new();
+        loop {
+            match self.recv().await {
+                S2C::Pong { nonce: 0 } => return before,
+                m => before.push(m),
+            }
+        }
     }
 
     async fn change_roles(&mut self, change: RoleChange) -> Roles {
@@ -1067,19 +1073,6 @@ fn names(list: &[ChannelInfo]) -> Vec<&str> {
     names
 }
 
-impl TestClient {
-    async fn drain(&mut self) -> Vec<S2C> {
-        self.send(C2S::Ping { nonce: 9 }).await;
-        let mut got = Vec::new();
-        loop {
-            match self.recv().await {
-                S2C::Pong { nonce: 9 } => return got,
-                m => got.push(m),
-            }
-        }
-    }
-}
-
 #[tokio::test]
 async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators() {
     let dir = data_dir("hidden");
@@ -1108,7 +1101,7 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     assert!(clients.iter().all(|c| c.id != mod_id), "{clients:?}");
     moder.send(C2S::SendText { target: TextTarget::Server, text: "psst".into() }).await;
     owner.until(|m| matches!(m, S2C::Text { from, .. } if *from == mod_id)).await;
-    let heard = late.drain().await;
+    let heard = late.sync().await;
     assert!(heard.iter().all(|m| !matches!(m, S2C::Text { from, .. } if *from == mod_id)), "{heard:?}");
 
     user.send(C2S::JoinChannel { channel: office, password: None }).await;
@@ -1200,7 +1193,7 @@ async fn a_category_is_never_joined_or_nested() {
     let list = admin.channels().await;
     let games = id_of(&list, "Games");
     assert_eq!(list.iter().find(|c| c.id == games).unwrap().kind, ChannelKind::Category);
-    let after = admin.drain().await;
+    let after = admin.sync().await;
     assert!(after.iter().all(|m| !matches!(m, S2C::ClientMoved { .. })), "its creator stays put: {after:?}");
 
     admin.send(C2S::JoinChannel { channel: games, password: None }).await;
