@@ -17,7 +17,7 @@ use t7_proto::{
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
 use crate::channel_drop::{self, DropTarget, Outcome, Zone};
 use crate::icons::{self, Icon};
-use crate::net::{self, Ended, Net, NetEvent, SessionId};
+use crate::net::{Ended, Net, NetEvent, ServerKey, SessionId};
 use crate::ptt;
 use crate::settings::{self, Recent, Settings};
 use crate::sounds::{self, Pack, Resolved, Sound};
@@ -85,7 +85,7 @@ enum Conn {
         password: String,
     },
     Connected {
-        server: String,
+        server: ServerKey,
     },
 }
 
@@ -414,7 +414,7 @@ impl App {
             return;
         }
         self.settings.nickname.clone_from(&nickname);
-        let pinned = self.settings.server_certs.get(&net::canonical_address(&address)).copied();
+        let pinned = self.settings.server_certs.get(&ServerKey::of(&address)).copied();
         let login_password = Some(password.clone()).filter(|p| !p.is_empty());
         let key = self.settings.identity_key.get_or_insert_with(settings::new_identity_key).clone();
         self.session = self.net.connect(address.clone(), nickname, login_password, pinned, key);
@@ -731,7 +731,7 @@ impl App {
                 NetEvent::Secured(s, fingerprint) if s == self.session => {
                     // Trust on first use: the first certificate seen at an address is pinned.
                     if let Conn::Connecting { address, .. } = &self.conn {
-                        self.settings.server_certs.entry(net::canonical_address(address)).or_insert(fingerprint);
+                        self.settings.server_certs.entry(ServerKey::of(address)).or_insert(fingerprint);
                     }
                 }
                 NetEvent::Closed(s, ended) if s == self.session => self.on_closed(ended),
@@ -786,7 +786,7 @@ impl App {
                     Conn::Connecting { address, .. } => address.clone(),
                     _ => String::new(),
                 };
-                let server_key = net::canonical_address(&address);
+                let server_key = ServerKey::of(&address);
                 let recent = Recent { address, server_name: server.name.clone() };
                 self.settings.recent.retain(|r| r.address != recent.address);
                 self.settings.recent.insert(0, recent);
@@ -1196,11 +1196,10 @@ impl App {
                     let dragging_self = egui::DragAndDrop::has_payload_of_type::<DragSelf>(ui.ctx());
                     let dragging_channel = egui::DragAndDrop::payload::<DragChannel>(ui.ctx()).map(|d| d.0);
                     let pointer = ui.input(|i| i.pointer.interact_pos());
-                    let server = match &self.conn {
-                        Conn::Connected { server } => server.as_str(),
-                        _ => "",
+                    let folded = match &self.conn {
+                        Conn::Connected { server } => self.settings.folded.get(server),
+                        _ => None,
                     };
-                    let folded = self.settings.folded.get(server);
                     let mut in_fold = false;
                     for (row, &(depth, ch_id)) in view.tree().iter().enumerate() {
                         let ch = &view.channels[&ch_id];
@@ -2290,7 +2289,7 @@ impl App {
         });
         if trust {
             let change = self.cert_change.take().expect("dialog open");
-            self.settings.server_certs.insert(net::canonical_address(&change.address), change.presented);
+            self.settings.server_certs.insert(ServerKey::of(&change.address), change.presented);
             let nickname = self.settings.nickname.clone();
             self.connect(change.address, nickname, change.password);
         } else if cancel || modal.should_close() {

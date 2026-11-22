@@ -112,7 +112,7 @@ fn connected(ctx: &egui::Context) -> App {
     settings.user_volumes.insert("Marta".into(), 0.6);
     let mut app = App::new(ctx, settings, None);
     app.view = Some(view());
-    app.conn = Conn::Connected { server: "friday.example.com:9988".into() };
+    app.conn = Conn::Connected { server: ServerKey::of("friday.example.com:9988") };
     app.ping = Some(Duration::from_millis(23));
     app.tabs[1].title = "Games".into();
     app.active_tab = 1;
@@ -267,7 +267,7 @@ const SCENES: &[Scene] = &[
     }),
     ("23-folded-category", (1100, 720), |ctx| {
         let mut app = connected(ctx);
-        app.settings.folded.insert("friday.example.com:9988".into(), ["Staff".to_owned()].into());
+        app.settings.folded.insert(ServerKey::of("friday.example.com:9988"), ["Staff".to_owned()].into());
         app
     }),
     ("16-connecting", (1100, 720), |ctx| {
