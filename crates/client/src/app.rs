@@ -11,7 +11,8 @@ use t7_proto::{C2S, ChannelId, ClientId, ClientStatus, LeaveReason, S2C, TextTar
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
 use crate::icons::{self, Icon};
 use crate::net::{Net, NetEvent, SessionId};
-use crate::settings::{Recent, Settings};
+use crate::settings::{self, Recent, Settings};
+use crate::sounds::{self, Pack, Resolved, Sound};
 use crate::{ptt, theme};
 
 const MAX_LINES: usize = 1000;
@@ -95,7 +96,23 @@ impl Voice {
     }
 }
 
+struct PokeForm {
+    target: ClientId,
+    name: String,
+    message: String,
+    focus_requested: bool,
+}
+
+/// A poke someone sent us, waiting to be acknowledged.
+struct PokeAlert {
+    from: String,
+    message: String,
+    time: String,
+}
+
 struct AudioDialog {
+    /// (label, folder) of every selectable sound pack except the built-in one.
+    packs: Vec<(String, std::path::PathBuf)>,
     inputs: Vec<String>,
     outputs: Vec<String>,
     /// Waiting for a key press to bind push-to-talk.
@@ -118,6 +135,11 @@ pub struct App {
     last_error: Option<String>,
     voice: Voice,
     audio_dialog: Option<AudioDialog>,
+    poke_form: Option<PokeForm>,
+    pokes: std::collections::VecDeque<PokeAlert>,
+    sound_pack: Pack,
+    /// Ask the window manager to flash the taskbar entry.
+    attention: bool,
 }
 
 impl App {
@@ -154,7 +176,12 @@ impl App {
             last_error: None,
             voice,
             audio_dialog: None,
+            poke_form: None,
+            pokes: Default::default(),
+            sound_pack: Pack::BuiltIn,
+            attention: false,
         };
+        app.sound_pack = Pack::open(app.settings.audio.sound_pack.as_deref());
         if let Some(l) = launch {
             let nick = l.nickname.unwrap_or_else(|| app.settings.nickname.clone());
             app.connect(l.address, nick, String::new());
@@ -211,10 +238,51 @@ impl App {
     }
 
     fn set_status(&mut self, status: ClientStatus) {
+        let mic_off = |s: ClientStatus| s.muted || s.deafened;
+        let was_off = mic_off(self.settings.status);
         self.settings.status = status;
         if matches!(self.conn, Conn::Connected) {
             self.net.send(C2S::SetStatus(status));
+            match (was_off, mic_off(status)) {
+                (false, true) => self.sound(Sound::MicMuted),
+                (true, false) => self.sound(Sound::MicUnmuted),
+                _ => {}
+            }
         }
+    }
+
+    fn sound(&self, sound: Sound) {
+        let a = &self.settings.audio;
+        if !a.sounds {
+            return;
+        }
+        let playback = &self.voice.playback;
+        match self.sound_pack.resolve(sound) {
+            Resolved::Chime => playback.play_chime(sound, a.sounds_volume),
+            Resolved::Silent => {}
+            Resolved::File(path) => match sounds::load_wav(&path) {
+                Ok(samples) => playback.play_samples(samples, a.sounds_volume),
+                Err(e) => {
+                    tracing::warn!("sound pack file {}: {e}", path.display());
+                    playback.play_chime(sound, a.sounds_volume);
+                }
+            },
+        }
+    }
+
+    fn open_poke(&mut self, target: ClientId) {
+        let Some(name) = self.view.as_ref().and_then(|v| v.nickname(target)) else { return };
+        self.poke_form = Some(PokeForm { target, name: name.to_owned(), message: String::new(), focus_requested: false });
+    }
+
+    fn on_poked(&mut self, from: ClientId, message: String) {
+        let from = self.view.as_ref().and_then(|v| v.nickname(from)).unwrap_or("Someone").to_owned();
+        let line = if message.is_empty() { format!("{from} poked you") } else { format!("{from} poked you: {message}") };
+        self.push(0, LineKind::System, line);
+        self.sound(Sound::Poke);
+        let time = chrono::Local::now().format("%H:%M").to_string();
+        self.pokes.push_back(PokeAlert { from, message, time });
+        self.attention = true;
     }
 
     fn open_private(&mut self, id: ClientId) {
@@ -319,6 +387,9 @@ impl App {
             (None, true) => self.push(0, LineKind::System, "Disconnected"),
             _ => {}
         }
+        if was_connected {
+            self.sound(if reason.is_some() { Sound::ConnectionLost } else { Sound::Disconnected });
+        }
         if !was_connected {
             self.last_error = reason;
         }
@@ -347,6 +418,7 @@ impl App {
                 self.active_tab = 1;
                 self.sync_channel_tab_title();
                 self.push(0, LineKind::System, format!("Connected to {name}"));
+                self.sound(Sound::Connected);
                 if !welcome.is_empty() {
                     self.push(0, LineKind::System, welcome);
                 }
@@ -365,6 +437,7 @@ impl App {
                 self.push(0, LineKind::System, line.clone());
                 if here {
                     self.push(1, LineKind::System, format!("{} joined the channel", info.nickname));
+                    self.sound(Sound::UserConnected);
                 }
             }
             S2C::ClientLeft { id, reason } => {
@@ -381,6 +454,10 @@ impl App {
                 self.push(0, LineKind::System, format!("{name} {verb}"));
                 if here {
                     self.push(1, LineKind::System, format!("{name} left the channel"));
+                    self.sound(match reason {
+                        LeaveReason::TimedOut => Sound::UserLostConnection,
+                        LeaveReason::Disconnected | LeaveReason::Kicked => Sound::UserDisconnected,
+                    });
                 }
                 if let Some(i) = self.tabs.iter().position(|t| t.kind == TabKind::Private(id)) {
                     self.push(i, LineKind::System, format!("{name} went offline"));
@@ -398,10 +475,13 @@ impl App {
                     self.sync_channel_tab_title();
                     let ch = self.channel_name(channel);
                     self.push(1, LineKind::System, format!("You joined {ch}"));
+                    self.sound(Sound::ChannelSwitched);
                 } else if Some(channel) == mine {
                     self.push(1, LineKind::System, format!("{name} joined the channel"));
+                    self.sound(Sound::UserJoined);
                 } else if Some(from) == mine {
                     self.push(1, LineKind::System, format!("{name} left the channel"));
+                    self.sound(Sound::UserLeft);
                 }
             }
             S2C::ClientStatus { .. } => self.apply(&msg),
@@ -416,7 +496,11 @@ impl App {
                     TextTarget::Client(to) => self.private_tab(if from == my_id { to } else { from }),
                 };
                 self.push(tab, LineKind::Msg { from, name }, text);
+                if from != my_id && matches!(target, TextTarget::Client(_)) {
+                    self.sound(Sound::Message);
+                }
             }
+            S2C::Poked { from, message } => self.on_poked(from, message),
             S2C::Error { message } => {
                 let tab = self.active_tab;
                 self.push(tab, LineKind::Error, message);
@@ -561,7 +645,9 @@ impl App {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if icon_button(ui, Icon::Sliders, "Voice settings").clicked() {
                         let (inputs, outputs) = audio::device_names();
-                        self.audio_dialog = Some(AudioDialog { inputs, outputs, binding: false });
+                        let custom = sounds_dir().map(|d| ("Custom folder".to_owned(), d));
+                        let packs = custom.into_iter().chain(sounds::installed_packs()).collect();
+                        self.audio_dialog = Some(AudioDialog { packs, inputs, outputs, binding: false });
                     }
                     ui.add_space(4.0);
                     let mut s = self.settings.status;
@@ -589,6 +675,7 @@ impl App {
                 let Some(view) = &self.view else { return };
                 let mut join = None;
                 let mut private = None;
+                let mut poke = None;
 
                 ui.label(RichText::new("CHANNELS").size(11.0).color(theme::TEXT_FAINT).strong());
                 ui.add_space(4.0);
@@ -701,6 +788,10 @@ impl App {
                                         private = Some(c.id);
                                         ui.close();
                                     }
+                                    if ui.button("Poke…").clicked() {
+                                        poke = Some(c.id);
+                                        ui.close();
+                                    }
                                 });
                             }
                         }
@@ -712,6 +803,9 @@ impl App {
                 }
                 if let Some(id) = private {
                     self.open_private(id);
+                }
+                if let Some(id) = poke {
+                    self.open_poke(id);
                 }
             });
     }
@@ -919,11 +1013,18 @@ impl App {
         let s = self.settings.status;
         let v = &mut self.voice;
         v.shared.set_status(s.muted, s.deafened);
-        let wanted = matches!(self.conn, Conn::Connected) || self.audio_dialog.is_some();
+        let connected = matches!(self.conn, Conn::Connected);
+        // A last sound (like "disconnected") finishes before the devices close.
+        let finishing = v.engine.is_some() && v.playback.effects_active();
+        let wanted = connected || self.audio_dialog.is_some() || finishing;
         if wanted && v.engine.is_none() {
             v.engine = Some(audio::Engine::start(&v.shared, &v.playback, v.sink.clone(), ctx));
         } else if !wanted {
             v.engine = None;
+            v.playback.clear_effects();
+        }
+        if finishing && !connected {
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
         let binding = self.audio_dialog.as_ref().is_some_and(|d| d.binding);
         if let (TxMode::PushToTalk, Some(key), false) = (self.settings.audio.mode, self.settings.audio.ptt_key, binding) {
@@ -947,6 +1048,7 @@ impl App {
         let mut a: AudioSettings = self.settings.audio.clone();
         let mut restart = false;
         let mut close = false;
+        let mut test_sound = false;
         if dlg.binding {
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 dlg.binding = false;
@@ -1020,6 +1122,47 @@ impl App {
             ui.checkbox(&mut a.cleanup.auto_gain, "Automatic volume")
                 .on_hover_text("Brings a quiet microphone up to a normal level");
 
+            section(ui, "Notifications");
+            ui.checkbox(&mut a.sounds, "Notification sounds")
+                .on_hover_text("Chimes for connecting, people joining and leaving, pokes and private messages");
+            ui.add_enabled(
+                a.sounds,
+                egui::Slider::new(&mut a.sounds_volume, 0.0..=1.0)
+                    .text("sound volume")
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                    .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
+            );
+            ui.horizontal(|ui| {
+                let shown = match &a.sound_pack {
+                    None => "Built-in".to_owned(),
+                    Some(dir) => dlg
+                        .packs
+                        .iter()
+                        .find(|(_, d)| d == dir)
+                        .map(|(label, _)| label.clone())
+                        .unwrap_or_else(|| dir.display().to_string()),
+                };
+                egui::ComboBox::from_id_salt("sound-pack").width(250.0).selected_text(shown).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut a.sound_pack, None, "Built-in");
+                    for (label, dir) in &dlg.packs {
+                        ui.selectable_value(&mut a.sound_pack, Some(dir.clone()), label);
+                    }
+                });
+                if ui.small_button("Test").clicked() {
+                    test_sound = true;
+                }
+            });
+            if a.sound_pack.is_some() && a.sound_pack == sounds_dir() {
+                let names: Vec<&str> = Sound::ALL.iter().map(|s| s.file_name()).collect();
+                if ui
+                    .small_button("Open custom folder…")
+                    .on_hover_text(format!("WAV files with these names replace the built-in sounds: {}", names.join(", ")))
+                    .clicked()
+                {
+                    open_sounds_folder();
+                }
+            }
+
             section(ui, "Volume");
             ui.add(egui::Slider::new(&mut a.input_gain_db, -20.0..=20.0).text("microphone").suffix(" dB").fixed_decimals(0));
             ui.add(
@@ -1040,9 +1183,15 @@ impl App {
             close = true;
         }
 
+        if a.sound_pack != self.settings.audio.sound_pack {
+            self.sound_pack = Pack::open(a.sound_pack.as_deref());
+        }
         if a != self.settings.audio {
             self.voice.shared.set_settings(&a);
             self.settings.audio = a;
+        }
+        if test_sound {
+            self.sound(Sound::Poke);
         }
         if restart {
             self.voice.engine = None; // reopened with the new devices next frame
@@ -1052,6 +1201,106 @@ impl App {
         } else {
             ctx.request_repaint_after(Duration::from_millis(50)); // live level meter
         }
+    }
+}
+
+impl App {
+    fn poke_dialog(&mut self, ctx: &egui::Context) {
+        let Some(form) = &mut self.poke_form else { return };
+        let (mut send, mut cancel) = (false, false);
+        let modal = egui::Modal::new(Id::unique("poke")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.label(RichText::new(format!("Poke {}", form.name)).size(19.0).strong().color(theme::TEXT));
+            ui.add_space(2.0);
+            ui.label(RichText::new("They get a popup and a sound.").size(12.5).color(theme::TEXT_DIM));
+            ui.add_space(12.0);
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut form.message)
+                    .hint_text("Message (optional)")
+                    .char_limit(t7_proto::MAX_POKE_LEN)
+                    .desired_width(f32::INFINITY)
+                    .margin(Margin::symmetric(10, 7)),
+            );
+            if !form.focus_requested {
+                edit.request_focus();
+                form.focus_requested = true;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                send = true;
+            }
+            ui.add_space(12.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(theme::primary_button("Poke")).clicked() {
+                    send = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if send {
+            let form = self.poke_form.take().expect("open");
+            self.net.send(C2S::Poke { target: form.target, message: form.message.trim().to_owned() });
+            self.push(0, LineKind::System, format!("You poked {}", form.name));
+        } else if cancel || modal.should_close() {
+            self.poke_form = None;
+        }
+    }
+
+    fn poke_alert(&mut self, ctx: &egui::Context) {
+        let Some(alert) = self.pokes.front() else { return };
+        let more = self.pokes.len() - 1;
+        let mut ok = false;
+        let modal = egui::Modal::new(Id::unique("poked")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.label(RichText::new(format!("{} poked you", alert.from)).size(19.0).strong().color(theme::TEXT));
+            ui.label(RichText::new(&alert.time).size(12.0).color(theme::TEXT_FAINT));
+            if !alert.message.is_empty() {
+                ui.add_space(10.0);
+                egui::Frame::new()
+                    .fill(theme::SURFACE)
+                    .corner_radius(CornerRadius::same(theme::RADIUS))
+                    .inner_margin(Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new(&alert.message).size(14.5).color(theme::TEXT));
+                    });
+            }
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let label = if more > 0 { format!("OK ({more} more)") } else { "OK".to_owned() };
+                if ui.add(theme::primary_button(&label)).clicked() {
+                    ok = true;
+                }
+            });
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                ok = true;
+            }
+        });
+        if ok || modal.should_close() {
+            self.pokes.pop_front();
+        }
+    }
+}
+
+fn sounds_dir() -> Option<std::path::PathBuf> {
+    settings::data_dir().map(|d| d.join("sounds"))
+}
+
+fn open_sounds_folder() {
+    let Some(dir) = sounds_dir() else { return };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return tracing::warn!("cannot create {}: {e}", dir.display());
+    }
+    let opener = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    if let Err(e) = std::process::Command::new(opener).arg(&dir).spawn() {
+        tracing::warn!("cannot open {}: {e}", dir.display());
     }
 }
 
@@ -1070,6 +1319,13 @@ impl App {
         self.chat(ui);
         self.connect_dialog(&ctx);
         self.audio_dialog(&ctx);
+        self.poke_dialog(&ctx);
+        self.poke_alert(&ctx);
+    }
+
+    /// True once after a poke arrived: the shell flashes the taskbar entry.
+    pub fn take_attention(&mut self) -> bool {
+        std::mem::take(&mut self.attention)
     }
 
     pub fn title(&self) -> String {

@@ -35,7 +35,7 @@ impl Store {
             Some(p) => format!("settings-{p}.toml"),
             None => "settings.toml".to_owned(),
         };
-        let path = config_dir().map(|d| d.join("T7").join(file));
+        let path = data_dir().map(|d| d.join(file));
         let settings: Settings = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -70,6 +70,11 @@ impl Store {
             Err(e) => tracing::warn!("could not save settings to {}: {e}", path.display()),
         }
     }
+}
+
+/// T7's folder in the user's config directory.
+pub fn data_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("T7"))
 }
 
 fn config_dir() -> Option<PathBuf> {

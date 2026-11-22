@@ -20,6 +20,7 @@ use t7_proto::voice::{FRAME_SAMPLES, MAX_OPUS_PAYLOAD, SAMPLE_RATE};
 
 use crate::dsp::{self, Cleanup, Processor};
 use crate::resample::Resampler;
+use crate::sounds::{Effects, Sound};
 
 /// Voice activation stays open this long after the level drops, so word
 /// endings and short pauses aren't clipped.
@@ -60,6 +61,11 @@ pub struct AudioSettings {
     /// Linear, 1.0 = unchanged.
     pub output_volume: f32,
     pub cleanup: Cleanup,
+    pub sounds: bool,
+    /// Linear, 1.0 = full.
+    pub sounds_volume: f32,
+    /// Folder of a sound pack; `None` uses the built-in chimes.
+    pub sound_pack: Option<std::path::PathBuf>,
 }
 
 impl Default for AudioSettings {
@@ -73,6 +79,9 @@ impl Default for AudioSettings {
             input_gain_db: 0.0,
             output_volume: 1.0,
             cleanup: Cleanup::default(),
+            sounds: true,
+            sounds_volume: 0.6,
+            sound_pack: None,
         }
     }
 }
@@ -160,12 +169,13 @@ struct Speaker {
 /// Received voice, per speaker, waiting to be mixed into the output.
 pub struct Playback {
     speakers: Mutex<HashMap<ClientId, Speaker>>,
+    effects: Mutex<Effects>,
     ctx: egui::Context,
 }
 
 impl Playback {
     pub fn new(ctx: egui::Context) -> Arc<Self> {
-        Arc::new(Self { speakers: Mutex::new(HashMap::new()), ctx })
+        Arc::new(Self { speakers: Mutex::new(HashMap::new()), effects: Mutex::default(), ctx })
     }
 
     /// Decodes one received frame (called on the network thread).
@@ -247,6 +257,8 @@ impl Playback {
                 s.primed = false;
             }
         }
+        drop(speakers);
+        self.effects.lock().unwrap().mix(out);
     }
 
     /// Clients heard in the last moment.
@@ -262,6 +274,22 @@ impl Playback {
 
     pub fn clear(&self) {
         self.speakers.lock().unwrap().clear();
+    }
+
+    pub fn play_chime(&self, sound: Sound, volume: f32) {
+        self.effects.lock().unwrap().play_chime(sound, volume);
+    }
+
+    pub fn play_samples(&self, samples: Arc<[f32]>, volume: f32) {
+        self.effects.lock().unwrap().play_samples(samples, volume);
+    }
+
+    pub fn effects_active(&self) -> bool {
+        self.effects.lock().unwrap().active()
+    }
+
+    pub fn clear_effects(&self) {
+        self.effects.lock().unwrap().clear();
     }
 }
 

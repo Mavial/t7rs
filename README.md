@@ -49,10 +49,23 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Private message | Double-click a user, or right-click → Send private message |
 | Close a PM tab | Middle-click it, or right-click → Close |
 | Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right |
-| Voice settings | The sliders button bottom-right: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), volumes |
+| Voice settings | The sliders button bottom-right: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), notification sounds and sound pack, volumes |
+| Poke | Right-click a user → Poke…, with an optional message. They get a popup, a sound and a flashing taskbar entry |
 
 A green ring around an avatar means that person is talking. On Windows the
 push-to-talk key works while another app, like a game, has focus.
+
+Notification sounds play for connecting, people connecting to or leaving your
+channel, switching channels, pokes, private messages and muting. The built-in
+sounds are short chimes synthesized on the fly. Under Voice settings →
+Notifications you can pick a sound pack instead:
+
+- **Custom folder:** WAV files named `connected.wav`, `poke.wav`, … (hover the
+  button for the full list) in `T7/sounds` in your config directory. Missing
+  files fall back to the chimes.
+- **`settings.ini` packs** already installed on the machine by other voice apps
+  are listed automatically and read in place; T7 copies none of their files.
+  Events a pack leaves empty stay silent. Text-to-speech packs aren't supported.
 
 Nickname, recent servers, status and voice settings are remembered between sessions.
 
@@ -139,7 +152,7 @@ cargo run --example bot -- 127.0.0.1:9988 500   # crude load test
 
 ## Roadmap
 
-1. Voice polish: per-user volume, sounds for joins and leaves.
+1. Voice polish: per-user volume.
 2. Channel management at runtime: create/edit/delete, temporary channels, passwords.
 3. Permissions: server admin token, kick/ban, channel moderators.
 4. TLS for the control connection plus encrypted voice.

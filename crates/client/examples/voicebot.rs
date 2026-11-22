@@ -2,6 +2,7 @@
 //!
 //!     cargo run --example voicebot -- ADDR tone   [SECONDS]   # speak a quiet two-note tone
 //!     cargo run --example voicebot -- ADDR listen [SECONDS]   # report voice frames heard
+//!     cargo run --example voicebot -- ADDR poke NICK [MESSAGE]  # poke someone
 //!
 //! Joins the default channel. `listen` prints, per speaker, how many frames
 //! arrived and how loud they decode, so a real client's capture → encode →
@@ -21,13 +22,19 @@ async fn main() {
     let mut args = std::env::args().skip(1);
     let addr = args.next().unwrap_or_else(|| format!("127.0.0.1:{DEFAULT_PORT}"));
     let mode = args.next().unwrap_or_else(|| "tone".into());
-    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let rest: Vec<String> = args.collect();
+    let secs: u64 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(5);
 
     let tcp = TcpStream::connect(&addr).await.expect("connect");
     let server: SocketAddr = tcp.peer_addr().unwrap();
     let (r, mut w) = tcp.into_split();
     let mut r = BufReader::new(r);
-    let nickname = if mode == "tone" { "ToneBot" } else { "ListenBot" }.to_owned();
+    let nickname = match mode.as_str() {
+        "tone" => "ToneBot",
+        "poke" => "PokeBot",
+        _ => "ListenBot",
+    }
+    .to_owned();
     write_frame(&mut w, &C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password: None }).await.unwrap();
     let mut buf = Vec::new();
     let (id, token, names) = match read_frame::<_, S2C>(&mut r, &mut buf).await.unwrap() {
@@ -37,6 +44,30 @@ async fn main() {
         }
         other => panic!("not welcomed: {other:?}"),
     };
+    if mode == "poke" {
+        let target_name = rest.first().cloned().unwrap_or_default();
+        let message = rest.get(1).cloned().unwrap_or_default();
+        let Some((&target, _)) = names.iter().find(|(_, n)| **n == target_name) else {
+            return println!("nobody called {target_name:?} is online");
+        };
+        write_frame(&mut w, &C2S::Poke { target, message }).await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match read_frame::<_, S2C>(&mut r, &mut buf).await {
+                    Ok(S2C::Error { message }) => return Some(message),
+                    Ok(_) => continue,
+                    Err(_) => return None,
+                }
+            }
+        })
+        .await;
+        match reply {
+            Ok(Some(err)) => println!("poke refused: {err}"),
+            _ => println!("poked {target_name}"),
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        return;
+    }
     // Keep the control connection drained.
     tokio::spawn(async move { while read_frame::<_, S2C>(&mut r, &mut buf).await.is_ok() {} });
 

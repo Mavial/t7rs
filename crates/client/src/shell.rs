@@ -76,6 +76,9 @@ impl Shell {
         let out = self.ctx.run_ui(raw, |ui| app.ui(ui));
         g.input.handle_platform_output(&g.window, out.platform_output);
 
+        if self.app.take_attention() && !g.window.has_focus() {
+            g.window.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        }
         let title = self.app.title();
         if title != self.title {
             g.window.set_title(&title);

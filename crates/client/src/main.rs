@@ -9,6 +9,7 @@ mod ptt;
 mod resample;
 mod settings;
 mod shell;
+mod sounds;
 mod theme;
 
 fn main() {
