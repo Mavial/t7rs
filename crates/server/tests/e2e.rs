@@ -1017,3 +1017,29 @@ async fn roles_and_who_holds_them_survive_a_restart() {
     task.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn an_owner_reset_hands_the_server_to_the_next_claimer() {
+    let dir = data_dir("owner-reset");
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (owner, _, _) = claim(addr, &dir, HOME).await;
+    task.abort();
+    drop(owner);
+
+    // The owner lost their key: the host makes a new claim token.
+    let token = t7_server::reset_owner_claim(&dir).unwrap();
+    assert_eq!(claim_token(&dir), token);
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (mut old, welcome) = TestClient::connect(addr, "admin", None).await;
+    let S2C::Welcome { permissions, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
+    assert_eq!(permissions.server, Perms::ALL, "the owner stays until the token is redeemed");
+    let (mut new, welcome) = TestClient::connect(addr, "newcomer", None).await;
+    new.send(C2S::ClaimOwnership { token }).await;
+    let S2C::Permissions(was) = old.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
+    assert!(!was.server.has(Perm::ManageRoles), "the old owner is no longer one");
+    let new_id = welcomed_id(&welcome);
+    let owner = S2C::ClientRole { id: new_id, role: Some("Owner".into()) };
+    assert_eq!(old.until(|m| matches!(m, S2C::ClientRole { id, .. } if *id == new_id)).await, owner);
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}

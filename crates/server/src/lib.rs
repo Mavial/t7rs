@@ -112,6 +112,18 @@ fn roles(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<RoleStore> {
     Ok(roles)
 }
 
+/// Saves a new claim token in `data_dir`'s `roles.toml` and returns it. Whoever
+/// redeems it becomes the owner in place of the current one, who stays until
+/// then. A running server neither sees it nor keeps it, so stop it first.
+pub fn reset_owner_claim(data_dir: &Path) -> std::io::Result<String> {
+    let file = data_dir.join("roles.toml");
+    let mut roles = if file.exists() { RoleStore::load(&file)? } else { RoleStore::default() };
+    let token = claim_token()?;
+    roles.set_claim_token(token.clone());
+    roles.save(&file)?;
+    Ok(token)
+}
+
 /// Whoever enters it first in T7 becomes the server's owner.
 fn claim_token() -> std::io::Result<String> {
     let mut bytes = [0u8; 16];
