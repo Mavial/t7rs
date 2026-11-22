@@ -32,6 +32,9 @@ pub struct ChannelConfig {
     /// New clients land in this channel. The first channel is used if none is marked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
+    /// Identities (hex) that moderate this channel and the ones below it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moderators: Vec<t7_proto::Identity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChannelConfig>,
 }

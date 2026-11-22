@@ -53,9 +53,14 @@ async fn run(
     line: Option<&str>,
     seq: u64,
 ) -> Result<(), FrameError> {
-    let (r, mut w) = TcpStream::connect(addr).await?.into_split();
+    let (tls, _) = tls::connect(TcpStream::connect(addr).await?, None).await.map_err(std::io::Error::other)?;
+    // A new identity each run.
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).expect("system randomness");
+    let identity = identity::IdentityKey::from_seed(seed).prove(&tls::exporter(tls.get_ref().1));
+    let (r, mut w) = tokio::io::split(tls);
     let mut r = BufReader::new(r);
-    write_frame(&mut w, &C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password: None }).await?;
+    write_frame(&mut w, &C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password: None, identity }).await?;
     write_frame(&mut w, &C2S::JoinChannel { channel, password: None }).await?;
     write_frame(&mut w, &C2S::SetStatus(status)).await?;
     if let Some(text) = line {
