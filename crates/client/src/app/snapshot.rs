@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
-use t7_proto::perms::{Member, Permissions, Perms, RoleId, Roles};
-use t7_proto::{ChannelInfo, ClientInfo, ClientStatus, Identity, ServerInfo};
+use t7_proto::perms::{Member, Override, Perm, Permissions, Perms, RoleId, Roles};
+use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo};
 
 use super::*;
 
@@ -25,6 +25,8 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
         default: false,
         creator: None,
         moderators: Vec::new(),
+        kind: ChannelKind::Voice,
+        overrides: Vec::new(),
     }
 }
 
@@ -45,6 +47,13 @@ fn view() -> ServerView {
     let mut afk = channel(5, None, "AFK", 2);
     afk.temporary = true;
     let music = channel(6, None, "Music", 3);
+    let mut staff = channel(7, None, "Staff", 4);
+    staff.kind = ChannelKind::Category;
+    let view_only = Perms::of(&[Perm::View]);
+    staff.overrides =
+        vec![Override::denying(RoleId::EVERYONE, view_only), Override::allowing(RoleId::MODERATOR, view_only)];
+    let office = channel(8, Some(7), "Office", 0);
+    let meeting = channel(9, Some(7), "Meeting room", 1);
     let muted = ClientStatus { muted: true, ..Default::default() };
     let deaf = ClientStatus { muted: true, deafened: true, ..Default::default() };
     let away = ClientStatus { away: true, ..Default::default() };
@@ -63,9 +72,10 @@ fn view() -> ServerView {
         client(6, "Dmitri", 3, ClientStatus::default()),
         client(7, "Lucas", 5, away),
         client(8, "Ines", 1, ClientStatus::default()),
+        ClientInfo { role: Some("Moderator".into()), ..client(9, "Jonas", 8, ClientStatus::default()) },
     ];
     let info = ServerInfo { name: "Friday Night".into(), welcome: String::new(), max_clients: 32 };
-    let channels = vec![lobby, games, ranked, duo, afk, music];
+    let channels = vec![lobby, games, ranked, duo, afk, music, staff, office, meeting];
     let everywhere = channels.iter().map(|c| (c.id, Perms::ALL)).collect();
     let mut view =
         ServerView::new(1, info, channels, clients, Permissions { server: Perms::ALL, channels: everywhere });
@@ -102,7 +112,7 @@ fn connected(ctx: &egui::Context) -> App {
     settings.user_volumes.insert("Marta".into(), 0.6);
     let mut app = App::new(ctx, settings, None);
     app.view = Some(view());
-    app.conn = Conn::Connected;
+    app.conn = Conn::Connected { server: ServerKey::of("friday.example.com:9988") };
     app.ping = Some(Duration::from_millis(23));
     app.tabs[1].title = "Games".into();
     app.active_tab = 1;
@@ -232,6 +242,32 @@ const SCENES: &[Scene] = &[
         let mut app = connected(ctx);
         app.open_server_settings();
         app.server_settings.as_mut().unwrap().picked = Pick::Everyone;
+        app
+    }),
+    ("20-channel-permissions", (1100, 760), |ctx| {
+        let mut app = connected(ctx);
+        app.open_edit_channel(8);
+        let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
+        form.tab = FormTab::Permissions;
+        app
+    }),
+    ("21-category-permissions", (1100, 760), |ctx| {
+        let mut app = connected(ctx);
+        app.open_edit_channel(7);
+        let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
+        form.tab = FormTab::Permissions;
+        app
+    }),
+    ("22-create-category", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.open_create_channel(None);
+        let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
+        form.kind = ChannelKind::Category;
+        app
+    }),
+    ("23-folded-category", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.settings.folded.insert(ServerKey::of("friday.example.com:9988"), ["Staff".to_owned()].into());
         app
     }),
     ("16-connecting", (1100, 720), |ctx| {

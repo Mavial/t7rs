@@ -88,6 +88,19 @@ pub struct ChannelInfo {
     pub creator: Option<ClientId>,
     /// They hold the Moderator role in this channel and every channel below it.
     pub moderators: Vec<Identity>,
+    pub kind: ChannelKind,
+    /// What it sets for each role, over the channel above it. Only clients
+    /// that may edit permissions get them.
+    pub overrides: Vec<perms::Override>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChannelKind {
+    #[default]
+    Voice,
+    /// Groups the channels under it, at the top level. Nobody joins it.
+    Category,
 }
 
 /// The editable part of a channel.
@@ -182,11 +195,12 @@ pub enum C2S {
         target: ClientId,
         message: String,
     },
-    /// The creator moves into the new channel.
+    /// The creator moves into the new channel, unless it is a category.
     CreateChannel {
         parent: Option<ChannelId>,
         settings: ChannelSettings,
         temporary: bool,
+        kind: ChannelKind,
     },
     EditChannel {
         id: ChannelId,
@@ -236,6 +250,14 @@ pub enum C2S {
     },
     /// Answered, like every change to the roles, with [`S2C::Roles`].
     ChangeRoles(perms::RoleChange),
+    /// Replaces what `channel` allows and denies the role, for a role below
+    /// your own where you may manage permissions. Setting nothing removes it.
+    SetOverride {
+        channel: ChannelId,
+        role: perms::RoleId,
+        allow: perms::Perms,
+        deny: perms::Perms,
+    },
 }
 
 /// Server → client.
@@ -247,6 +269,7 @@ pub enum S2C {
         /// Seals this client's voice datagrams, both ways.
         voice_key: voice::VoiceKey,
         server: ServerInfo,
+        /// The channels this client sees, and the people in them.
         channels: Vec<ChannelInfo>,
         clients: Vec<ClientInfo>,
         permissions: perms::Permissions,
@@ -289,7 +312,7 @@ pub enum S2C {
         from: ClientId,
         message: String,
     },
-    /// The whole channel list, sent after any change to it.
+    /// Every channel this client sees, sent after any change to them.
     Channels(Vec<ChannelInfo>),
     ClientRole {
         id: ClientId,
@@ -307,9 +330,16 @@ pub enum S2C {
     Bans(Vec<BanInfo>),
     /// What this client may do, sent whenever that changes.
     Permissions(perms::Permissions),
-    /// Every role and who holds them, for clients that may manage roles,
-    /// sent whenever they change.
+    /// Every role and who holds them, for clients that may edit roles or
+    /// channel permissions, sent whenever they change.
     Roles(perms::Roles),
+    /// Someone already connected came into view: they moved into a channel
+    /// this client sees, or it now sees theirs.
+    ClientShown(ClientInfo),
+    /// Someone went out of view, the other way around. They are still connected.
+    ClientHidden {
+        id: ClientId,
+    },
 }
 
 #[derive(Debug)]

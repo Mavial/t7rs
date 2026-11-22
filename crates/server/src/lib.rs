@@ -33,7 +33,8 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
             Channels::load(file).map_err(|e| std::io::Error::other(format!("cannot read {}: {e}", file.display())))?
         }
         _ => {
-            let channels = Channels::from_config(&cfg.channels);
+            let channels = Channels::from_config(&cfg.channels)
+                .map_err(|e| std::io::Error::other(format!("invalid channels in the config: {e}")))?;
             if let Some(file) = &channels_file {
                 channels.save(file)?;
                 tracing::info!("wrote the starting channels to {}", file.display());

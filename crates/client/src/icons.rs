@@ -19,6 +19,11 @@ pub enum Icon {
     Shield,
     Star,
     Dots,
+    ChevronDown,
+    Eye,
+    Check,
+    Cross,
+    Dash,
 }
 
 struct Pen<'a> {
@@ -126,6 +131,19 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::ChevronRight => pen.poly(&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)], false),
+        Icon::ChevronDown => pen.poly(&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)], false),
+        Icon::Eye => {
+            let mut lids = Pen::arc_points(12.0, 21.0, 12.0, 225.0, 315.0);
+            lids.extend(Pen::arc_points(12.0, 4.0, 12.0, 45.0, 135.0));
+            pen.poly(&lids, true);
+            pen.poly(&Pen::arc_points(12.0, 12.5, 2.8, 0.0, 360.0), true);
+        }
+        Icon::Check => pen.poly(&[(5.0, 12.5), (10.0, 17.5), (19.0, 7.0)], false),
+        Icon::Cross => {
+            pen.line((6.5, 6.5), (17.5, 17.5));
+            pen.line((17.5, 6.5), (6.5, 17.5));
+        }
+        Icon::Dash => pen.line((6.5, 12.0), (17.5, 12.0)),
         Icon::Moon => {
             // Crescent: big circle arc from (21,12) round to (12,3), back along a smaller arc.
             let mut pts = Pen::arc_points(12.0, 12.0, 9.0, 0.0, 270.0);
