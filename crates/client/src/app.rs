@@ -28,7 +28,10 @@ const DEFAULT_SERVER: Option<&str> = option_env!("T7_DEFAULT_SERVER");
 enum Conn {
     Disconnected,
     /// `password` is kept to retry after trusting a changed certificate.
-    Connecting { address: String, password: String },
+    /// `known_cert`: the certificate was pinned by an earlier connection. A pin
+    /// made on first use, or just trusted in place of a changed one, vouches
+    /// only for whoever answered, so a saved admin token is not sent on it.
+    Connecting { address: String, password: String, known_cert: bool },
     Connected,
 }
 
@@ -299,7 +302,7 @@ impl App {
         let pinned = self.settings.server_certs.get(&net::canonical_address(&address)).copied();
         let login_password = Some(password.clone()).filter(|p| !p.is_empty());
         self.session = self.net.connect(address.clone(), nickname, login_password, pinned);
-        self.conn = Conn::Connecting { address, password };
+        self.conn = Conn::Connecting { address, password, known_cert: pinned.is_some() };
         self.view = None;
         self.ping = None;
         self.last_error = None;
@@ -561,7 +564,7 @@ impl App {
             Ended::ByUser => None,
             Ended::Failed(reason) => Some(reason),
             Ended::CertChanged { pinned, presented } => {
-                if let Conn::Connecting { address, password } = &self.conn {
+                if let Conn::Connecting { address, password, .. } = &self.conn {
                     let (address, password) = (address.clone(), password.clone());
                     self.cert_change = Some(CertChange { address, password, pinned, presented });
                 }
@@ -596,9 +599,9 @@ impl App {
     fn on_message(&mut self, msg: S2C) {
         match msg {
             S2C::Welcome { your_id, server, channels, clients, .. } => {
-                let address = match &self.conn {
-                    Conn::Connecting { address, .. } => address.clone(),
-                    _ => String::new(),
+                let (address, known_cert) = match &self.conn {
+                    Conn::Connecting { address, known_cert, .. } => (address.clone(), *known_cert),
+                    _ => (String::new(), false),
                 };
                 self.server_address = address.clone();
                 let recent = Recent { address, server_name: server.name.clone() };
@@ -631,7 +634,21 @@ impl App {
                     self.net.send(C2S::SetStatus(self.settings.status));
                 }
                 if let Some(token) = self.settings.admin_tokens.get(&self.server_address).cloned() {
-                    self.authenticate(token);
+                    if known_cert {
+                        self.authenticate(token);
+                    } else {
+                        let pin = self.settings.server_certs.get(&net::canonical_address(&self.server_address));
+                        let fingerprint = pin.map(|f| format!(" ({f})")).unwrap_or_default();
+                        self.push(
+                            0,
+                            LineKind::System,
+                            format!(
+                                "Admin login skipped: this is the first secure connection to this server. If its \
+                                 certificate fingerprint{fingerprint} is right, log in again with Admin login in \
+                                 the menu next to CHANNELS."
+                            ),
+                        );
+                    }
                 }
             }
             S2C::ClientJoined(info) => {
@@ -1698,6 +1715,10 @@ impl App {
             self.settings.server_certs.insert(net::canonical_address(&change.address), change.presented);
             let nickname = self.settings.nickname.clone();
             self.connect(change.address, nickname, change.password);
+            // Only the user's check vouches for the new pin, as on a first use.
+            if let Conn::Connecting { known_cert, .. } = &mut self.conn {
+                *known_cert = false;
+            }
         } else if cancel || modal.should_close() {
             self.cert_change = None;
         }
