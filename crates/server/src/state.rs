@@ -34,6 +34,9 @@ pub enum Event {
         protocol: u16,
         nickname: String,
         password: Option<String>,
+        /// The connection's TLS exporter value, for proving an identity on it.
+        #[expect(dead_code, reason = "client identities will sign it")]
+        exporter: [u8; 32],
         outbox: mpsc::Sender<Frame>,
         /// Receives the assigned id, or `None` if the handshake was rejected.
         reply: oneshot::Sender<Option<ClientId>>,
@@ -139,7 +142,7 @@ impl Server {
 
     fn handle(&mut self, ev: Event) {
         match ev {
-            Event::Join { addr, protocol, nickname, password, outbox, reply } => {
+            Event::Join { addr, protocol, nickname, password, exporter: _, outbox, reply } => {
                 let id = self.join(addr, protocol, nickname, password, outbox);
                 let _ = reply.send(id);
             }

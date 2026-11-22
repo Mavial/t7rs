@@ -13,3 +13,4 @@ tracing-subscriber.workspace = true
 toml = "1"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.3"
+rcgen.workspace = true

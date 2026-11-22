@@ -5,10 +5,11 @@ pub mod config;
 mod conn;
 mod state;
 
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use t7_proto::ServerInfo;
+use t7_proto::{ServerInfo, tls};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 
@@ -18,8 +19,9 @@ use crate::state::{Event, Server};
 
 /// Accepts connections on `listener`, and voice on UDP at the same address, forever.
 ///
-/// `data_dir` holds `channels.toml` (the live channel tree) and the generated
-/// admin token. Without it, channel edits and the token last only this run.
+/// `data_dir` holds `channels.toml` (the live channel tree), the generated
+/// admin token and the TLS certificate. Without it, channel edits, the token
+/// and the certificate last only this run.
 pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<()> {
     let udp = Arc::new(UdpSocket::bind(listener.local_addr()?).await?);
     let channels_file = data_dir.map(|d| d.join("channels.toml"));
@@ -37,6 +39,13 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
     };
     let admin_token = admin_token(cfg, data_dir)?;
     tracing::info!("admin token: {admin_token}  (in T7: the menu next to CHANNELS, then Admin login)");
+    let (cert, key) = tls_certificate(data_dir)?;
+    tracing::info!("TLS certificate fingerprint (SHA-256): {}", tls::Fingerprint::of(&cert));
+    let acceptor = tls::acceptor(cert, key).map_err(|e| {
+        std::io::Error::other(format!(
+            "unusable TLS certificate ({e}); delete tls_cert.der and tls_key.der to make a new one"
+        ))
+    })?;
 
     let info = ServerInfo {
         name: cfg.name.clone(),
@@ -59,7 +68,7 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                tokio::spawn(conn::handle(stream, addr, core_tx.clone()));
+                tokio::spawn(conn::handle(stream, addr, acceptor.clone(), core_tx.clone()));
             }
             Err(e) => tracing::warn!("accept failed: {e}"),
         }
@@ -85,6 +94,34 @@ fn admin_token(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<String>
         std::fs::write(file, &token)?;
     }
     Ok(token)
+}
+
+/// The certificate and key (DER) saved in `data_dir`, else a new self-signed
+/// pair, saved there if there is one.
+fn tls_certificate(data_dir: Option<&Path>) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+    let files = data_dir.map(|d| (d.join("tls_cert.der"), d.join("tls_key.der")));
+    if let Some((cert, key)) = &files
+        && let (Ok(cert), Ok(key)) = (std::fs::read(cert), std::fs::read(key))
+    {
+        return Ok((cert, key));
+    }
+    let pair = rcgen::generate_simple_self_signed(["t7".to_owned()]).map_err(std::io::Error::other)?;
+    let (cert, key) = (pair.cert.der().to_vec(), pair.signing_key.serialize_der());
+    if let Some((cert_file, key_file)) = &files {
+        write_secret(key_file, &key)?;
+        std::fs::write(cert_file, &cert)?;
+        tracing::info!("wrote a new TLS certificate to {}", cert_file.display());
+    }
+    Ok((cert, key))
+}
+
+/// Writes a file only its owner may read, where the OS has such permissions.
+fn write_secret(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(data)
 }
 
 /// Hands every datagram to the core. When the core is backed up, voice is

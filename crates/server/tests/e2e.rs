@@ -4,13 +4,14 @@ use std::time::Duration;
 
 use t7_proto::*;
 use t7_server::config::{Config, DEFAULT_CONFIG};
-use tokio::io::BufReader;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+
+type Tls = tls::ClientStream<TcpStream>;
 
 struct TestClient {
-    r: BufReader<OwnedReadHalf>,
-    w: OwnedWriteHalf,
+    r: BufReader<ReadHalf<Tls>>,
+    w: WriteHalf<Tls>,
     buf: Vec<u8>,
 }
 
@@ -19,7 +20,8 @@ impl TestClient {
         Self::connect_as(addr, nick, pw, PROTOCOL_VERSION).await
     }
     async fn connect_as(addr: std::net::SocketAddr, nick: &str, pw: Option<&str>, protocol: u16) -> (Self, S2C) {
-        let (r, w) = TcpStream::connect(addr).await.unwrap().into_split();
+        let (tls, _) = tls::connect(TcpStream::connect(addr).await.unwrap(), None).await.unwrap();
+        let (r, w) = tokio::io::split(tls);
         let mut c = Self { r: BufReader::new(r), w, buf: Vec::new() };
         c.send(C2S::Hello {
             protocol,
@@ -234,6 +236,35 @@ async fn pokes_and_protocol_versions() {
     assert!(matches!(too_new, S2C::Rejected { ref reason } if reason.contains("server needs an update")));
 }
 
+/// The certificate fingerprint a server presents.
+async fn fingerprint(addr: std::net::SocketAddr) -> tls::Fingerprint {
+    tls::connect(TcpStream::connect(addr).await.unwrap(), None).await.unwrap().1
+}
+
+#[tokio::test]
+async fn clients_without_tls_are_told_to_update() {
+    let addr = start(DEFAULT_CONFIG).await;
+    // A protocol 4 client: a plain frame, no TLS. Its Hello frame length (22)
+    // starts with the same byte as a TLS record.
+    let mut old = TcpStream::connect(addr).await.unwrap();
+    let hello = C2S::Hello { protocol: 4, nickname: "eighteen_char_nick".into(), password: None };
+    let frame = encode_frame(&hello);
+    assert_eq!(frame[0], tls::HANDSHAKE_RECORD);
+    old.write_all(&frame).await.unwrap();
+    let reply: S2C = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut old, &mut Vec::new()))
+        .await
+        .expect("no reply")
+        .unwrap();
+    assert!(matches!(reply, S2C::Rejected { ref reason } if reason.contains("please update your T7")), "{reply:?}");
+    let mut rest = Vec::new();
+    old.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty(), "the server hangs up after the rejection");
+
+    // TLS clients on the same server are unaffected.
+    let (_, welcome) = TestClient::connect(addr, "new", None).await;
+    assert!(matches!(welcome, S2C::Welcome { .. }));
+}
+
 impl TestClient {
     /// Skips messages until one matches.
     async fn until(&mut self, want: impl Fn(&S2C) -> bool) -> S2C {
@@ -330,7 +361,7 @@ async fn channels_are_managed_with_permissions() {
 }
 
 #[tokio::test]
-async fn channel_edits_survive_a_restart() {
+async fn channel_edits_and_the_certificate_survive_a_restart() {
     let dir = std::env::temp_dir().join(format!("t7-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cfg: Config = toml::from_str(&with_admin_token("t")).unwrap();
@@ -349,6 +380,9 @@ async fn channel_edits_survive_a_restart() {
     };
     let cfg_text = with_admin_token("t");
     let (addr, task) = run(dir.clone(), cfg_text.clone()).await;
+    let first = fingerprint(addr).await;
+    let cert = std::fs::read(dir.join("tls_cert.der")).expect("certificate saved");
+    assert_eq!(tls::Fingerprint::of(&cert), first);
     let (mut admin, _) = TestClient::connect(addr, "admin", None).await;
     admin.send(C2S::Authenticate { token: "t".into() }).await;
     admin.send(C2S::CreateChannel { parent: None, settings: settings("Saved"), temporary: false }).await;
@@ -357,6 +391,7 @@ async fn channel_edits_survive_a_restart() {
     drop(admin);
 
     let (addr, task) = run(dir.clone(), cfg_text).await;
+    assert_eq!(fingerprint(addr).await, first, "a restart must keep the certificate");
     let (_, welcome) = TestClient::connect(addr, "later", None).await;
     let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed") };
     assert!(channels.iter().any(|c| c.name == "Saved"), "channel lost on restart");

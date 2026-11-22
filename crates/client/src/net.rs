@@ -2,7 +2,7 @@
 //! runtime, so the UI thread never blocks on I/O. The UI talks to it through
 //! channels and gets woken up (`request_repaint`) only when something arrives.
 //!
-//! Each session has a TCP control connection and, once welcomed, a UDP voice
+//! Each session has a TLS control connection and, once welcomed, a UDP voice
 //! link to the same server address.
 
 use std::net::SocketAddr;
@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
-    C2S, ClientId, DEFAULT_PORT, FrameError, PING_INTERVAL_SECS, PROTOCOL_VERSION, S2C, read_frame,
+    C2S, ClientId, DEFAULT_PORT, FrameError, PING_INTERVAL_SECS, PROTOCOL_VERSION, S2C, read_frame, tls,
     write_frame,
 };
-use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
@@ -225,19 +225,25 @@ async fn session(
     playback: &Playback,
 ) -> Option<String> {
     let target = with_default_port(address);
-    let stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Some(format!("Could not connect to {target}: {e}")),
+    let connect = async {
+        let stream = TcpStream::connect(&target).await.map_err(|e| format!("Could not connect to {target}: {e}"))?;
+        let _ = stream.set_nodelay(true);
+        let server = stream.peer_addr().ok();
+        let (stream, _fingerprint) = tls::connect(stream, None)
+            .await
+            .map_err(|e| format!("Could not connect securely to {target} ({e}). Is it an older T7 server?"))?;
+        Ok::<_, String>((stream, server))
+    };
+    let (stream, server) = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+        Ok(Ok(connected)) => connected,
+        Ok(Err(e)) => return Some(e),
         Err(_) => return Some(format!("Connection to {target} timed out")),
     };
-    let _ = stream.set_nodelay(true);
-    let server = stream.peer_addr().ok();
-    let (read, write) = stream.into_split();
+    let (read, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(read);
-    let mut writer = BufWriter::new(write);
 
     let hello = C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password };
-    if let Err(e) = send(&mut writer, &hello).await {
+    if let Err(e) = write_frame(&mut writer, &hello).await {
         return Some(format!("Connection lost: {e}"));
     }
 
@@ -315,7 +321,7 @@ async fn session(
                 }
                 Some(Out::Control(msg)) => {
                     let bye = matches!(msg, C2S::Goodbye);
-                    if let Err(e) = send(&mut writer, &msg).await {
+                    if let Err(e) = write_frame(&mut writer, &msg).await {
                         return Some(format!("Connection lost: {e}"));
                     }
                     if bye {
@@ -324,13 +330,13 @@ async fn session(
                     }
                 }
                 None => {
-                    let _ = send(&mut writer, &C2S::Goodbye).await;
+                    let _ = write_frame(&mut writer, &C2S::Goodbye).await;
                     return None;
                 }
             },
             _ = ping.tick() => {
                 let nonce = epoch.elapsed().as_micros() as u64;
-                if let Err(e) = send(&mut writer, &C2S::Ping { nonce }).await {
+                if let Err(e) = write_frame(&mut writer, &C2S::Ping { nonce }).await {
                     return Some(format!("Connection lost: {e}"));
                 }
             }
@@ -341,12 +347,6 @@ async fn session(
             }
         }
     }
-}
-
-async fn send<W: tokio::io::AsyncWrite + Unpin>(w: &mut BufWriter<W>, msg: &C2S) -> Result<(), FrameError> {
-    write_frame(w, msg).await?;
-    w.flush().await?;
-    Ok(())
 }
 
 struct AbortOnDrop(tokio::task::JoinHandle<()>);

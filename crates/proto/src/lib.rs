@@ -16,10 +16,10 @@ pub mod voice;
 
 /// This build's protocol. New messages are only ever appended to the enums
 /// below, so older clients keep working for everything they know about.
-pub const PROTOCOL_VERSION: u16 = 4;
-/// Oldest client protocol a server still accepts. Protocol 4 changed the
-/// channel and client records, so older clients can't follow along.
-pub const MIN_PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
+/// Oldest client protocol a server still accepts. Protocol 5 moved the
+/// control connection into TLS, so older clients can't connect.
+pub const MIN_PROTOCOL_VERSION: u16 = 5;
 /// Default port of a T7 server (TCP for control, UDP for voice).
 pub const DEFAULT_PORT: u16 = 9988;
 /// Upper bound for a single frame. Protects both sides from memory abuse.
@@ -166,6 +166,7 @@ pub enum S2C {
         clients: Vec<ClientInfo>,
     },
     /// Handshake refused; the server closes the connection afterwards.
+    /// Servers also send it, outside TLS, to clients too old for TLS.
     Rejected { reason: String },
     ClientJoined(ClientInfo),
     ClientLeft { id: ClientId, reason: LeaveReason },

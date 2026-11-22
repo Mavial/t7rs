@@ -29,7 +29,9 @@ async fn main() {
 
     let tcp = TcpStream::connect(&addr).await.expect("connect");
     let server: SocketAddr = tcp.peer_addr().unwrap();
-    let (r, mut w) = tcp.into_split();
+    let (tls, fingerprint) = tls::connect(tcp, None).await.expect("TLS handshake");
+    println!("TLS 1.3 to {server}, server certificate {fingerprint}");
+    let (r, mut w) = tokio::io::split(tls);
     let mut r = BufReader::new(r);
     let nickname = match mode.as_str() {
         "tone" => "ToneBot",
