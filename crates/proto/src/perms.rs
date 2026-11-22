@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ChannelId, ChannelInfo, ClientId, Identity};
 
-/// One yes/no permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Perm {
     /// See the channel, its sub-channels and the people in them.
@@ -79,7 +78,6 @@ impl Perm {
     }
 }
 
-/// A set of permissions.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Perms(u16);
 
@@ -116,7 +114,6 @@ impl Perms {
         }
     }
 
-    /// These, minus the ones in `other`.
     #[must_use]
     pub fn without(self, other: Perms) -> Perms {
         Perms(self.0 & !other.0)
@@ -174,7 +171,6 @@ impl Serialize for Perms {
 impl<'de> Deserialize<'de> for Perms {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         if !d.is_human_readable() {
-            // Bits this build doesn't know are dropped.
             return u16::deserialize(d).map(|bits| Perms(bits) & Perms::ALL);
         }
         let mut perms = Perms::NONE;
@@ -232,11 +228,8 @@ const MODERATOR_PERMS: Perms =
     EVERYONE_PERMS.union(Perms::of(&[Perm::Bypass, Perm::MoveMembers, Perm::MuteMembers, Perm::Kick]));
 const ADMIN_PERMS: Perms =
     MODERATOR_PERMS.union(Perms::of(&[Perm::ManageChannels, Perm::ManagePermissions, Perm::Ban, Perm::ManageRoles]));
-/// On top of the Moderator role, for the owner of a temporary channel in it:
-/// rename it, change its limit and password, and delete it.
 const ROOM_OWNER_PERMS: Perms = Perms::of(&[Perm::ManageChannels]);
 
-/// Every role on a server and who holds them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Roles {
     /// Above every role, with every permission.
@@ -304,7 +297,6 @@ pub struct Subject {
     pub identity: Identity,
 }
 
-/// What someone may do in one place, and how high they stand there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Standing {
     pub perms: Perms,
@@ -379,7 +371,6 @@ impl Override {
     }
 }
 
-/// The channels resolution looks at.
 pub trait ChannelTree {
     fn channel(&self, id: ChannelId) -> Option<&ChannelInfo>;
     fn channels(&self) -> impl Iterator<Item = &ChannelInfo>;
@@ -669,7 +660,6 @@ mod tests {
             [Some("Owner".into()), Some("Admin".into()), Some("Moderator".into()), None]
         );
 
-        // Holding both, the higher one counts; reordering changes which that is.
         roles.members.get_mut(&MODERATOR).unwrap().roles.push(RoleId::ADMIN);
         assert_eq!(roles.rank(MODERATOR), roles.rank(ADMIN));
         roles.ranked.reverse();
@@ -709,8 +699,6 @@ mod tests {
     fn the_closest_channel_setting_wins_and_there_allow_beats_deny() {
         let (roles, mut t) = (roles(), tree());
         let (view, speak) = (Perms::of(&[Perm::View]), Perms::of(&[Perm::Speak]));
-        // Gaming is hidden and silent for everyone, Squad lets them speak, and
-        // moderators see Deep.
         t.set(GAMING, vec![Override::new(RoleId::EVERYONE, Perms::NONE, view | speak)]);
         t.set(SQUAD, vec![Override::new(RoleId::EVERYONE, speak, Perms::NONE)]);
         t.set(DEEP, vec![Override::new(RoleId::MODERATOR, view, Perms::NONE)]);
@@ -722,7 +710,6 @@ mod tests {
         assert!(perms(&roles, &t, MODERATOR, Some(DEEP)).has(Perm::View), "the moderators' allow is closer");
         assert!(!perms(&roles, &t, NOBODY, Some(DEEP)).has(Perm::View));
 
-        // At one level, one role's allow beats another's deny.
         t.set(
             GAMING,
             vec![

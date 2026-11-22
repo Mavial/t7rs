@@ -21,7 +21,6 @@ pub struct Settings {
     /// Certificate fingerprint per `net::canonical_address`, pinned on first connect.
     pub server_certs: std::collections::BTreeMap<String, Fingerprint>,
     pub folded: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-    /// Who this user is on every server: roles, bans and moderator rights follow it.
     /// Made on the first connect.
     pub identity_key: Option<IdentityKey>,
 }

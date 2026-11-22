@@ -21,8 +21,7 @@ pub mod voice;
 /// This build's protocol. New messages are only ever appended to the enums
 /// below, so older clients keep working for everything they know about.
 pub const PROTOCOL_VERSION: u16 = 6;
-/// Oldest client protocol a server still accepts. Protocol 6 replaced the
-/// admin token with roles, so older clients can't connect.
+/// Oldest client protocol a server still accepts.
 pub const MIN_PROTOCOL_VERSION: u16 = 6;
 /// Default port of a T7 server (TCP for control, UDP for voice).
 pub const DEFAULT_PORT: u16 = 9988;
@@ -224,7 +223,6 @@ pub enum C2S {
     ClaimOwnership {
         token: String,
     },
-    /// By identity, so someone offline can be removed too.
     SetModerator {
         channel: ChannelId,
         identity: Identity,

@@ -13,8 +13,6 @@ pub struct Config {
     /// Empty string = no password.
     pub password: String,
     pub max_clients: u32,
-    /// Gave admin rights before roles replaced it. Ignored, so configs from
-    /// then still load.
     pub admin_token: Option<serde::de::IgnoredAny>,
     /// Seeds `channels.toml` on first start; after that, that file is used.
     pub channels: Vec<ChannelConfig>,

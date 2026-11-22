@@ -121,7 +121,6 @@ pub struct Server {
     channels: Channels,
     bans: Bans,
     roles: RoleStore,
-    /// Holds `channels.toml`, `bans.toml` and `roles.toml` (`None`: changes are not saved).
     data_dir: Option<PathBuf>,
     clients: HashMap<ClientId, Client>,
     next_id: ClientId,
@@ -450,8 +449,6 @@ impl Server {
         }
     }
 
-    /// Applies a change to roles below `id`'s own, and to people below it, if
-    /// it may manage roles.
     fn change_roles(&mut self, id: ClientId, change: RoleChange) {
         let mine = self.standing(id, None);
         if !mine.perms.has(Perm::ManageRoles) {
@@ -459,7 +456,6 @@ impl Server {
         }
         let roles = self.roles.roles();
         let highest = match &change {
-            // It starts at the bottom, below theirs if they hold any.
             RoleChange::Create { .. } => Rank::EVERYONE,
             RoleChange::Rename { id, .. } | RoleChange::SetPermissions { id, .. } | RoleChange::Delete { id } => {
                 roles.height(*id)
@@ -550,7 +546,6 @@ impl Server {
         }
     }
 
-    /// What a client may do in `channel`, or on the server as a whole with `None`.
     fn standing(&self, id: ClientId, channel: Option<ChannelId>) -> Standing {
         self.roles.roles().resolve(self.clients[&id].subject(), channel, &self.channels)
     }
@@ -705,8 +700,6 @@ impl Server {
         self.refresh(false, true);
     }
 
-    /// Why `id` may not do `perm`, which `verb` names, to `target` in
-    /// `channel` (on the server as a whole with `None`), if it may not.
     fn refusal(
         &self,
         id: ClientId,
