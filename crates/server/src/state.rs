@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use t7_proto::perms::{Perm, Permissions, Rank, RoleChange, RoleId, Scope, Standing, Subject};
+use t7_proto::perms::{Perm, Permissions, Rank, RoleChange, RoleId, Roles, Scope, Standing, Subject};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     BanId, BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason,
@@ -68,7 +68,7 @@ struct Client {
     /// Learned from the first authenticated datagram (works behind NAT).
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
-    permissions: Permissions,
+    last_sent_permissions: Permissions,
 }
 
 impl Client {
@@ -112,6 +112,12 @@ impl TokenBucket {
             false
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RolesTo {
+    EveryManager,
+    NewManagers,
 }
 
 pub struct Server {
@@ -290,14 +296,15 @@ impl Server {
                 voice: voice::ServerSide::new(&voice_key),
                 voice_addr: None,
                 voice_bucket: TokenBucket::voice(),
-                permissions,
+                last_sent_permissions: permissions,
             },
         );
         if renamed {
             self.save_roles();
         }
         if renamed || manager {
-            let managers = |c: &Client| c.permissions.server.has(Perm::ManageRoles) && (renamed || c.info.id == id);
+            let managers =
+                |c: &Client| c.last_sent_permissions.server.has(Perm::ManageRoles) && (renamed || c.info.id == id);
             self.broadcast(&S2C::Roles(self.roles.roles().clone()), managers);
         }
         Some(id)
@@ -363,7 +370,10 @@ impl Server {
                     return self.error(id, "you can't move this channel there");
                 }
                 match self.channels.move_to(channel, parent, position) {
-                    Ok(()) => self.channels_changed(true),
+                    Ok(()) => {
+                        self.channels_changed();
+                        self.save_channels();
+                    }
                     Err(e) => self.error(id, &e.message()),
                 }
             }
@@ -373,7 +383,10 @@ impl Server {
                     return self.error(id, "you can't change the default channel");
                 }
                 match self.channels.set_default(channel) {
-                    Ok(()) => self.channels_changed(true),
+                    Ok(()) => {
+                        self.channels_changed();
+                        self.save_channels();
+                    }
                     Err(e) => self.error(id, &e.message()),
                 }
             }
@@ -389,7 +402,12 @@ impl Server {
                 }
                 let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
                 match self.channels.set_moderator(channel, identity, moderator) {
-                    Ok(true) => self.channels_changed(permanent),
+                    Ok(true) => {
+                        self.channels_changed();
+                        if permanent {
+                            self.save_channels();
+                        }
+                    }
                     Ok(false) => {}
                     Err(e) => self.error(id, &e.message()),
                 }
@@ -409,16 +427,7 @@ impl Server {
         if !mine.perms.has(Perm::ManageRoles) {
             return self.error(id, "you can't manage roles");
         }
-        let roles = self.roles.roles();
-        let highest = match &change {
-            RoleChange::Create { .. } => Rank::EVERYONE,
-            RoleChange::Rename { id, .. } | RoleChange::SetPermissions { id, .. } | RoleChange::Delete { id } => {
-                roles.height(*id)
-            }
-            RoleChange::Move { id, position } => roles.height(*id).max(roles.height_at(*position as usize)),
-            RoleChange::Assign { identity, role, .. } => roles.height(*role).max(roles.rank(*identity)),
-        };
-        if mine.rank <= highest {
+        if mine.rank <= highest_rank_touched(self.roles.roles(), &change) {
             return self.error(id, "you can only manage roles, and the roles of people, below your own");
         }
         let changed = match change {
@@ -439,7 +448,7 @@ impl Server {
         match changed {
             Ok(()) => {
                 self.save_roles();
-                self.refresh(true);
+                self.refresh(RolesTo::EveryManager);
             }
             Err(e) => self.error(id, &e.message()),
         }
@@ -489,7 +498,7 @@ impl Server {
         }
     }
 
-    fn refresh(&mut self, roles_changed: bool) {
+    fn refresh(&mut self, roles_to: RolesTo) {
         let mut managers = Vec::new();
         let mut retitled = Vec::new();
         let ids: Vec<ClientId> = self.clients.keys().copied().collect();
@@ -497,18 +506,19 @@ impl Server {
             let client = &self.clients[&id];
             let permissions = self.permissions_of(client.subject());
             let manager = permissions.server.has(Perm::ManageRoles);
-            if manager && (roles_changed || !client.permissions.server.has(Perm::ManageRoles)) {
+            let new_manager = !client.last_sent_permissions.server.has(Perm::ManageRoles);
+            if manager && (roles_to == RolesTo::EveryManager || new_manager) {
                 managers.push(id);
             }
             let role = self.roles.roles().title(client.info.identity);
             if role != client.info.role {
                 retitled.push(S2C::ClientRole { id, role: role.clone() });
             }
-            if permissions != client.permissions {
+            if permissions != client.last_sent_permissions {
                 self.send(id, &S2C::Permissions(permissions.clone()));
             }
             let client = self.clients.get_mut(&id).expect("exists");
-            client.permissions = permissions;
+            client.last_sent_permissions = permissions;
             client.info.role = role;
         }
         if !managers.is_empty() {
@@ -533,7 +543,10 @@ impl Server {
         }
         match self.channels.create(parent, &settings, temporary, id) {
             Ok(channel) => {
-                self.channels_changed(!temporary);
+                self.channels_changed();
+                if !temporary {
+                    self.save_channels();
+                }
                 self.move_to(id, channel);
                 self.remove_abandoned_channels();
             }
@@ -547,7 +560,12 @@ impl Server {
         }
         let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
         match self.channels.edit(channel, settings) {
-            Ok(()) => self.channels_changed(permanent),
+            Ok(()) => {
+                self.channels_changed();
+                if permanent {
+                    self.save_channels();
+                }
+            }
             Err(e) => self.error(id, &e.message()),
         }
     }
@@ -567,7 +585,10 @@ impl Server {
         for client in evicted {
             self.move_to(client, default);
         }
-        self.channels_changed(permanent);
+        self.channels_changed();
+        if permanent {
+            self.save_channels();
+        }
     }
 
     fn claim(&mut self, id: ClientId, token: &str) {
@@ -581,7 +602,7 @@ impl Server {
         }
         tracing::info!(id, %nickname, identity = %identity.to_hex(), "server claimed: this is its owner now");
         self.save_roles();
-        self.refresh(true);
+        self.refresh(RolesTo::EveryManager);
     }
 
     fn refusal(&self, id: ClientId, target: ClientId, (perm, verb): (Perm, &str), scope: Scope) -> Option<String> {
@@ -724,11 +745,13 @@ impl Server {
         }
     }
 
-    fn channels_changed(&mut self, save: bool) {
+    fn channels_changed(&mut self) {
         self.broadcast(&S2C::Channels(self.channels.snapshot()), |_| true);
-        self.refresh(false);
-        if save
-            && let Some(path) = self.data_dir.as_ref().map(|d| d.join("channels.toml"))
+        self.refresh(RolesTo::NewManagers);
+    }
+
+    fn save_channels(&self) {
+        if let Some(path) = self.data_dir.as_ref().map(|d| d.join("channels.toml"))
             && let Err(e) = self.channels.save(&path)
         {
             tracing::error!("cannot save channels to {}: {e}", path.display());
@@ -745,7 +768,7 @@ impl Server {
         for channel in abandoned {
             let _ = self.channels.delete(channel);
         }
-        self.channels_changed(false);
+        self.channels_changed();
     }
 
     fn poke(&mut self, id: ClientId, target: ClientId, message: String) {
@@ -824,6 +847,17 @@ impl Server {
                 self.dead.push(client.info.id);
             }
         }
+    }
+}
+
+fn highest_rank_touched(roles: &Roles, change: &RoleChange) -> Rank {
+    match change {
+        RoleChange::Create { .. } => Rank::EVERYONE,
+        RoleChange::Rename { id, .. } | RoleChange::SetPermissions { id, .. } | RoleChange::Delete { id } => {
+            roles.height(*id)
+        }
+        RoleChange::Move { id, position } => roles.height(*id).max(roles.height_at(*position as usize)),
+        RoleChange::Assign { identity, role, .. } => roles.height(*role).max(roles.rank(*identity)),
     }
 }
 
