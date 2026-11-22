@@ -3233,6 +3233,7 @@ dependencies = [
  "hound",
  "nnnoiseless",
  "opus1",
+ "png",
  "serde",
  "serde_json",
  "sha2",
