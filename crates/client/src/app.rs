@@ -1206,15 +1206,15 @@ impl App {
                                         poke = Some(c.id);
                                         ui.close();
                                     }
-                                    let kick = |from_server| view.allowed(Action::Kick { target: c, from_server });
-                                    let (channel_kick, server_kick) = (kick(false), kick(true));
+                                    let kicks = [(false, "Kick from channel…"), (true, "Kick from server…")]
+                                        .map(|(from_server, label)| (from_server, label, view.allowed(Action::Kick { target: c, from_server })));
                                     let ban = view.allowed(Action::Ban(c));
                                     let set_moderator = view.allowed(Action::SetModerator);
-                                    if channel_kick || server_kick || ban || set_moderator {
+                                    if kicks.iter().any(|k| k.2) || ban || set_moderator {
                                         ui.separator();
                                     }
-                                    for (from_server, label) in [(false, "Kick from channel…"), (true, "Kick from server…")] {
-                                        if kick(from_server) && ui.button(label).clicked() {
+                                    for (from_server, label, allowed) in kicks {
+                                        if allowed && ui.button(label).clicked() {
                                             action = Some(TreeAction::Kick { target: c.id, from_server });
                                             ui.close();
                                         }
@@ -1836,7 +1836,9 @@ impl App {
                         }
                     }
                     ui.add_space(12.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Top-aligned: a centered row would keep the height the
+                    // scroll area took on the frame the list arrived.
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                         if ui.add(theme::primary_button("Done")).clicked() {
                             cancel = true;
                         }
