@@ -52,10 +52,8 @@ fn view() -> ServerView {
     let mut staff = channel(7, None, "Staff", 5);
     staff.kind = ChannelKind::Category;
     let view_only = Perms::of(&[Perm::View]);
-    staff.overrides = vec![
-        Override::new(RoleId::EVERYONE, Perms::NONE, view_only),
-        Override::new(RoleId::MODERATOR, view_only, Perms::NONE),
-    ];
+    staff.overrides =
+        vec![Override::denying(RoleId::EVERYONE, view_only), Override::allowing(RoleId::MODERATOR, view_only)];
     let office = channel(8, Some(7), "Office", 0);
     let meeting = channel(9, Some(7), "Meeting room", 1);
     let mut rooms = channel(10, None, "Create a room", 2);
@@ -122,7 +120,7 @@ fn connected(ctx: &egui::Context) -> App {
     settings.user_volumes.insert("Marta".into(), 0.6);
     let mut app = App::new(ctx, settings, None);
     app.view = Some(view());
-    app.conn = Conn::Connected { server: "friday.example.com:9988".into() };
+    app.conn = Conn::Connected { server: ServerKey::of("friday.example.com:9988") };
     app.ping = Some(Duration::from_millis(23));
     app.tabs[1].title = "Games".into();
     app.active_tab = 1;
@@ -277,7 +275,7 @@ const SCENES: &[Scene] = &[
     }),
     ("23-folded-category", (1100, 720), |ctx| {
         let mut app = connected(ctx);
-        app.settings.folded.insert("friday.example.com:9988".into(), ["Staff".to_owned()].into());
+        app.settings.folded.insert(ServerKey::of("friday.example.com:9988"), ["Staff".to_owned()].into());
         app
     }),
     ("25-create-lobby", (1100, 720), |ctx| {
@@ -329,24 +327,52 @@ const SCENES: &[Scene] = &[
     }),
 ];
 
-type Step = (f32, f32, Option<bool>);
+#[derive(Clone, Copy)]
+enum RightButton {
+    Press,
+    Release,
+}
 
-type Menu = (&'static str, (u32, u32), fn(&egui::Context) -> App, &'static [Step]);
+#[derive(Clone, Copy)]
+struct Step {
+    x: f32,
+    y: f32,
+    right_button: Option<RightButton>,
+}
+
+struct Menu {
+    name: &'static str,
+    size: (u32, u32),
+    make: fn(&egui::Context) -> App,
+    steps: &'static [Step],
+}
 
 const MENUS: &[Menu] = &[
-    (
-        "19-user-roles",
-        (1100, 720),
-        connected,
-        &[(80.0, 226.0, Some(true)), (80.0, 226.0, Some(false)), (150.0, 330.0, None)],
-    ),
-    (
-        "29-user-move-to",
-        (1100, 720),
-        connected,
-        &[(80.0, 340.0, Some(true)), (80.0, 340.0, Some(false)), (150.0, 240.0, None)],
-    ),
+    Menu {
+        name: "19-user-roles",
+        size: (1100, 720),
+        make: connected,
+        steps: &[
+            Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Press) },
+            Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Release) },
+            Step { x: 150.0, y: 330.0, right_button: None },
+        ],
+    },
+    Menu {
+        name: "29-user-move-to",
+        size: (1100, 720),
+        make: connected,
+        steps: &[
+            Step { x: 80.0, y: 340.0, right_button: Some(RightButton::Press) },
+            Step { x: 80.0, y: 340.0, right_button: Some(RightButton::Release) },
+            Step { x: 150.0, y: 240.0, right_button: None },
+        ],
+    },
 ];
+
+const FRAMES_BEFORE_STEPS: usize = 2;
+
+const FRAMES_PER_SECOND: f64 = 4.0;
 
 fn render(
     name: &str,
@@ -363,12 +389,13 @@ fn render(
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w as f32 / scale, h as f32 / scale));
     // Enough frames for layout to settle and fades to finish.
     for frame in 0..6 + steps.len() {
-        let time = Some(frame as f64 / 4.0);
+        let time = Some(frame as f64 / FRAMES_PER_SECOND);
         let mut raw = egui::RawInput { screen_rect: Some(screen), time, ..Default::default() };
-        if let Some(&(x, y, button)) = frame.checked_sub(2).and_then(|step| steps.get(step)) {
-            let pos = egui::pos2(x, y);
+        if let Some(step) = frame.checked_sub(FRAMES_BEFORE_STEPS).and_then(|step| steps.get(step)) {
+            let pos = egui::pos2(step.x, step.y);
             raw.events.push(egui::Event::PointerMoved(pos));
-            if let Some(pressed) = button {
+            if let Some(right_button) = step.right_button {
+                let pressed = matches!(right_button, RightButton::Press);
                 let (button, modifiers) = (egui::PointerButton::Secondary, egui::Modifiers::default());
                 raw.events.push(egui::Event::PointerButton { pos, button, pressed, modifiers });
             }
@@ -398,7 +425,8 @@ fn snapshots() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let only = std::env::var("T7_SNAPSHOT").ok();
     let scenes = SCENES.iter().map(|&(name, size, make)| (name, size, make, &[][..]));
-    for (name, size, make, steps) in scenes.chain(MENUS.iter().copied()) {
+    let menus = MENUS.iter().map(|m| (m.name, m.size, m.make, m.steps));
+    for (name, size, make, steps) in scenes.chain(menus) {
         if only.as_deref().is_none_or(|o| name.contains(o)) {
             render(name, size, make, steps, 1.0, &dir);
         }

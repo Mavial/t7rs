@@ -51,15 +51,12 @@ impl Bans {
         Ok(bans)
     }
 
-    /// Write-then-rename, so a crash never truncates the file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let header = "# Banned identities and IP addresses, kept up to date by the server as\n\
                       # admins ban and unban people in T7. Edit it only while the server is stopped.\n\n";
         let body = toml::to_string(&BansFile { next_id: self.next_id, bans: self.list.clone() })
             .map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, format!("{header}{body}"))?;
-        std::fs::rename(&tmp, path)
+        crate::write_atomic(path, |tmp| std::fs::write(tmp, format!("{header}{body}")))
     }
 
     pub fn add(&mut self, ban: NewBan, now: u64) -> &BanInfo {

@@ -417,7 +417,7 @@ async fn the_first_to_claim_owns_the_server() {
     let alice_id = welcomed_id(&wa);
     let S2C::Welcome { permissions, .. } = &wb else { unreachable!() };
     assert!(!permissions.server.has(Perm::ManageRoles));
-    alice.recv().await;
+    alice.until(|m| matches!(m, S2C::ClientJoined(c) if c.nickname == "bob")).await;
 
     bob.send(C2S::ClaimOwnership { token: "guess".into() }).await;
     assert!(error(&mut bob).await.contains("wrong"));
@@ -883,8 +883,7 @@ async fn moderators_and_bans_survive_a_restart() {
     admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: false }).await;
     assert!(admin.channels().await.iter().all(|c| c.moderators.is_empty()));
     // The server saves after it broadcasts; a round trip waits for that.
-    admin.send(C2S::Ping { nonce: 1 }).await;
-    admin.until(|m| matches!(m, S2C::Pong { .. })).await;
+    admin.sync().await;
     let saved = std::fs::read_to_string(dir.join("channels.toml")).unwrap();
     assert!(!saved.contains("moderators"), "{saved}");
     task.abort();
@@ -892,9 +891,19 @@ async fn moderators_and_bans_survive_a_restart() {
 }
 
 impl TestClient {
-    async fn change_roles(&mut self, change: RoleChange) -> Roles {
+    async fn sync(&mut self) -> Vec<S2C> {
         self.send(C2S::Ping { nonce: 0 }).await;
-        self.until(|m| matches!(m, S2C::Pong { .. })).await;
+        let mut before = Vec::new();
+        loop {
+            match self.recv().await {
+                S2C::Pong { nonce: 0 } => return before,
+                m => before.push(m),
+            }
+        }
+    }
+
+    async fn change_roles(&mut self, change: RoleChange) -> Roles {
+        self.sync().await;
         self.send(C2S::ChangeRoles(change)).await;
         match self.until(|m| matches!(m, S2C::Roles(_) | S2C::Error { .. })).await {
             S2C::Roles(roles) => roles,
@@ -1065,19 +1074,6 @@ fn names(list: &[ChannelInfo]) -> Vec<&str> {
     names
 }
 
-impl TestClient {
-    async fn drain(&mut self) -> Vec<S2C> {
-        self.send(C2S::Ping { nonce: 9 }).await;
-        let mut got = Vec::new();
-        loop {
-            match self.recv().await {
-                S2C::Pong { nonce: 9 } => return got,
-                m => got.push(m),
-            }
-        }
-    }
-}
-
 #[tokio::test]
 async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators() {
     let dir = data_dir("hidden");
@@ -1106,7 +1102,7 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     assert!(clients.iter().all(|c| c.id != mod_id), "{clients:?}");
     moder.send(C2S::SendText { target: TextTarget::Server, text: "psst".into() }).await;
     owner.until(|m| matches!(m, S2C::Text { from, .. } if *from == mod_id)).await;
-    let heard = late.drain().await;
+    let heard = late.sync().await;
     assert!(heard.iter().all(|m| !matches!(m, S2C::Text { from, .. } if *from == mod_id)), "{heard:?}");
 
     user.send(C2S::JoinChannel { channel: office, password: None }).await;
@@ -1198,7 +1194,7 @@ async fn a_category_is_never_joined_or_nested() {
     let list = admin.channels().await;
     let games = id_of(&list, "Games");
     assert_eq!(list.iter().find(|c| c.id == games).unwrap().kind, ChannelKind::Category);
-    let after = admin.drain().await;
+    let after = admin.sync().await;
     assert!(after.iter().all(|m| !matches!(m, S2C::ClientMoved { .. })), "its creator stays put: {after:?}");
 
     admin.send(C2S::JoinChannel { channel: games, password: None }).await;
@@ -1257,7 +1253,7 @@ async fn overrides_take_effect_at_once_and_survive_a_restart() {
     }
 
     owner.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::View])).await;
-    let hidden = perms::Override::new(RoleId::EVERYONE, Perms::NONE, Perms::of(&[Perm::View]));
+    let hidden = perms::Override::denying(RoleId::EVERYONE, Perms::of(&[Perm::View]));
     assert_eq!(owner.overrides(hangout).await, [hidden]);
     assert!(user.channels().await.iter().all(|c| c.id != hangout));
     assert_eq!(user.recv().await, S2C::ClientMoved { id: user_id, channel: lobby });
@@ -1293,7 +1289,7 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     boss.send(set(hangout, RoleId(99), &[], &[Perm::Speak])).await;
     assert!(error(&mut boss).await.contains("does not exist"));
     boss.send(set(hangout, RoleId::MODERATOR, &[Perm::ManagePermissions], &[])).await;
-    let granted = perms::Override::new(RoleId::MODERATOR, Perms::of(&[Perm::ManagePermissions]), Perms::NONE);
+    let granted = perms::Override::allowing(RoleId::MODERATOR, Perms::of(&[Perm::ManagePermissions]));
     assert_eq!(owner.overrides(hangout).await, [granted]);
 
     let S2C::Permissions(p) = moder.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
@@ -1304,7 +1300,7 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     moder.send(set(lobby, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
     assert!(error(&mut moder).await.contains("can't change this channel's permissions"));
     moder.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
-    let muted = perms::Override::new(RoleId::EVERYONE, Perms::NONE, Perms::of(&[Perm::Speak]));
+    let muted = perms::Override::denying(RoleId::EVERYONE, Perms::of(&[Perm::Speak]));
     assert_eq!(owner.overrides(hangout).await, [muted, granted]);
 }
 
@@ -1377,7 +1373,7 @@ async fn a_room_passes_to_whoever_has_been_in_it_longest() {
     assert!(p.may_in(raid, Perm::ManageChannels) && !p.may_in(lobby, Perm::Kick));
     a.send(C2S::JoinChannel { channel: raid, password: None }).await;
     c.until(|m| *m == S2C::ClientMoved { id: a_id, channel: raid }).await;
-    let heard = c.drain().await;
+    let heard = c.sync().await;
     assert!(heard.iter().all(|m| !matches!(m, S2C::Channels(_))), "{heard:?}");
 
     drop(b);
@@ -1437,7 +1433,7 @@ async fn a_full_server_opens_no_room() {
     ana.send(C2S::JoinChannel { channel: id_of(channels, "Rooms"), password: None }).await;
     let refusal = error(&mut ana).await;
     assert!(refusal.contains("no room for you there") && refusal.contains("maximum of 200 channels"), "{refusal}");
-    let after = ana.drain().await;
+    let after = ana.sync().await;
     assert!(after.iter().all(|m| !matches!(m, S2C::ClientMoved { .. } | S2C::Channels(_))), "{after:?}");
 }
 
