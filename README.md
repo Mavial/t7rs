@@ -275,6 +275,13 @@ macOS, signs each build with the `T7_SIGNING_KEY` secret and publishes the
 release with `latest.json`. The optional `T7_DEFAULT_SERVER` repository
 variable sets the address prefilled for first-time users.
 
+After the Release workflow succeeds, **Deploy released server** advances
+`deploy/t7-server` to the commit tagged by the latest stable GitHub release.
+Coolify watches pushes to that branch through a signed GitHub webhook and
+redeploys the existing server with its `/data` volume. To catch up after a
+missed run, run **Deploy released server** manually. If the branch already
+points to the release and the Coolify build failed, retry that deployment in Coolify.
+
 `cargo run -p t7-release -- keygen FILE` makes a new signing key. Its public
 half goes in `crates/client/src/update.rs`; builds signed with a different key
 are refused, so changing keys means one manual download for everyone.
