@@ -6,6 +6,8 @@
 //! control messages are only a few bytes on the wire and (de)serialisation is
 //! extremely cheap.
 
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -45,6 +47,7 @@ pub const IDLE_TIMEOUT_SECS: u64 = 30;
 
 pub type ClientId = u32;
 pub type ChannelId = u32;
+pub type BanId = u32;
 
 pub use identity::{Identity, IdentityProof};
 
@@ -113,6 +116,22 @@ pub struct ClientInfo {
     pub identity: Identity,
 }
 
+/// A ban on the server: the identity, and the IP address if that was banned too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BanInfo {
+    pub id: BanId,
+    pub identity: Identity,
+    pub ip: Option<IpAddr>,
+    /// Their nickname when they were banned.
+    pub nickname: String,
+    pub reason: String,
+    /// The admin's nickname.
+    pub banned_by: String,
+    pub created_unix: u64,
+    /// `None`: permanent.
+    pub expires_unix: Option<u64>,
+}
+
 /// Where a text message goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TextTarget {
@@ -167,6 +186,13 @@ pub enum C2S {
     /// Out of their channel to the default one (admins and the channel's
     /// moderators), or off the server (admins). See [`perms`].
     Kick { target: ClientId, from_server: bool, reason: String },
+    /// Admins only. Bans their identity, and their IP address with `include_ip`,
+    /// for `duration_secs` (`None`: for good), and kicks them off the server.
+    Ban { target: ClientId, duration_secs: Option<u64>, reason: String, include_ip: bool },
+    /// Admins only; answered with [`S2C::Bans`].
+    ListBans,
+    /// Admins only; answered with the new [`S2C::Bans`].
+    Unban { id: BanId },
 }
 
 /// Server → client.
@@ -207,6 +233,8 @@ pub enum S2C {
     /// Sent to everyone before the kicked client is moved to the default
     /// channel, or disconnected with [`LeaveReason::Kicked`].
     ClientKicked { id: ClientId, by: ClientId, from_server: bool, reason: String },
+    /// The ban list, for an admin who asked.
+    Bans(Vec<BanInfo>),
 }
 
 #[derive(Debug)]

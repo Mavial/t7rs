@@ -29,6 +29,8 @@ fn key(nick: &str) -> IdentityKey {
 
 /// Loopback addresses for clients that must not share an IP.
 const HOME: Ipv4Addr = Ipv4Addr::LOCALHOST;
+const ADMIN_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
+const ELSEWHERE: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 3);
 
 impl TestClient {
     async fn connect(addr: SocketAddr, nick: &str, pw: Option<&str>) -> (Self, S2C) {
@@ -561,34 +563,122 @@ async fn moderators_kick_from_their_channels_only() {
 }
 
 #[tokio::test]
-async fn moderators_survive_a_restart() {
+async fn bans_keep_identities_and_addresses_out() {
+    let addr = start(&with_admin_token("t")).await;
+    // The admin comes from another address than the people it bans.
+    let (mut admin, admin_id, _) = admin_login(addr, ADMIN_IP).await;
+    let (mut mallory, wm) = TestClient::connect(addr, "mallory", None).await;
+    let mallory_id = welcomed_id(&wm);
+
+    // An identity ban kicks them off with the reason...
+    admin.send(C2S::Ban { target: mallory_id, duration_secs: None, reason: "spam".into(), include_ip: false }).await;
+    let kicked = S2C::ClientKicked { id: mallory_id, by: admin_id, from_server: true, reason: "banned for good (spam)".into() };
+    assert_eq!(mallory.until(|m| matches!(m, S2C::ClientKicked { .. })).await, kicked);
+    mallory.closed().await;
+    // ...and keeps that key out from any address.
+    for from in [HOME, ELSEWHERE] {
+        let (_, reply) = TestClient::connect_from(addr, from, "mallory", &key("mallory")).await;
+        assert_eq!(rejected(&reply), "You are banned from this server (spam).");
+    }
+    // Their address wasn't banned, so another key gets in from it.
+    let (_, reply) = TestClient::connect_from(addr, HOME, "newcomer", &key("newcomer")).await;
+    welcomed_id(&reply);
+
+    // An IP ban also keeps out new keys from that address.
+    let eve_ip = Ipv4Addr::new(127, 0, 0, 4);
+    let (mut eve, we) = TestClient::connect_from(addr, eve_ip, "eve", &key("eve")).await;
+    admin.send(C2S::Ban { target: welcomed_id(&we), duration_secs: Some(3600), reason: String::new(), include_ip: true }).await;
+    eve.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    let (_, reply) = TestClient::connect_from(addr, eve_ip, "eve2", &key("eve2")).await;
+    let ends = ["59 minutes", "1 hour"].map(|left| format!("You are banned from this server. The ban ends in {left}."));
+    assert!(ends.iter().any(|e| e == rejected(&reply)), "{reply:?}");
+
+    // Banning the address the admin is on would lock the admin out too.
+    let (_, wb) = TestClient::connect_from(addr, ADMIN_IP, "flatmate", &key("flatmate")).await;
+    admin.send(C2S::Ban { target: welcomed_id(&wb), duration_secs: None, reason: String::new(), include_ip: true }).await;
+    assert!(error(&mut admin).await.contains("your IP address"));
+
+    // The list has both bans; lifting eve's lets her address back in.
+    admin.send(C2S::ListBans).await;
+    let S2C::Bans(list) = admin.until(|m| matches!(m, S2C::Bans(_))).await else { unreachable!() };
+    assert_eq!(list.len(), 2, "{list:?}");
+    let eve_ban = list.iter().find(|b| b.identity == key("eve").identity()).expect("eve's ban");
+    assert_eq!(eve_ban.ip, Some(eve_ip.into()));
+    assert_eq!((eve_ban.nickname.as_str(), eve_ban.banned_by.as_str()), ("eve", "admin"));
+    assert_eq!(eve_ban.expires_unix, Some(eve_ban.created_unix + 3600));
+    let mallory_ban = list.iter().find(|b| b.identity == key("mallory").identity()).expect("mallory's ban");
+    assert_eq!((mallory_ban.ip, mallory_ban.expires_unix, mallory_ban.reason.as_str()), (None, None, "spam"));
+
+    admin.send(C2S::Unban { id: eve_ban.id }).await;
+    let S2C::Bans(list) = admin.until(|m| matches!(m, S2C::Bans(_))).await else { unreachable!() };
+    assert_eq!(list.iter().map(|b| b.id).collect::<Vec<_>>(), [mallory_ban.id]);
+    let (_, reply) = TestClient::connect_from(addr, eve_ip, "eve", &key("eve")).await;
+    welcomed_id(&reply);
+
+    // Only admins see or lift bans.
+    let (mut user, _) = TestClient::connect(addr, "user", None).await;
+    user.send(C2S::ListBans).await;
+    assert!(error(&mut user).await.contains("only admins"));
+    user.send(C2S::Unban { id: mallory_ban.id }).await;
+    assert!(error(&mut user).await.contains("only admins"));
+}
+
+#[tokio::test]
+async fn temporary_bans_end() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, _, _) = admin_login(addr, ADMIN_IP).await;
+    let (mut mallory, wm) = TestClient::connect(addr, "mallory", None).await;
+    // Bans count whole seconds, so this one lasts between one and two.
+    admin.send(C2S::Ban { target: welcomed_id(&wm), duration_secs: Some(2), reason: "cool off".into(), include_ip: true }).await;
+    let kicked = mallory.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    assert!(matches!(kicked, S2C::ClientKicked { ref reason, .. } if reason == "banned for less than a minute (cool off)"), "{kicked:?}");
+
+    let (_, reply) = TestClient::connect(addr, "mallory", None).await;
+    assert!(rejected(&reply).contains("ends in less than a minute"), "{reply:?}");
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let (_, reply) = TestClient::connect(addr, "mallory", None).await;
+    welcomed_id(&reply);
+    admin.send(C2S::ListBans).await;
+    assert_eq!(admin.until(|m| matches!(m, S2C::Bans(_))).await, S2C::Bans(Vec::new()), "expired bans leave the list");
+}
+
+#[tokio::test]
+async fn moderators_and_bans_survive_a_restart() {
     let dir = data_dir("moderation");
     let cfg = with_admin_token("t");
     let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
-    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    // Off the banned address, to log in again after the restart.
+    let (mut admin, _, channels) = admin_login(addr, ADMIN_IP).await;
     let gaming = id_of(&channels, "Gaming");
     // Only admins choose moderators.
     let (mut user, _) = TestClient::connect(addr, "user", None).await;
     user.send(C2S::SetModerator { channel: gaming, identity: key("user").identity(), moderator: true }).await;
-    let refused = user.until(|m| matches!(m, S2C::Error { .. })).await;
-    assert!(matches!(refused, S2C::Error { ref message } if message.contains("only admins")), "{refused:?}");
+    assert!(error(&mut user).await.contains("only admins"));
     admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: true }).await;
     let list = admin.channels().await;
     assert_eq!(list.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
-    // The server saves after it broadcasts; a round trip waits for that.
-    admin.send(C2S::Ping { nonce: 1 }).await;
-    admin.until(|m| matches!(m, S2C::Pong { .. })).await;
+    let (_, wm) = TestClient::connect(addr, "mallory", None).await;
+    admin.send(C2S::Ban { target: welcomed_id(&wm), duration_secs: None, reason: "spam".into(), include_ip: true }).await;
+    // The server saves before it kicks.
+    admin.until(|m| matches!(m, S2C::ClientLeft { .. })).await;
     task.abort();
     drop(admin);
 
     let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
-    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    let (_, reply) = TestClient::connect(addr, "mallory", None).await;
+    assert!(rejected(&reply).contains("spam"), "the ban was lost: {reply:?}");
+    let (mut admin, _, channels) = admin_login(addr, ADMIN_IP).await;
     assert_eq!(channels.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
+    admin.send(C2S::ListBans).await;
+    let S2C::Bans(list) = admin.until(|m| matches!(m, S2C::Bans(_))).await else { unreachable!() };
+    assert_eq!(list.len(), 1);
+    assert_eq!((list[0].identity, list[0].ip), (key("mallory").identity(), Some(HOME.into())));
 
     // Removing the moderator by identity works while they are offline, and sticks.
     admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: false }).await;
     assert!(admin.channels().await.iter().all(|c| c.moderators.is_empty()));
-    admin.send(C2S::Ping { nonce: 2 }).await;
+    // The server saves after it broadcasts; a round trip waits for that.
+    admin.send(C2S::Ping { nonce: 1 }).await;
     admin.until(|m| matches!(m, S2C::Pong { .. })).await;
     let saved = std::fs::read_to_string(dir.join("channels.toml")).unwrap();
     assert!(!saved.contains("moderators"), "{saved}");

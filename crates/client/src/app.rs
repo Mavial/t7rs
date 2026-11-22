@@ -9,7 +9,7 @@ use t7_proto::model::ServerView;
 use t7_proto::perms::{self, Action};
 use t7_proto::tls::Fingerprint;
 use t7_proto::{
-    C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason, MAX_CHANNEL_DEPTH,
+    BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason, MAX_CHANNEL_DEPTH,
     MAX_CHANNEL_NAME_LEN, MAX_CHANNEL_TOPIC_LEN, MAX_REASON_LEN, PasswordChange, S2C, TextTarget,
 };
 
@@ -83,6 +83,8 @@ enum TreeAction {
     AdminLogin,
     SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
     Kick { target: ClientId, from_server: bool },
+    Ban(ClientId),
+    Bans,
 }
 
 /// Payload while dragging yourself onto another channel.
@@ -124,7 +126,14 @@ struct PokeForm {
 /// The moderation dialog on screen, if any.
 enum Moderation {
     Kick { target: ClientId, name: String, from_server: bool, reason: String, focused: bool },
+    Ban { target: ClientId, name: String, reason: String, length: Option<u64>, include_ip: bool, focused: bool },
+    /// The ban list; `None` until the server sends it.
+    Bans(Option<Vec<BanInfo>>),
 }
+
+/// The ban lengths to pick from: (label, seconds; `None` for good).
+const BAN_LENGTHS: [(&str, Option<u64>); 4] =
+    [("1 hour", Some(3600)), ("1 day", Some(86_400)), ("1 week", Some(7 * 86_400)), ("Permanent", None)];
 
 /// A server came back with a different certificate than the pinned one.
 struct CertChange {
@@ -467,6 +476,14 @@ impl App {
         self.moderation = Some(Moderation::Kick { target, name, from_server, reason: String::new(), focused: false });
     }
 
+    fn open_ban(&mut self, target: ClientId) {
+        let Some(name) = self.view.as_ref().and_then(|v| v.nickname(target)) else { return };
+        let name = name.to_owned();
+        let length = BAN_LENGTHS[1].1;
+        self.moderation =
+            Some(Moderation::Ban { target, name, reason: String::new(), length, include_ip: true, focused: false });
+    }
+
     fn open_poke(&mut self, target: ClientId) {
         let Some(name) = self.view.as_ref().and_then(|v| v.nickname(target)) else { return };
         self.poke_form = Some(PokeForm { target, name: name.to_owned(), message: String::new(), focus_requested: false });
@@ -781,6 +798,11 @@ impl App {
                 }
             }
             S2C::ClientKicked { id, by, from_server, reason } => self.on_kicked(id, by, from_server, &reason),
+            S2C::Bans(list) => {
+                if let Some(Moderation::Bans(shown)) = &mut self.moderation {
+                    *shown = Some(list);
+                }
+            }
             S2C::Poked { from, message } => self.on_poked(from, message),
             S2C::Error { message } => {
                 // A saved token that no longer works (e.g. the server's was reset) is forgotten.
@@ -995,6 +1017,9 @@ impl App {
                             if ui.button(label).clicked() {
                                 action = Some(TreeAction::Create(None));
                             }
+                            if view.allowed(Action::ManageBans) && ui.button("Bans…").clicked() {
+                                action = Some(TreeAction::Bans);
+                            }
                             if admin {
                                 ui.add_enabled(false, egui::Button::new("You're a server admin"));
                             } else if ui.button("Admin login…").clicked() {
@@ -1183,8 +1208,9 @@ impl App {
                                     }
                                     let kick = |from_server| view.allowed(Action::Kick { target: c, from_server });
                                     let (channel_kick, server_kick) = (kick(false), kick(true));
+                                    let ban = view.allowed(Action::Ban(c));
                                     let set_moderator = view.allowed(Action::SetModerator);
-                                    if channel_kick || server_kick || set_moderator {
+                                    if channel_kick || server_kick || ban || set_moderator {
                                         ui.separator();
                                     }
                                     for (from_server, label) in [(false, "Kick from channel…"), (true, "Kick from server…")] {
@@ -1192,6 +1218,10 @@ impl App {
                                             action = Some(TreeAction::Kick { target: c.id, from_server });
                                             ui.close();
                                         }
+                                    }
+                                    if ban && ui.button("Ban…").clicked() {
+                                        action = Some(TreeAction::Ban(c.id));
+                                        ui.close();
                                     }
                                     if set_moderator {
                                         let moderator = ch.moderators.contains(&c.identity);
@@ -1248,6 +1278,11 @@ impl App {
                         self.net.send(C2S::SetModerator { channel, identity, moderator });
                     }
                     Some(TreeAction::Kick { target, from_server }) => self.open_kick(target, from_server),
+                    Some(TreeAction::Ban(target)) => self.open_ban(target),
+                    Some(TreeAction::Bans) => {
+                        self.net.send(C2S::ListBans);
+                        self.moderation = Some(Moderation::Bans(None));
+                    }
                     None => {}
                 }
             });
@@ -1710,7 +1745,8 @@ impl App {
         // A dialog about someone who has left closes by itself.
         let online = |id: &ClientId| self.view.as_ref().is_some_and(|v| v.clients.contains_key(id));
         let gone = match &self.moderation {
-            Some(Moderation::Kick { target, .. }) => !online(target),
+            Some(Moderation::Kick { target, .. } | Moderation::Ban { target, .. }) => !online(target),
+            Some(Moderation::Bans(_)) => self.view.is_none(),
             None => false,
         };
         if gone {
@@ -1720,9 +1756,10 @@ impl App {
         let default_name =
             view.channels.values().find(|c| c.default).map(|c| c.name.clone()).unwrap_or_else(|| "the default channel".into());
         let mut send: Option<C2S> = None;
+        let mut unban = None;
         let mut cancel = false;
         let modal = egui::Modal::new(Id::unique("moderation")).show(ctx, |ui| {
-            ui.set_width(360.0);
+            ui.set_width(if matches!(dialog, Moderation::Bans(_)) { 440.0 } else { 360.0 });
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             match dialog {
                 Moderation::Kick { target, name, from_server, reason, focused } => {
@@ -1747,8 +1784,70 @@ impl App {
                         }
                     });
                 }
+                Moderation::Ban { target, name, reason, length, include_ip, focused } => {
+                    ui.label(RichText::new(format!("Ban {name}")).size(19.0).strong().color(theme::TEXT));
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("They are kicked off the server and can't connect again until the ban ends.")
+                            .size(12.5)
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.add_space(12.0);
+                    reason_field(ui, reason, focused);
+                    section(ui, "Length");
+                    ui.horizontal(|ui| {
+                        for (label, secs) in BAN_LENGTHS {
+                            ui.selectable_value(length, secs, label);
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.checkbox(include_ip, "Also ban IP address")
+                        .on_hover_text("Also keeps out new identities from their address, and anyone else who shares it");
+                    ui.add_space(14.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(danger_button("Ban")).clicked() || enter {
+                            let reason = reason.trim().to_owned();
+                            send = Some(C2S::Ban { target: *target, duration_secs: *length, reason, include_ip: *include_ip });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
+                Moderation::Bans(list) => {
+                    ui.label(RichText::new("Bans").size(19.0).strong().color(theme::TEXT));
+                    ui.add_space(10.0);
+                    match list {
+                        None => {
+                            ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
+                        }
+                        Some(list) if list.is_empty() => {
+                            ui.label(RichText::new("Nobody is banned.").color(theme::TEXT_DIM));
+                        }
+                        Some(list) => {
+                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                for ban in list.iter() {
+                                    if ban_card(ui, ban) {
+                                        unban = Some(ban.id);
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                            });
+                        }
+                    }
+                    ui.add_space(12.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(theme::primary_button("Done")).clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
             }
         });
+        if let Some(id) = unban {
+            // The server answers with the new list.
+            self.net.send(C2S::Unban { id });
+        }
         if let Some(msg) = send {
             self.net.send(msg);
             self.moderation = None;
@@ -2036,7 +2135,7 @@ impl App {
                     ui.label(RichText::new("Admin login").size(19.0).strong().color(theme::TEXT));
                     ui.add_space(2.0);
                     ui.label(
-                        RichText::new("Admins can create, edit, rearrange and delete any channel. The token is in the server's log and in admin_token.txt next to its config.")
+                        RichText::new("Admins can manage every channel, choose moderators, and kick and ban people. The token is in the server's log and in admin_token.txt next to its config.")
                             .size(12.5)
                             .color(theme::TEXT_DIM),
                     );
@@ -2282,6 +2381,43 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color:
         *on = !*on;
     }
     clicked
+}
+
+/// One ban in the ban list. Returns whether Unban was clicked.
+fn ban_card(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
+    let local = |secs: u64| {
+        chrono::DateTime::from_timestamp(secs as i64, 0)
+            .map(|t| t.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
+            .unwrap_or_default()
+    };
+    let mut details = vec![format!("by {} on {}", ban.banned_by, local(ban.created_unix))];
+    details.push(match ban.expires_unix {
+        Some(end) => format!("until {}", local(end)),
+        None => "permanent".into(),
+    });
+    if let Some(ip) = ban.ip {
+        details.push(format!("IP {ip}"));
+    }
+    let mut unban = false;
+    egui::Frame::new()
+        .fill(theme::SURFACE)
+        .corner_radius(CornerRadius::same(theme::RADIUS))
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&ban.nickname).strong().color(theme::TEXT));
+                ui.label(RichText::new(ban.identity.to_string()).font(FontId::monospace(11.5)).color(theme::TEXT_FAINT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    unban = ui.small_button("Unban").clicked();
+                });
+            });
+            ui.label(RichText::new(details.join(" · ")).size(12.0).color(theme::TEXT_DIM));
+            if !ban.reason.is_empty() {
+                ui.label(RichText::new(&ban.reason).size(12.5).color(theme::TEXT));
+            }
+        });
+    unban
 }
 
 /// A red button for an action that is hard to take back.

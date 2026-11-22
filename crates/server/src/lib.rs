@@ -1,5 +1,6 @@
 //! T7 server library: config loading and the async server itself.
 
+mod bans;
 mod channels;
 pub mod config;
 mod conn;
@@ -13,15 +14,16 @@ use t7_proto::{ServerInfo, tls};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 
+use crate::bans::Bans;
 use crate::channels::Channels;
 use crate::config::Config;
 use crate::state::{Event, Server};
 
 /// Accepts connections on `listener`, and voice on UDP at the same address, forever.
 ///
-/// `data_dir` holds `channels.toml` (the live channel tree), the generated
-/// admin token and the TLS certificate. Without it, channel edits, the token
-/// and the certificate last only this run.
+/// `data_dir` holds `channels.toml` (the live channel tree), `bans.toml`, the
+/// generated admin token and the TLS certificate. Without it, channel edits,
+/// bans, the token and the certificate last only this run.
 pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<()> {
     let udp = Arc::new(UdpSocket::bind(listener.local_addr()?).await?);
     let channels_file = data_dir.map(|d| d.join("channels.toml"));
@@ -36,6 +38,11 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
             }
             channels
         }
+    };
+    let bans = match data_dir.map(|d| d.join("bans.toml")) {
+        Some(file) if file.exists() => Bans::load(&file, state::unix_now())
+            .map_err(|e| std::io::Error::other(format!("cannot read {}: {e}", file.display())))?,
+        _ => Bans::default(),
     };
     let admin_token = admin_token(cfg, data_dir)?;
     tracing::info!("admin token: {admin_token}  (in T7: the menu next to CHANNELS, then Admin login)");
@@ -56,7 +63,8 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
         info,
         cfg.password().map(str::to_owned),
         channels,
-        channels_file,
+        bans,
+        data_dir.map(Path::to_owned),
         admin_token,
         udp.clone(),
     );

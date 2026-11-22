@@ -9,18 +9,19 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use t7_proto::perms::{self, Action};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
-    C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason, MAX_POKE_LEN,
-    MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget,
-    encode_frame, validate_nickname,
+    BanId, BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason,
+    MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo,
+    TextTarget, encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::bans::{Bans, NewBan, describe_duration};
 use crate::channels::Channels;
 
 /// A complete, ready-to-write frame shared between all recipients.
@@ -99,8 +100,9 @@ pub struct Server {
     info: ServerInfo,
     password: Option<String>,
     channels: Channels,
-    /// Where permanent channel changes are saved (`None`: not saved).
-    channels_file: Option<PathBuf>,
+    bans: Bans,
+    /// Holds `channels.toml` and `bans.toml` (`None`: changes are not saved).
+    data_dir: Option<PathBuf>,
     admin_token: String,
     clients: HashMap<ClientId, Client>,
     next_id: ClientId,
@@ -115,7 +117,8 @@ impl Server {
         info: ServerInfo,
         password: Option<String>,
         channels: Channels,
-        channels_file: Option<PathBuf>,
+        bans: Bans,
+        data_dir: Option<PathBuf>,
         admin_token: String,
         udp: Arc<UdpSocket>,
     ) -> Self {
@@ -123,7 +126,8 @@ impl Server {
             info,
             password,
             channels,
-            channels_file,
+            bans,
+            data_dir,
             admin_token,
             clients: HashMap::new(),
             next_id: 1,
@@ -211,6 +215,10 @@ impl Server {
             ));
         }
         let Some(identity) = identity else { return reject("your identity proof is invalid") };
+        let now = unix_now();
+        if let Some(ban) = self.bans.find(identity, addr.ip(), now) {
+            return reject(&banned_message(ban, now));
+        }
         if let Some(pw) = &self.password
             && password.as_deref() != Some(pw.as_str())
         {
@@ -348,6 +356,11 @@ impl Server {
                 }
             }
             C2S::Kick { target, from_server, reason } => self.kick(id, target, from_server, &reason),
+            C2S::Ban { target, duration_secs, reason, include_ip } => {
+                self.ban(id, target, duration_secs, &reason, include_ip)
+            }
+            C2S::ListBans => self.list_bans(id),
+            C2S::Unban { id: ban } => self.unban(id, ban),
         }
     }
 
@@ -479,12 +492,84 @@ impl Server {
         Some(reason)
     }
 
+    fn ban(&mut self, id: ClientId, target: ClientId, duration_secs: Option<u64>, reason: &str, include_ip: bool) {
+        let Some(reason) = self.reason(id, reason) else { return };
+        let Some(t) = self.clients.get(&target) else { return self.error(id, "that user is no longer online") };
+        if !self.allowed(id, Action::Ban(&t.info)) {
+            let msg = if self.clients[&id].info.admin { "you can't ban yourself" } else { "only admins can ban people" };
+            return self.error(id, msg);
+        }
+        if duration_secs == Some(0) {
+            return self.error(id, "a ban must last at least a second");
+        }
+        let actor = &self.clients[&id];
+        // On a shared connection (a LAN, a household) this would lock the admin out too.
+        if include_ip && t.addr.ip().to_canonical() == actor.addr.ip().to_canonical() {
+            return self.error(id, &format!("{} connects from your IP address; ban them without it", t.info.nickname));
+        }
+        let ban = NewBan {
+            identity: t.info.identity,
+            ip: include_ip.then(|| t.addr.ip()),
+            nickname: t.info.nickname.clone(),
+            reason: reason.clone(),
+            banned_by: actor.info.nickname.clone(),
+            duration_secs,
+        };
+        let ban = self.bans.add(ban, unix_now());
+        tracing::info!(id = ban.id, identity = %ban.identity.to_hex(), ip = ?ban.ip, by = %ban.banned_by, "ban added");
+        let identity = ban.identity;
+        self.save_bans();
+
+        let length = match duration_secs {
+            Some(secs) => format!("for {}", describe_duration(secs)),
+            None => "for good".into(),
+        };
+        let notice = if reason.is_empty() { format!("banned {length}") } else { format!("banned {length} ({reason})") };
+        let connected: Vec<ClientId> =
+            self.clients.values().filter(|c| c.info.identity == identity).map(|c| c.info.id).collect();
+        for client in connected {
+            self.eject(client, id, true, notice.clone());
+        }
+    }
+
+    fn list_bans(&mut self, id: ClientId) {
+        if !self.allowed(id, Action::ManageBans) {
+            return self.error(id, "only admins can see the ban list");
+        }
+        if self.bans.prune(unix_now()) {
+            self.save_bans();
+        }
+        self.send(id, &S2C::Bans(self.bans.list().to_vec()));
+    }
+
+    fn unban(&mut self, id: ClientId, ban: BanId) {
+        if !self.allowed(id, Action::ManageBans) {
+            return self.error(id, "only admins can lift bans");
+        }
+        match self.bans.remove(ban) {
+            Some(lifted) => {
+                tracing::info!(id = ban, identity = %lifted.identity.to_hex(), "ban lifted");
+                self.save_bans();
+            }
+            None => self.error(id, "that ban has already ended"),
+        }
+        self.list_bans(id);
+    }
+
+    fn save_bans(&self) {
+        if let Some(path) = self.data_dir.as_ref().map(|d| d.join("bans.toml"))
+            && let Err(e) = self.bans.save(&path)
+        {
+            tracing::error!("cannot save bans to {}: {e}", path.display());
+        }
+    }
+
     /// Sends everyone the new channel list; saves it when permanent channels changed.
     fn channels_changed(&mut self, save: bool) {
         self.broadcast(&S2C::Channels(self.channels.snapshot()), |_| true);
         if save
-            && let Some(path) = &self.channels_file
-            && let Err(e) = self.channels.save(path)
+            && let Some(path) = self.data_dir.as_ref().map(|d| d.join("channels.toml"))
+            && let Err(e) = self.channels.save(&path)
         {
             tracing::error!("cannot save channels to {}: {e}", path.display());
         }
@@ -580,4 +665,21 @@ impl Server {
 
 fn encode(msg: &S2C) -> Frame {
     encode_frame(msg).into()
+}
+
+pub fn unix_now() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// What a banned client is told when it tries to join.
+fn banned_message(ban: &BanInfo, now: u64) -> String {
+    let mut msg = "You are banned from this server".to_owned();
+    if !ban.reason.is_empty() {
+        msg.push_str(&format!(" ({})", ban.reason));
+    }
+    msg.push('.');
+    if let Some(end) = ban.expires_unix {
+        msg.push_str(&format!(" The ban ends in {}.", describe_duration(end.saturating_sub(now))));
+    }
+    msg
 }
