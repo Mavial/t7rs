@@ -1,5 +1,5 @@
-//! Visual identity: neutral greys with a warm peach accent, after
-//! opencode's OC-2 desktop theme (anomalyco/opencode, `oc-2.json`, dark).
+//! Visual identity: neutral greys, after opencode's OC-2 desktop theme
+//! (anomalyco/opencode, `oc-2.json`, dark), with TeamSpeak 3's blue as the accent.
 
 use egui::{self, Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle, Visuals};
 
@@ -15,11 +15,11 @@ pub const TEXT: Color32 = Color32::from_rgb(0xed, 0xed, 0xed);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0xa0, 0xa0, 0xa0);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x70, 0x70, 0x70);
 
-pub const ACCENT: Color32 = Color32::from_rgb(0xfa, 0xb2, 0x83);
+pub const ACCENT: Color32 = Color32::from_rgb(0x25, 0x80, 0xc3);
 /// Text and icons drawn on an `ACCENT` fill.
-pub const ON_ACCENT: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
-pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0xff, 0xc1, 0xa4);
-pub const ACCENT_BG: Color32 = Color32::from_rgba_premultiplied(0x2a, 0x1a, 0x10, 0xa0);
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
+pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0x6a, 0xb4, 0xea);
+pub const ACCENT_BG: Color32 = Color32::from_rgba_premultiplied(0x0e, 0x22, 0x34, 0xa0);
 
 pub const GREEN: Color32 = Color32::from_rgb(0x49, 0xc9, 0x70);
 pub const AMBER: Color32 = Color32::from_rgb(0xf6, 0xc2, 0x51);

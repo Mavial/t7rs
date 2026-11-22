@@ -25,9 +25,9 @@ pub const MARK: &[Block] = &[
     b(0, 8, 64, 48, 0x3a3a3a),
     b(8, 4, 48, 56, 0x161616),
     b(4, 8, 56, 48, 0x161616),
-    // T in peach, 7 in white.
-    b(8, 16, 24, 8, 0xfab283),
-    b(16, 24, 8, 24, 0xfab283),
+    // T in blue, 7 in white.
+    b(8, 16, 24, 8, 0x2580c3),
+    b(16, 24, 8, 24, 0x2580c3),
     b(36, 16, 20, 8, 0xededed),
     b(48, 24, 8, 8, 0xededed),
     b(44, 32, 8, 8, 0xededed),
