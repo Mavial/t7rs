@@ -11,4 +11,5 @@ COPY --from=build /src/target/release/t7-server /usr/local/bin/t7-server
 VOLUME /data
 WORKDIR /data
 EXPOSE 9987/tcp
+EXPOSE 9987/udp
 ENTRYPOINT ["/usr/local/bin/t7-server", "--config", "/data/t7-server.toml", "--bind", "0.0.0.0:9987"]

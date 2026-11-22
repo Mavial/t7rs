@@ -41,14 +41,18 @@ fn main() {
             .await
             .unwrap_or_else(|e| fail(format!("cannot bind {}: {e}", cfg.bind)));
         tracing::info!(
-            "\"{}\" listening on {} ({} channels{})",
+            "\"{}\" listening on {} (TCP control + UDP voice, {} channels{})",
             cfg.name,
             cfg.bind,
             cfg.flatten_channels().0.len(),
             if cfg.password().is_some() { ", password protected" } else { "" }
         );
         tokio::select! {
-            _ = t7_server::serve(listener, &cfg) => {}
+            res = t7_server::serve(listener, &cfg) => {
+                if let Err(e) = res {
+                    fail(format!("cannot open voice socket on {}: {e}", cfg.bind));
+                }
+            }
             _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
         }
     });

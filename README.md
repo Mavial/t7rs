@@ -6,9 +6,9 @@ A lightweight, fast voice-chat server and client:
 one server you host yourself, a tree of channels, and people in them. No accounts,
 no cloud, no bloat.
 
-> **Status:** milestone 1. Server, channel tree, presence, text chat (server,
-> channel, private), and self-status (mute / sound off / away). **Voice is the
-> next milestone.** The protocol and UI are already built around it.
+> **Status:** voice works. Server, channel tree, presence, voice chat per channel
+> (voice activation or push-to-talk), text chat (server, channel, private), and
+> mute / sound off / away.
 
 ## Quick start
 
@@ -24,7 +24,9 @@ cargo build --release
 ./target/release/t7-client 127.0.0.1 --nick Santiago
 ```
 
-The default port is **9987/TCP**. When connecting you can leave the port off.
+The server uses port **9987 on both TCP (control) and UDP (voice)**; open both in
+your firewall. When connecting you can leave the port off. If the client shows
+"Connected · no voice", UDP is being blocked.
 
 ## Sharing the client with friends
 
@@ -47,8 +49,12 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Private message | Double-click a user, or right-click → Send private message |
 | Close a PM tab | Middle-click it, or right-click → Close |
 | Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right |
+| Voice settings | The sliders button bottom-right: microphone, speakers, voice activation level with a live meter, push-to-talk key, volumes |
 
-Nickname, recent servers and your status are remembered between sessions.
+A green ring around an avatar means that person is talking. On Windows the
+push-to-talk key works while another app, like a game, has focus.
+
+Nickname, recent servers, status and voice settings are remembered between sessions.
 
 ## Server configuration
 
@@ -85,6 +91,12 @@ crates/
 
 - **Protocol:** length-prefixed [postcard](https://docs.rs/postcard) frames over TCP.
   Compact varint binary, so most messages are a handful of bytes. Versioned handshake.
+- **Voice:** 48 kHz mono Opus (pure-Rust `opus1`) in 20 ms frames at 32 kbps, sent
+  as UDP datagrams on the same port. Each datagram carries the sender's id and a
+  random token from the handshake. The server forwards frames to everyone else in
+  the speaker's channel without decoding them, skips listeners with sound off, and
+  rate-limits senders. Clients keep a ~60 ms jitter buffer per speaker and conceal
+  lost packets.
 - **Server:** each connection gets a reader loop and a writer task. All state lives
   in one core task (no locks, a total order of events). Broadcasts are serialised
   once and shared (`Arc<[u8]>`) across recipients. Writers batch queued frames into
@@ -116,8 +128,8 @@ cargo run --example bot -- 127.0.0.1:9987 500   # crude load test
 
 ## Roadmap
 
-1. **Voice:** Opus over UDP (session token from the TCP handshake), push-to-talk
-   and voice activation, per-user volume, talking indicators in the tree.
+1. Voice polish: per-user volume, noise suppression, echo cancellation for
+   people without headphones, sounds for joins and leaves.
 2. Channel management at runtime: create/edit/delete, temporary channels, passwords.
 3. Permissions: server admin token, kick/ban, channel moderators.
 4. TLS for the control connection plus encrypted voice.

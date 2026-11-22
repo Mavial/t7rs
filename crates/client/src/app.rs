@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Id, Layout, Margin, RichText, Sense, Stroke,
@@ -7,10 +8,11 @@ use egui::{
 use t7_proto::model::ServerView;
 use t7_proto::{C2S, ChannelId, ClientId, ClientStatus, LeaveReason, S2C, TextTarget};
 
+use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
 use crate::icons::{self, Icon};
 use crate::net::{Net, NetEvent, SessionId};
 use crate::settings::{Recent, Settings};
-use crate::theme;
+use crate::{ptt, theme};
 
 const MAX_LINES: usize = 1000;
 const MAX_RECENT: usize = 8;
@@ -67,6 +69,39 @@ pub struct Launch {
 /// Payload while dragging yourself onto another channel.
 struct DragSelf;
 
+/// Voice is considered blocked when no UDP pong arrived for this long.
+const VOICE_TIMEOUT: Duration = Duration::from_secs(4);
+
+struct Voice {
+    shared: Arc<audio::Shared>,
+    playback: Arc<audio::Playback>,
+    sink: VoiceSink,
+    /// Open while connected or while the voice settings are shown.
+    engine: Option<audio::Engine>,
+    /// Last UDP pong: proof that voice gets through.
+    seen: Option<Instant>,
+    rtt: Option<Duration>,
+    connected_at: Option<Instant>,
+}
+
+impl Voice {
+    fn reachable(&self) -> bool {
+        self.seen.is_some_and(|t| t.elapsed() < VOICE_TIMEOUT)
+    }
+
+    /// Connected long enough that a missing pong means UDP is blocked.
+    fn blocked(&self) -> bool {
+        !self.reachable() && self.connected_at.is_some_and(|t| t.elapsed() > VOICE_TIMEOUT)
+    }
+}
+
+struct AudioDialog {
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    /// Waiting for a key press to bind push-to-talk.
+    binding: bool,
+}
+
 pub struct App {
     net: Net,
     settings: Settings,
@@ -81,6 +116,8 @@ pub struct App {
     form: Option<ConnectForm>,
     /// Shown on the empty state / connect dialog after a failed attempt.
     last_error: Option<String>,
+    voice: Voice,
+    audio_dialog: Option<AudioDialog>,
 }
 
 impl App {
@@ -91,8 +128,19 @@ impl App {
                 .or_else(|_| std::env::var("USER"))
                 .unwrap_or_else(|_| "User".into());
         }
+        let playback = audio::Playback::new(ctx.clone());
+        let net = Net::spawn(ctx.clone(), playback.clone());
+        let voice = Voice {
+            shared: audio::Shared::new(settings.audio.clone()),
+            playback,
+            sink: net.voice_sink(),
+            engine: None,
+            seen: None,
+            rtt: None,
+            connected_at: None,
+        };
         let mut app = Self {
-            net: Net::spawn(ctx.clone()),
+            net,
             settings,
             session: 0,
             conn: Conn::Disconnected,
@@ -104,6 +152,8 @@ impl App {
             focus_input: false,
             form: None,
             last_error: None,
+            voice,
+            audio_dialog: None,
         };
         if let Some(l) = launch {
             let nick = l.nickname.unwrap_or_else(|| app.settings.nickname.clone());
@@ -246,6 +296,10 @@ impl App {
             match ev {
                 NetEvent::Message(s, msg) if s == self.session => self.on_message(msg),
                 NetEvent::Ping(s, rtt) if s == self.session => self.ping = Some(rtt),
+                NetEvent::VoicePing(s, rtt) if s == self.session => {
+                    self.voice.rtt = Some(rtt);
+                    self.voice.seen = Some(Instant::now());
+                }
                 NetEvent::Closed(s, reason) if s == self.session => self.on_closed(reason),
                 _ => {} // stale session
             }
@@ -257,6 +311,9 @@ impl App {
         self.conn = Conn::Disconnected;
         self.view = None;
         self.ping = None;
+        self.voice.connected_at = None;
+        self.voice.seen = None;
+        self.voice.rtt = None;
         match (&reason, was_connected) {
             (Some(r), true) => self.push(0, LineKind::Error, format!("Disconnected: {r}")),
             (None, true) => self.push(0, LineKind::System, "Disconnected"),
@@ -270,7 +327,7 @@ impl App {
 
     fn on_message(&mut self, msg: S2C) {
         match msg {
-            S2C::Welcome { your_id, server, channels, clients } => {
+            S2C::Welcome { your_id, server, channels, clients, .. } => {
                 let address = match &self.conn {
                     Conn::Connecting { address } => address.clone(),
                     _ => String::new(),
@@ -284,6 +341,8 @@ impl App {
                 let welcome = server.welcome.clone();
                 self.view = Some(ServerView::new(your_id, server, channels, clients));
                 self.conn = Conn::Connected;
+                self.voice.connected_at = Some(Instant::now());
+                self.voice.seen = None;
                 self.tabs = base_tabs();
                 self.active_tab = 1;
                 self.sync_channel_tab_title();
@@ -435,8 +494,9 @@ impl App {
 
     fn status_pill(&self, ui: &mut egui::Ui) {
         let (color, text) = match &self.conn {
+            Conn::Connected if self.voice.blocked() => (theme::AMBER, "Connected · no voice".to_owned()),
             Conn::Connected => {
-                let ping = match self.ping {
+                let ping = match self.voice.rtt.or(self.ping) {
                     Some(p) if p < Duration::from_millis(1) => " · <1 ms".to_owned(),
                     Some(p) => format!(" · {} ms", p.as_millis()),
                     None => String::new(),
@@ -446,7 +506,7 @@ impl App {
             Conn::Connecting { address } => (theme::AMBER, format!("Connecting to {address}…")),
             Conn::Disconnected => (theme::TEXT_FAINT, "Not connected".to_owned()),
         };
-        egui::Frame::new()
+        let pill = egui::Frame::new()
             .fill(theme::SURFACE)
             .corner_radius(CornerRadius::same(255))
             .inner_margin(Margin::symmetric(10, 4))
@@ -458,6 +518,12 @@ impl App {
                     ui.label(RichText::new(text).size(12.5).color(theme::TEXT_DIM));
                 });
             });
+        if self.voice.blocked() {
+            pill.response.on_hover_text(
+                "Voice packets aren't getting through. The server's UDP port (same number as \
+                 the TCP port, 9987 by default) is probably blocked by a firewall.",
+            );
+        }
     }
 
     fn self_bar(&mut self, ui: &mut egui::Ui) {
@@ -473,7 +539,7 @@ impl App {
                     .and_then(|v| v.me())
                     .map(|c| c.nickname.clone())
                     .unwrap_or_else(|| self.settings.nickname.clone());
-                avatar(ui, &nick, 30.0);
+                avatar(ui, &nick, 30.0, self.voice.shared.transmitting());
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.label(RichText::new(&nick).strong().color(theme::TEXT));
@@ -493,6 +559,11 @@ impl App {
                 });
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, Icon::Sliders, "Voice settings").clicked() {
+                        let (inputs, outputs) = audio::device_names();
+                        self.audio_dialog = Some(AudioDialog { inputs, outputs, binding: false });
+                    }
+                    ui.add_space(4.0);
                     let mut s = self.settings.status;
                     let changed = toggle(ui, &mut s.away, Icon::Moon, Icon::Moon, theme::AMBER, "Away")
                         | toggle(ui, &mut s.deafened, Icon::Headphones, Icon::HeadphonesOff, theme::RED, "Turn sound off (Ctrl+Shift+D)")
@@ -506,6 +577,8 @@ impl App {
     }
 
     fn channel_tree(&mut self, ui: &mut egui::Ui) {
+        let speaking = self.voice.playback.speaking();
+        let me_talking = self.voice.shared.transmitting();
         let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(8, 10));
         egui::Panel::left("tree")
             .frame(frame)
@@ -588,7 +661,11 @@ impl App {
                             }
                             let p = ui.painter();
                             let ax = rect.left() + indent + 34.0;
-                            paint_avatar(p, egui::pos2(ax, rect.center().y), 10.0, &c.nickname);
+                            let center = egui::pos2(ax, rect.center().y);
+                            paint_avatar(p, center, 10.0, &c.nickname);
+                            if speaking.contains(&c.id) || (is_me && me_talking) {
+                                p.circle_stroke(center, 12.5, Stroke::new(2.0, theme::GREEN));
+                            }
                             let color = if c.status.away { theme::TEXT_FAINT } else { theme::TEXT };
                             let name_rect = p.text(egui::pos2(ax + 18.0, rect.center().y), Align2::LEFT_CENTER, &c.nickname, FontId::proportional(13.5), color);
                             if is_me {
@@ -836,11 +913,146 @@ impl App {
     }
 }
 
+impl App {
+    /// Keeps the audio engine and its shared state in line with the app state.
+    fn drive_audio(&mut self, ctx: &egui::Context) {
+        let s = self.settings.status;
+        let v = &mut self.voice;
+        v.shared.set_status(s.muted, s.deafened);
+        let wanted = matches!(self.conn, Conn::Connected) || self.audio_dialog.is_some();
+        if wanted && v.engine.is_none() {
+            v.engine = Some(audio::Engine::start(&v.shared, &v.playback, v.sink.clone(), ctx));
+        } else if !wanted {
+            v.engine = None;
+        }
+        let binding = self.audio_dialog.as_ref().is_some_and(|d| d.binding);
+        if let (TxMode::PushToTalk, Some(key), false) = (self.settings.audio.mode, self.settings.audio.ptt_key, binding) {
+            v.shared.set_ptt_local(ctx.input(|i| ptt::is_down(key.vk, i)));
+        }
+        // Talking rings fade out without any input event, so poll while anyone talks.
+        if v.shared.transmitting() || !v.playback.speaking().is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if matches!(self.conn, Conn::Connected) && !v.reachable() {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
+        if let Some(err) = v.shared.take_error() {
+            let tab = self.active_tab;
+            self.push(tab, LineKind::Error, err);
+        }
+    }
+
+    fn audio_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dlg) = &mut self.audio_dialog else { return };
+        let mut a: AudioSettings = self.settings.audio.clone();
+        let mut restart = false;
+        let mut close = false;
+        if dlg.binding {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                dlg.binding = false;
+            } else if let Some(vk) = ctx.input(ptt::capture) {
+                a.ptt_key = Some(PttKey { vk });
+                dlg.binding = false;
+            }
+        }
+        let level = self.voice.shared.level_db();
+        let open = self.voice.shared.transmitting();
+
+        let modal = egui::Modal::new(Id::unique("voice-settings")).show(ctx, |ui| {
+            ui.set_width(400.0);
+            ui.spacing_mut().slider_width = 250.0;
+            ui.label(RichText::new("Voice settings").size(19.0).strong().color(theme::TEXT));
+
+            section(ui, "Microphone");
+            restart |= device_combo(ui, "mic", &mut a.input_device, &dlg.inputs);
+            section(ui, "Speakers");
+            restart |= device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs);
+
+            section(ui, "Transmit");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut a.mode, TxMode::VoiceActivation, "Voice activation");
+                ui.selectable_value(&mut a.mode, TxMode::PushToTalk, "Push to talk");
+            });
+            ui.add_space(6.0);
+            match a.mode {
+                TxMode::VoiceActivation => {
+                    level_meter(ui, level, a.threshold_db, open);
+                    ui.add(
+                        egui::Slider::new(&mut a.threshold_db, METER_MIN_DB..=METER_MAX_DB)
+                            .text("activation level")
+                            .suffix(" dB")
+                            .fixed_decimals(0),
+                    );
+                    ui.label(
+                        RichText::new("Talk normally: the bar should cross the line, and stay left of it when you're quiet.")
+                            .size(11.5)
+                            .color(theme::TEXT_FAINT),
+                    );
+                }
+                TxMode::PushToTalk => {
+                    ui.horizontal(|ui| {
+                        let text = match (dlg.binding, a.ptt_key) {
+                            (true, _) => "Press a key or mouse button…".to_owned(),
+                            (false, Some(k)) => ptt::label(k.vk),
+                            (false, None) => "Click to set a key".to_owned(),
+                        };
+                        if ui.add(egui::Button::new(text).min_size(vec2(220.0, 30.0))).clicked() {
+                            dlg.binding = true;
+                        }
+                        if open {
+                            ui.label(RichText::new("Transmitting").color(theme::GREEN));
+                        }
+                    });
+                    let note = if cfg!(windows) {
+                        "Works while other apps, like games, are focused."
+                    } else {
+                        "Works while T7 is focused."
+                    };
+                    ui.label(RichText::new(note).size(11.5).color(theme::TEXT_FAINT));
+                }
+            }
+
+            section(ui, "Volume");
+            ui.add(egui::Slider::new(&mut a.input_gain_db, -20.0..=20.0).text("microphone").suffix(" dB").fixed_decimals(0));
+            ui.add(
+                egui::Slider::new(&mut a.output_volume, 0.0..=2.0)
+                    .text("speakers")
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                    .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
+            );
+
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(theme::primary_button("Done")).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if modal.should_close() && !dlg.binding {
+            close = true;
+        }
+
+        if a != self.settings.audio {
+            self.voice.shared.set_settings(&a);
+            self.settings.audio = a;
+        }
+        if restart {
+            self.voice.engine = None; // reopened with the new devices next frame
+        }
+        if close {
+            self.audio_dialog = None;
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(50)); // live level meter
+        }
+    }
+}
+
 /// What the window shell needs from the app.
 impl App {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.poll_network();
         let ctx = ui.ctx().clone();
+        self.drive_audio(&ctx);
         self.shortcuts(&ctx);
         self.top_bar(ui);
         self.self_bar(ui);
@@ -849,6 +1061,7 @@ impl App {
         }
         self.chat(ui);
         self.connect_dialog(&ctx);
+        self.audio_dialog(&ctx);
     }
 
     pub fn title(&self) -> String {
@@ -908,9 +1121,54 @@ fn paint_avatar(p: &egui::Painter, center: egui::Pos2, radius: f32, name: &str) 
     p.text(center, Align2::CENTER_CENTER, initial, FontId::proportional(radius * 1.1), Color32::WHITE);
 }
 
-fn avatar(ui: &mut egui::Ui, name: &str, size: f32) {
+fn avatar(ui: &mut egui::Ui, name: &str, size: f32, talking: bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
     paint_avatar(ui.painter(), rect.center(), size / 2.0, name);
+    if talking {
+        ui.painter().circle_stroke(rect.center(), size / 2.0 + 2.5, Stroke::new(2.0, theme::GREEN));
+    }
+}
+
+fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 34.0), Sense::click());
+    let (fill, color) = if resp.hovered() { (theme::SURFACE_HOVER, theme::TEXT) } else { (theme::SURFACE, theme::TEXT_DIM) };
+    ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
+    icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
+    resp.on_hover_text(tip)
+}
+
+/// A device picker; `None` follows the system default.
+fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, names: &[String]) -> bool {
+    let mut changed = false;
+    let shown = value.clone().unwrap_or_else(|| "System default".to_owned());
+    egui::ComboBox::from_id_salt(id).width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
+        changed |= ui.selectable_value(value, None, "System default").changed();
+        for name in names {
+            changed |= ui.selectable_value(value, Some(name.clone()), name).changed();
+        }
+    });
+    changed
+}
+
+const METER_MIN_DB: f32 = -70.0;
+const METER_MAX_DB: f32 = -5.0;
+
+/// Live microphone level with the activation threshold marked.
+fn level_meter(ui: &mut egui::Ui, level_db: f32, threshold_db: f32, open: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
+    let t = |db: f32| ((db - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB)).clamp(0.0, 1.0);
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(5), theme::SURFACE_ACTIVE);
+    let mut fill = rect;
+    fill.set_width(rect.width() * t(level_db));
+    p.rect_filled(fill, CornerRadius::same(5), if open { theme::GREEN } else { theme::TEXT_FAINT });
+    let x = rect.left() + rect.width() * t(threshold_db);
+    p.line_segment([egui::pos2(x, rect.top() - 3.0), egui::pos2(x, rect.bottom() + 3.0)], Stroke::new(2.0, theme::ACCENT_TEXT));
+}
+
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(10.0);
+    ui.label(RichText::new(title).size(12.0).color(theme::TEXT_DIM));
 }
 
 fn badge(ui: &egui::Ui, anchor: egui::Rect, count: u32) {

@@ -5,11 +5,14 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use t7_proto::ClientStatus;
 
+use crate::audio::AudioSettings;
+
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct Settings {
     pub nickname: String,
     pub status: ClientStatus,
+    pub audio: AudioSettings,
     pub recent: Vec<Recent>,
 }
 
@@ -89,6 +92,7 @@ mod tests {
         let s = Settings {
             nickname: "santi".into(),
             status: ClientStatus { muted: true, deafened: false, away: false },
+            audio: AudioSettings { ptt_key: Some(crate::audio::PttKey { vk: 0x56 }), ..Default::default() },
             recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
         };
         let text = toml::to_string(&s).unwrap();

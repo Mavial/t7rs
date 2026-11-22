@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod audio;
 mod icons;
 mod net;
+mod ptt;
+mod resample;
 mod settings;
 mod shell;
 mod theme;

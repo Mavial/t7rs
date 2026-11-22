@@ -19,4 +19,9 @@ bytemuck = "1"
 # Pinned exactly; the port's diff against upstream was reviewed.
 egui_software_backend = { package = "hdrshot-egui-backend", version = "=0.2.0" }
 toml = "1"
+cpal = "0.18"
+opus1 = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

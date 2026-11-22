@@ -111,3 +111,87 @@ async fn full_channel_and_password() {
     b.send(C2S::JoinChannel { channel: 2 }).await;
     assert!(matches!(b.recv().await, S2C::Error { .. }));
 }
+
+/// A voice endpoint: one UDP socket per test client.
+struct Voice {
+    sock: tokio::net::UdpSocket,
+    id: ClientId,
+    token: u64,
+    buf: Vec<u8>,
+}
+
+impl Voice {
+    async fn open(server: std::net::SocketAddr, welcome: &S2C) -> Self {
+        let S2C::Welcome { your_id, voice_token, .. } = welcome else { panic!("{welcome:?}") };
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.connect(server).await.unwrap();
+        let mut v = Self { sock, id: *your_id, token: *voice_token, buf: Vec::new() };
+        // The ping registers our UDP address with the server.
+        v.send(voice::ToServer::Ping { nonce: 5 }).await;
+        assert_eq!(v.recv_owned().await, Some(Got::Pong(5)));
+        v
+    }
+    async fn send(&mut self, msg: voice::ToServer<'_>) {
+        voice::encode_to_server(self.id, self.token, msg, &mut self.buf);
+        self.sock.send(&self.buf).await.unwrap();
+    }
+    async fn recv_owned(&mut self) -> Option<Got> {
+        let mut buf = [0u8; 1500];
+        let n = tokio::time::timeout(Duration::from_millis(300), self.sock.recv(&mut buf)).await.ok()?.ok()?;
+        match voice::parse_to_client(&buf[..n])? {
+            voice::ToClient::Pong { nonce } => Some(Got::Pong(nonce)),
+            voice::ToClient::Audio { from, seq, payload } => Some(Got::Audio(from, seq, payload.to_vec())),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Got {
+    Pong(u64),
+    Audio(ClientId, u32, Vec<u8>),
+}
+
+#[tokio::test]
+async fn voice_is_routed_within_the_channel() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut a, wa) = TestClient::connect(addr, "a", None).await;
+    let (mut b, wb) = TestClient::connect(addr, "b", None).await;
+    let (mut c, wc) = TestClient::connect(addr, "c", None).await;
+    let (mut va, mut vb, mut vc) =
+        (Voice::open(addr, &wa).await, Voice::open(addr, &wb).await, Voice::open(addr, &wc).await);
+
+    // c leaves for another channel; wait until everyone has seen the move.
+    c.send(C2S::JoinChannel { channel: 4 }).await;
+    for t in [&mut a, &mut b, &mut c] {
+        while !matches!(t.recv().await, S2C::ClientMoved { .. }) {}
+    }
+
+    va.send(voice::ToServer::Audio { seq: 1, payload: &[9, 9, 9] }).await;
+    assert_eq!(vb.recv_owned().await, Some(Got::Audio(va.id, 1, vec![9, 9, 9])));
+    assert_eq!(vc.recv_owned().await, None, "other channel must not hear it");
+    assert_eq!(va.recv_owned().await, None, "speaker must not hear itself");
+
+    // A forged token is ignored.
+    let real = va.token;
+    va.token ^= 1;
+    va.send(voice::ToServer::Audio { seq: 2, payload: &[1] }).await;
+    assert_eq!(vb.recv_owned().await, None);
+    va.token = real;
+
+    // A deafened listener gets nothing; a muted speaker is not forwarded.
+    b.send(C2S::SetStatus(ClientStatus { deafened: true, ..Default::default() })).await;
+    while !matches!(a.recv().await, S2C::ClientStatus { .. }) {}
+    va.send(voice::ToServer::Audio { seq: 3, payload: &[1] }).await;
+    assert_eq!(vb.recv_owned().await, None);
+
+    b.send(C2S::SetStatus(ClientStatus::default())).await;
+    a.send(C2S::SetStatus(ClientStatus { muted: true, ..Default::default() })).await;
+    let mut seen = 0;
+    while seen < 2 {
+        if matches!(b.recv().await, S2C::ClientStatus { .. }) {
+            seen += 1;
+        }
+    }
+    va.send(voice::ToServer::Audio { seq: 4, payload: &[1] }).await;
+    assert_eq!(vb.recv_owned().await, None);
+}

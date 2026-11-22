@@ -10,10 +10,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     C2S, ChannelId, ChannelInfo, ClientId, ClientInfo, ClientStatus, LeaveReason,
     MAX_TEXT_LEN, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget, encode_frame, validate_nickname,
 };
+use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 /// A complete, ready-to-write frame shared between all recipients.
@@ -34,6 +36,8 @@ pub enum Event {
     },
     Message { id: ClientId, msg: C2S },
     Left { id: ClientId, reason: LeaveReason },
+    /// A raw voice datagram, not yet authenticated.
+    Voice { from: SocketAddr, data: Vec<u8> },
 }
 
 struct Client {
@@ -41,26 +45,39 @@ struct Client {
     addr: SocketAddr,
     outbox: mpsc::Sender<Frame>,
     text_bucket: TokenBucket,
+    voice_token: u64,
+    /// Learned from the first authenticated datagram (works behind NAT).
+    voice_addr: Option<SocketAddr>,
+    voice_bucket: TokenBucket,
 }
 
-/// Simple anti-spam limiter for chat messages.
+/// Rate limiter: `burst` events at once, refilled at `per_sec`.
 struct TokenBucket {
     tokens: f32,
+    burst: f32,
+    per_sec: f32,
     last: Instant,
 }
 
 impl TokenBucket {
-    const BURST: f32 = 8.0;
-    const PER_SEC: f32 = 2.0;
+    /// Chat: 8 messages at once, then 2 per second.
+    fn text() -> Self {
+        Self::new(8.0, 2.0)
+    }
 
-    fn new() -> Self {
-        Self { tokens: Self::BURST, last: Instant::now() }
+    /// Voice: 50 frames per second is real time; allow some jitter on top.
+    fn voice() -> Self {
+        Self::new(40.0, 60.0)
+    }
+
+    fn new(burst: f32, per_sec: f32) -> Self {
+        Self { tokens: burst, burst, per_sec, last: Instant::now() }
     }
 
     fn take(&mut self) -> bool {
         let now = Instant::now();
-        let refill = now.duration_since(self.last).as_secs_f32() * Self::PER_SEC;
-        self.tokens = (self.tokens + refill).min(Self::BURST);
+        let refill = now.duration_since(self.last).as_secs_f32() * self.per_sec;
+        self.tokens = (self.tokens + refill).min(self.burst);
         self.last = now;
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
@@ -81,6 +98,8 @@ pub struct Server {
     next_id: ClientId,
     /// Clients whose outbox overflowed or closed; removed after the current event.
     dead: Vec<ClientId>,
+    udp: Arc<UdpSocket>,
+    datagram: Vec<u8>,
 }
 
 impl Server {
@@ -89,6 +108,7 @@ impl Server {
         password: Option<String>,
         channels: Vec<ChannelInfo>,
         default_channel: ChannelId,
+        udp: Arc<UdpSocket>,
     ) -> Self {
         Self {
             info,
@@ -99,6 +119,8 @@ impl Server {
             clients: HashMap::new(),
             next_id: 1,
             dead: Vec::new(),
+            udp,
+            datagram: Vec::with_capacity(voice::MAX_DATAGRAM),
         }
     }
 
@@ -117,6 +139,40 @@ impl Server {
             }
             Event::Message { id, msg } => self.message(id, msg),
             Event::Left { id, reason } => self.remove(id, reason),
+            Event::Voice { from, data } => self.voice(from, &data),
+        }
+    }
+
+    fn voice(&mut self, from: SocketAddr, data: &[u8]) {
+        let Some((id, token, msg)) = voice::parse_to_server(data) else { return };
+        let Some(sender) = self.clients.get_mut(&id) else { return };
+        if sender.voice_token != token {
+            return;
+        }
+        if sender.voice_addr != Some(from) {
+            tracing::debug!(id, %from, "voice address learned");
+            sender.voice_addr = Some(from);
+        }
+        match msg {
+            ToServer::Ping { nonce } => {
+                voice::encode_to_client(ToClient::Pong { nonce }, &mut self.datagram);
+                let _ = self.udp.try_send_to(&self.datagram, from);
+            }
+            ToServer::Audio { seq, payload } => {
+                let status = sender.info.status;
+                if status.muted || status.deafened || !sender.voice_bucket.take() {
+                    return;
+                }
+                let channel = sender.info.channel;
+                voice::encode_to_client(ToClient::Audio { from: id, seq, payload }, &mut self.datagram);
+                let listeners = self.clients.values().filter(|c| {
+                    c.info.id != id && c.info.channel == channel && !c.info.status.deafened
+                });
+                for addr in listeners.filter_map(|c| c.voice_addr) {
+                    // Non-blocking: a full socket buffer drops the frame, like any lost packet.
+                    let _ = self.udp.try_send_to(&self.datagram, addr);
+                }
+            }
         }
     }
 
@@ -158,8 +214,16 @@ impl Server {
 
         let mut clients: Vec<ClientInfo> = self.clients.values().map(|c| c.info.clone()).collect();
         clients.push(info.clone());
+        let voice_token = match getrandom::u64() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("no system randomness for voice token: {e}");
+                return reject("server error");
+            }
+        };
         let welcome = S2C::Welcome {
             your_id: id,
+            voice_token,
             server: self.info.clone(),
             channels: self.channel_list.clone(),
             clients,
@@ -170,7 +234,18 @@ impl Server {
 
         tracing::info!(%addr, id, nickname = %info.nickname, "client joined");
         self.broadcast(&S2C::ClientJoined(info.clone()), |_| true);
-        self.clients.insert(id, Client { info, addr, outbox, text_bucket: TokenBucket::new() });
+        self.clients.insert(
+            id,
+            Client {
+                info,
+                addr,
+                outbox,
+                text_bucket: TokenBucket::text(),
+                voice_token,
+                voice_addr: None,
+                voice_bucket: TokenBucket::voice(),
+            },
+        );
         Some(id)
     }
 
