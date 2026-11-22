@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use t7_proto::perms::ChannelTree;
+use t7_proto::perms::{ChannelTree, Override, RoleId};
 use t7_proto::{
     ChannelId, ChannelInfo, ChannelSettings, ClientId, Identity, MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN,
     MAX_CHANNEL_TOPIC_LEN, MAX_CHANNELS, PasswordChange,
@@ -394,6 +394,10 @@ impl Channels {
 impl ChannelTree for Channels {
     fn channel(&self, id: ChannelId) -> Option<&ChannelInfo> {
         self.get(id)
+    }
+
+    fn overrides(&self, _: ChannelId) -> &[(RoleId, Override)] {
+        &[]
     }
 }
 
