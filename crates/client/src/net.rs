@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
-use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::tls::{self, ConnectError, Fingerprint};
+use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     C2S, ClientId, DEFAULT_PORT, FrameError, PING_INTERVAL_SECS, PROTOCOL_VERSION, S2C, read_frame, write_frame,
 };
@@ -243,24 +243,19 @@ async fn session(
     playback: &Playback,
 ) -> Ended {
     let target = with_default_port(&attempt.address);
-    let connect = async {
-        let stream = TcpStream::connect(&target)
-            .await
-            .map_err(|e| Ended::Failed(format!("Could not connect to {target}: {e}")))?;
-        let _ = stream.set_nodelay(true);
-        let server = stream.peer_addr().ok();
-        let (stream, fingerprint) = tls::connect(stream, attempt.pinned).await.map_err(|e| match e {
-            ConnectError::CertChanged { pinned, presented } => Ended::CertChanged { pinned, presented },
-            ConnectError::Io(_) => {
-                Ended::Failed(format!("Could not connect securely to {target} ({e}). Is it an older T7 server?"))
-            }
-        })?;
-        Ok::<_, Ended>((stream, server, fingerprint))
-    };
-    let (stream, server, fingerprint) = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
-        Ok(Ok(connected)) => connected,
-        Ok(Err(ended)) => return ended,
+    let stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Ended::Failed(format!("Could not connect to {target}: {e}")),
         Err(_) => return Ended::Failed(format!("Connection to {target} timed out")),
+    };
+    let _ = stream.set_nodelay(true);
+    let server = stream.peer_addr().ok();
+    let (stream, fingerprint) = match tokio::time::timeout(CONNECT_TIMEOUT, tls::connect(stream, attempt.pinned)).await {
+        Ok(Ok(secured)) => secured,
+        Ok(Err(ConnectError::CertChanged { pinned, presented })) => return Ended::CertChanged { pinned, presented },
+        Ok(Err(e)) => return Ended::Failed(format!("Could not connect securely to {target} ({e}). Is it an older T7 server?")),
+        // A server from before TLS waits for the rest of a frame instead of answering.
+        Err(_) => return Ended::Failed(format!("{target} did not answer the secure handshake. Is it an older T7 server?")),
     };
     events.emit(NetEvent::Secured(id, fingerprint));
     let (read, mut writer) = tokio::io::split(stream);
