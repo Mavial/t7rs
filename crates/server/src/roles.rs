@@ -168,6 +168,8 @@ impl RoleStore {
     }
 
     pub fn set_perms(&mut self, id: RoleId, perms: Perms) -> Result<(), RoleError> {
+        // Only what a role can hold.
+        let perms = perms & Perms::ALL;
         if id == RoleId::EVERYONE && !perms.has(Perm::View) {
             return Err(RoleError::EveryoneViews);
         }
@@ -326,6 +328,8 @@ mod tests {
         assert_eq!((store.roles().role(dj).unwrap().perms, store.roles().everyone), (perms, perms));
         assert_eq!(store.set_perms(RoleId::EVERYONE, Perms::NONE), Err(RoleError::EveryoneViews));
         assert_eq!(store.set_perms(dj, Perms::NONE), Ok(()), "only Everyone's view is needed");
+        store.set_perms(dj, Perms::of(&[Perm::Rename, Perm::Kick])).unwrap();
+        assert_eq!(store.roles().role(dj).unwrap().perms, Perms::of(&[Perm::Kick]), "no role renames");
 
         assert_eq!(store.delete(RoleId::MODERATOR), Err(RoleError::Moderator));
         assert_eq!(store.delete(RoleId::EVERYONE), Err(RoleError::Everyone));

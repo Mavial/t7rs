@@ -16,8 +16,8 @@ use t7_proto::perms::{Override, Perm, Permissions, Rank, RoleChange, RoleId, Sta
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     BanId, BanInfo, C2S, ChannelId, ChannelInfo, ChannelKind, ChannelSettings, ClientId, ClientInfo, ClientStatus,
-    Identity, LeaveReason, MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C,
-    ServerInfo, TextTarget, encode_frame, validate_nickname,
+    Identity, LeaveReason, MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    PasswordChange, S2C, ServerInfo, TextTarget, encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -684,10 +684,16 @@ impl Server {
     }
 
     fn edit_channel(&mut self, id: ClientId, channel: ChannelId, settings: &ChannelSettings) {
-        if !self.may(id, Perm::ManageChannels, Some(channel)) {
+        let may = self.standing(id, Some(channel)).perms;
+        if !may.has(Perm::Rename) {
             return self.error(id, "you can't edit this channel");
         }
-        let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
+        let Some(info) = self.channels.get(channel) else { return self.error(id, "channel does not exist") };
+        let renames_only = settings.max_clients == info.max_clients && settings.password == PasswordChange::Keep;
+        if !may.has(Perm::ManageChannels) && !renames_only {
+            return self.error(id, "you can only change this channel's name and topic");
+        }
+        let permanent = !info.temporary;
         match self.channels.edit(channel, settings) {
             Ok(()) => self.channels_changed(permanent),
             Err(e) => self.error(id, &e.message()),

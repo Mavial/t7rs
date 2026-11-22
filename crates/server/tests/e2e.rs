@@ -1369,3 +1369,46 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     let muted = perms::Override::new(RoleId::EVERYONE, Perms::NONE, Perms::of(&[Perm::Speak]));
     assert_eq!(owner.overrides(hangout).await, [muted, granted]);
 }
+
+#[tokio::test]
+async fn listed_moderators_rename_their_channels_and_do_nothing_more() {
+    let (addr, mut owner, _, channels) = start_owned("moderator-rename", HOME).await;
+    let [gaming, squad, hangout] = ["Gaming", "Squad 1", "Hangout"].map(|name| id_of(&channels, name));
+    let (mut listed, _) = TestClient::connect(addr, "listed", None).await;
+    let (mut holder, _) = TestClient::connect(addr, "holder", None).await;
+    owner.send(C2S::SetModerator { channel: gaming, identity: key("listed").identity(), moderator: true }).await;
+    owner.channels().await;
+    owner.change_roles(assign("holder", RoleId::MODERATOR, true)).await;
+
+    // Where they are listed, and below it, they change the name and topic.
+    let games = ChannelSettings { topic: "Squad up, again".into(), ..settings("Games") };
+    listed.send(C2S::EditChannel { id: gaming, settings: games }).await;
+    let renamed = owner.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.name == "Games"))).await;
+    let S2C::Channels(list) = renamed else { unreachable!() };
+    assert_eq!(list.iter().find(|c| c.id == gaming).unwrap().topic, "Squad up, again");
+    let squad_a = ChannelSettings { max_clients: Some(5), ..settings("Squad A") };
+    listed.send(C2S::EditChannel { id: squad, settings: squad_a }).await;
+    owner.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.name == "Squad A"))).await;
+
+    // Not its limit or password, nor anything else a channel manager does.
+    let limited = ChannelSettings { max_clients: Some(3), ..settings("Games") };
+    listed.send(C2S::EditChannel { id: gaming, settings: limited }).await;
+    assert!(error(&mut listed).await.contains("only change this channel's name and topic"));
+    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Games") };
+    listed.send(C2S::EditChannel { id: gaming, settings: locked }).await;
+    assert!(error(&mut listed).await.contains("only change this channel's name and topic"));
+    listed.send(C2S::DeleteChannel { id: squad }).await;
+    assert!(error(&mut listed).await.contains("can't delete"));
+    listed.send(C2S::MoveChannel { id: squad, parent: None, position: 0 }).await;
+    assert!(error(&mut listed).await.contains("can't move this channel"));
+    listed.send(set(gaming, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
+    assert!(error(&mut listed).await.contains("can't change this channel's permissions"));
+    listed.send(new_channel("Ranked", Some(gaming), ChannelKind::Voice)).await;
+    assert!(error(&mut listed).await.contains("can't create permanent channels"));
+    listed.send(C2S::EditChannel { id: hangout, settings: settings("Mine") }).await;
+    assert_eq!(error(&mut listed).await, "you can't edit this channel", "elsewhere");
+
+    // Holding the Moderator role isn't being on the list.
+    holder.send(C2S::EditChannel { id: gaming, settings: settings("Holder's") }).await;
+    assert_eq!(error(&mut holder).await, "you can't edit this channel");
+}

@@ -486,7 +486,7 @@ impl App {
         let Some(view) = &self.view else { return };
         let Some(ch) = view.channels.get(&channel) else { return };
         // Those who may only change its permissions start there.
-        let tab = if manages(view, Some(channel)) { FormTab::Channel } else { FormTab::Permissions };
+        let tab = if view.may_in(channel, Perm::Rename) { FormTab::Channel } else { FormTab::Permissions };
         self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
             editing: Some(channel),
             parent: ch.parent,
@@ -1429,7 +1429,8 @@ impl App {
                                 ui.close();
                             }
                             let edit = if category { "Edit category…" } else { "Edit channel…" };
-                            let may_edit = manages_it || view.may_in(ch_id, Perm::ManagePermissions);
+                            let may_edit =
+                                view.may_in(ch_id, Perm::Rename) || view.may_in(ch_id, Perm::ManagePermissions);
                             if may_edit && ui.button(edit).clicked() {
                                 action = Some(TreeAction::Edit(ch_id));
                                 ui.close();
@@ -2343,7 +2344,9 @@ impl App {
             ChannelDialog::Form(f) => f.editing,
             _ => None,
         };
-        let may_edit = editing.is_none_or(|id| view.is_some_and(|v| manages(v, Some(id))));
+        let may = |perm| editing.is_none_or(|id| view.is_some_and(|v| v.may_in(id, perm)));
+        // Listed moderators may change only the name and topic.
+        let (may_edit, may_manage) = (may(Perm::Rename), may(Perm::ManageChannels));
         let saved_overrides = view.zip(editing).and_then(|(v, id)| v.channels.get(&id)).map(|c| c.overrides.clone());
         let moderators: Option<Vec<(Identity, Option<String>)>> = view
             .zip(editing)
@@ -2402,7 +2405,14 @@ impl App {
                                 moderator_list(ui, list, &mut unmoderate);
                             }
                         }
-                        _ => ui.add_enabled_ui(may_edit, |ui| channel_fields(ui, form, may_create_permanent)).inner,
+                        _ => {
+                            ui.add_enabled_ui(may_edit, |ui| {
+                                channel_fields(ui, form, may_create_permanent, may_manage);
+                                if may_edit && !may_manage {
+                                    hint(ui, "As its moderator you can change the name and topic.");
+                                }
+                            });
+                        }
                     }
                     let ready = !form.name.trim().is_empty();
                     dialog_footer(ui, |ui| {
@@ -2503,8 +2513,9 @@ impl App {
 }
 
 /// The name, topic, password and limit of a channel being made or edited:
-/// a category has only the first two.
-fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, may_create_permanent: bool) {
+/// a category has only the first two, and only those who manage the channel
+/// change the last two.
+fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, may_create_permanent: bool, may_manage: bool) {
     field_label(ui, "Name");
     let name = ui.add(text_input(&mut form.name).char_limit(MAX_CHANNEL_NAME_LEN));
     if !form.focused {
@@ -2519,22 +2530,24 @@ fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, may_create_permanen
         hint(ui, "A heading for the channels in it, at the top of the tree. Nobody joins it.");
         return;
     }
-    if !form.had_password || form.protected {
-        let label =
-            if form.had_password { "New password (empty keeps the current one)" } else { "Password (optional)" };
-        field_label(ui, label);
-        ui.add(text_input(&mut form.password).password(true));
-        ui.add_space(8.0);
-    }
-    if form.had_password {
-        theme::switch(ui, &mut form.protected, "Password protected");
-    }
-    theme::switch(ui, &mut form.limited, "Limit how many can join");
-    if form.limited {
-        row(ui, "Up to", |ui| {
-            ui.add(egui::DragValue::new(&mut form.limit).range(1..=1000).suffix(" people"));
-        });
-    }
+    ui.add_enabled_ui(may_manage, |ui| {
+        if !form.had_password || form.protected {
+            let label =
+                if form.had_password { "New password (empty keeps the current one)" } else { "Password (optional)" };
+            field_label(ui, label);
+            ui.add(text_input(&mut form.password).password(true));
+            ui.add_space(8.0);
+        }
+        if form.had_password {
+            theme::switch(ui, &mut form.protected, "Password protected");
+        }
+        theme::switch(ui, &mut form.limited, "Limit how many can join");
+        if form.limited {
+            row(ui, "Up to", |ui| {
+                ui.add(egui::DragValue::new(&mut form.limit).range(1..=1000).suffix(" people"));
+            });
+        }
+    });
     if form.editing.is_none() {
         if may_create_permanent {
             theme::switch(ui, &mut form.temporary, "Temporary").on_hover_text("Removed once everyone has left");
@@ -3221,6 +3234,7 @@ fn perm_label(perm: Perm) -> &'static str {
         Perm::Kick => "Kick",
         Perm::Ban => "Ban",
         Perm::ManageRoles => "Manage roles",
+        Perm::Rename => "Rename channels",
     }
 }
 

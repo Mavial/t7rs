@@ -79,7 +79,7 @@ fn view() -> ServerView {
     ];
     let info = ServerInfo { name: "Friday Night".into(), welcome: String::new(), max_clients: 32 };
     let channels = vec![lobby, games, ranked, duo, afk, music, staff, office, meeting];
-    let everywhere = channels.iter().map(|c| (c.id, Perms::ALL)).collect();
+    let everywhere = channels.iter().map(|c| (c.id, Perms::ALL | Perms::of(&[Perm::Rename]))).collect();
     let mut view =
         ServerView::new(1, info, channels, clients, Permissions { server: Perms::ALL, channels: everywhere });
     let mut roles = Roles { owner: Some(Identity([1; 32])), ..Roles::default() };
@@ -271,6 +271,16 @@ const SCENES: &[Scene] = &[
     ("23-folded-category", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         app.settings.folded.insert("friday.example.com:9988".into(), ["Staff".to_owned()].into());
+        app
+    }),
+    ("24-moderator-edit", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        // A listed moderator, who may rename the channel but not manage it.
+        let view = app.view.as_mut().unwrap();
+        let moderator = Perms::of(&[Perm::View, Perm::Join, Perm::Speak, Perm::Kick, Perm::Rename]);
+        let channels = view.channels.keys().map(|&c| (c, moderator)).collect();
+        view.apply(&S2C::Permissions(Permissions { server: Perms::of(&[Perm::View]), channels }));
+        app.open_edit_channel(3);
         app
     }),
     ("16-connecting", (1100, 720), |ctx| {
