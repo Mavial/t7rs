@@ -29,7 +29,14 @@ async fn main() {
 
     let tcp = TcpStream::connect(&addr).await.expect("connect");
     let server: SocketAddr = tcp.peer_addr().unwrap();
-    let (r, mut w) = tcp.into_split();
+    let (tls, fingerprint) = tls::connect(tcp, None).await.expect("TLS handshake");
+    let version = tls.get_ref().1.protocol_version().expect("handshake is done");
+    println!("{version:?} to {server}, server certificate {fingerprint}");
+    // A new identity each run.
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).expect("system randomness");
+    let identity = identity::IdentityKey::from_seed(seed).prove(&tls::exporter(tls.get_ref().1));
+    let (r, mut w) = tokio::io::split(tls);
     let mut r = BufReader::new(r);
     let nickname = match mode.as_str() {
         "tone" => "ToneBot",
@@ -39,12 +46,12 @@ async fn main() {
         _ => "ListenBot",
     }
     .to_owned();
-    write_frame(&mut w, &C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password: None }).await.unwrap();
+    write_frame(&mut w, &C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password: None, identity }).await.unwrap();
     let mut buf = Vec::new();
-    let (id, token, names) = match read_frame::<_, S2C>(&mut r, &mut buf).await.unwrap() {
-        S2C::Welcome { your_id, voice_token, clients, .. } => {
+    let (mut crypto, names) = match read_frame::<_, S2C>(&mut r, &mut buf).await.unwrap() {
+        S2C::Welcome { your_id, voice_key, clients, .. } => {
             let names: HashMap<ClientId, String> = clients.into_iter().map(|c| (c.id, c.nickname)).collect();
-            (your_id, voice_token, names)
+            (voice::ClientSide::new(your_id, &voice_key), names)
         }
         other => panic!("not welcomed: {other:?}"),
     };
@@ -104,7 +111,7 @@ async fn main() {
     let udp = UdpSocket::bind("0.0.0.0:0").await.unwrap();
     udp.connect(server).await.unwrap();
     let mut out = Vec::new();
-    voice::encode_to_server(id, token, ToServer::Ping { nonce: 1 }, &mut out);
+    crypto.seal(ToServer::Ping { nonce: 1 }, &mut out);
     udp.send(&out).await.unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -125,11 +132,11 @@ async fn main() {
                 })
                 .collect();
             let n = enc.encode(&pcm, FRAME_SAMPLES, &mut pkt).unwrap();
-            voice::encode_to_server(id, token, ToServer::Audio { seq, payload: &pkt[..n] }, &mut out);
+            crypto.seal(ToServer::Audio { seq, payload: &pkt[..n] }, &mut out);
             udp.send(&out).await.unwrap();
             seq += 1;
             if seq.is_multiple_of(50) {
-                voice::encode_to_server(id, token, ToServer::Ping { nonce: seq as u64 }, &mut out);
+                crypto.seal(ToServer::Ping { nonce: seq as u64 }, &mut out);
                 udp.send(&out).await.unwrap();
             }
         }
@@ -137,7 +144,7 @@ async fn main() {
     } else {
         let mut decoders: HashMap<ClientId, opus1::OpusDecoder> = HashMap::new();
         let mut stats: HashMap<ClientId, (u32, f64)> = HashMap::new();
-        let mut pongs = 0;
+        let (mut pongs, mut unreadable) = (0, 0);
         let mut dbuf = [0u8; 1500];
         let mut pcm = [0f32; FRAME_SAMPLES];
         let mut ping = tokio::time::interval(Duration::from_secs(1));
@@ -145,12 +152,12 @@ async fn main() {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline.into()) => break,
                 _ = ping.tick() => {
-                    voice::encode_to_server(id, token, ToServer::Ping { nonce: 2 }, &mut out);
+                    crypto.seal(ToServer::Ping { nonce: 2 }, &mut out);
                     udp.send(&out).await.unwrap();
                 }
                 res = udp.recv(&mut dbuf) => {
                     let Ok(n) = res else { continue };
-                    match voice::parse_to_client(&dbuf[..n]) {
+                    match crypto.open(&mut dbuf[..n]) {
                         Some(ToClient::Audio { from, payload, .. }) => {
                             let dec = decoders.entry(from).or_insert_with(|| {
                                 opus1::OpusDecoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono).unwrap()
@@ -162,12 +169,12 @@ async fn main() {
                             e.1 += energy / samples.max(1) as f64;
                         }
                         Some(ToClient::Pong { .. }) => pongs += 1,
-                        None => {}
+                        None => unreadable += 1,
                     }
                 }
             }
         }
-        println!("voice pongs: {pongs}");
+        println!("voice pongs: {pongs}, datagrams that failed to decrypt: {unreadable}");
         if stats.is_empty() {
             println!("heard nobody");
         }

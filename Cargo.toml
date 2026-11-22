@@ -14,6 +14,8 @@ postcard = { version = "1", features = ["use-std"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Self-signed server certificates, on ring like the rest of the TLS stack.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 
 [profile.release]
 opt-level = 3
