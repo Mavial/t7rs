@@ -112,14 +112,12 @@ impl Channels {
         Ok(Self::from_config(&file.channels))
     }
 
-    /// Writes the permanent channels; write-then-rename, so a crash never truncates the file.
+    /// Writes the permanent channels.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let header = "# The live channel tree, kept up to date by the server as admins edit\n\
                       # channels in T7. Edit it only while the server is stopped.\n\n";
         let body = toml::to_string(&ChannelsFile { channels: self.to_config() }).map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, format!("{header}{body}"))?;
-        std::fs::rename(&tmp, path)
+        crate::write_atomic(path, |tmp| std::fs::write(tmp, format!("{header}{body}")))
     }
 
     /// Permanent channels in the saved format, siblings in display order.

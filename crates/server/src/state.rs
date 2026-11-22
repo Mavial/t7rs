@@ -253,7 +253,7 @@ impl Server {
         let id = self.next_id;
         self.next_id += 1;
         let channel = self.landing_channel(None);
-        let renamed = self.roles.seen(identity, &nickname);
+        let renamed = self.roles.refresh_nickname(identity, &nickname);
         let role = self.roles.roles().title(identity);
         let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), role, identity };
         let permissions = self.permissions_of(Subject { client: id, identity });
