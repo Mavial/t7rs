@@ -124,10 +124,7 @@ impl Channels {
 
     /// Permanent channels in the saved format, siblings in display order.
     pub fn to_config(&self) -> Vec<ChannelConfig> {
-        self.children_of(None)
-            .into_iter()
-            .filter_map(|id| self.config_of(id))
-            .collect()
+        self.children_of(None).into_iter().filter_map(|id| self.config_of(id)).collect()
     }
 
     fn config_of(&self, id: ChannelId) -> Option<ChannelConfig> {
@@ -443,7 +440,7 @@ mod tests {
         assert_eq!(ch.set_moderator(99, a, true), Err(ChannelError::NotFound));
         let saved = ch.to_config();
         assert_eq!(saved[1].children[0].moderators, [a, b]);
-        assert!(saved[0].moderators.is_empty());
+        assert_eq!(saved[0].moderators, [] as [Identity; 0]);
         assert!(!toml::to_string(&ChannelsFile { channels: vec![saved[0].clone()] }).unwrap().contains("moderators"));
         let text = toml::to_string(&ChannelsFile { channels: saved }).unwrap();
         let back = Channels::from_config(&toml::from_str::<ChannelsFile>(&text).unwrap().channels);
@@ -490,8 +487,12 @@ mod tests {
         assert!(ch.to_config().iter().all(|c| c.name != "Raid"), "temporary channels aren't saved");
 
         // Someone in the sub-channel keeps the whole temporary tree alive.
-        assert!(ch.abandoned_temporaries(&HashSet::from([sub])).is_empty());
-        assert_eq!(ch.abandoned_temporaries(&HashSet::from([1])), vec![temp], "only the top temporary channel is reported");
+        assert_eq!(ch.abandoned_temporaries(&HashSet::from([sub])), [] as [u32; 0]);
+        assert_eq!(
+            ch.abandoned_temporaries(&HashSet::from([1])),
+            vec![temp],
+            "only the top temporary channel is reported"
+        );
         assert_eq!(ch.delete(temp).unwrap(), vec![temp, sub]);
         assert_eq!(ch.set_default(99), Err(ChannelError::NotFound));
     }
@@ -520,10 +521,18 @@ mod tests {
         assert_eq!(ch.delete(1).unwrap(), vec![1]);
         assert_eq!(names(&ch), ["AFK"]);
 
-        let edit = ChannelSettings { topic: "zzz".into(), max_clients: Some(4), password: PasswordChange::Set("s".into()), ..settings("Away") };
+        let edit = ChannelSettings {
+            topic: "zzz".into(),
+            max_clients: Some(4),
+            password: PasswordChange::Set("s".into()),
+            ..settings("Away")
+        };
         ch.edit(4, &edit).unwrap();
         let info = ch.get(4).unwrap();
-        assert_eq!((info.name.as_str(), info.topic.as_str(), info.max_clients, info.has_password), ("Away", "zzz", Some(4), true));
+        assert_eq!(
+            (info.name.as_str(), info.topic.as_str(), info.max_clients, info.has_password),
+            ("Away", "zzz", Some(4), true)
+        );
         assert!(!ch.password_ok(4, Some("nope")) && ch.password_ok(4, Some("s")));
         ch.edit(4, &ChannelSettings { password: PasswordChange::Remove, ..settings("Away") }).unwrap();
         assert!(ch.password_ok(4, None));

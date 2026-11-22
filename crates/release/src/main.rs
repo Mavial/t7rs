@@ -20,7 +20,10 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("keygen") => keygen(&args[1..]),
         Some("manifest") => manifest(&args[1..]),
-        _ => Err("usage: t7-release keygen SECRET_FILE | manifest --version V --base-url URL --out FILE TARGET=FILE...".into()),
+        _ => {
+            Err("usage: t7-release keygen SECRET_FILE | manifest --version V --base-url URL --out FILE TARGET=FILE..."
+                .into())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -64,9 +67,8 @@ fn manifest(args: &[String]) -> Result<(), String> {
     let out = out.ok_or("--out is required")?;
 
     let secret = std::env::var("T7_SIGNING_KEY").map_err(|_| "T7_SIGNING_KEY is not set")?;
-    let seed: [u8; 32] = from_hex(&secret)
-        .and_then(|b| b.try_into().ok())
-        .ok_or("T7_SIGNING_KEY must be 64 hex characters")?;
+    let seed: [u8; 32] =
+        from_hex(&secret).and_then(|b| b.try_into().ok()).ok_or("T7_SIGNING_KEY must be 64 hex characters")?;
     let key = SigningKey::from_bytes(&seed);
 
     let mut assets = Vec::new();

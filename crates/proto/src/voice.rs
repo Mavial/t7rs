@@ -342,7 +342,10 @@ mod tests {
     fn a_jump_forward_forgets_the_old_window() {
         let d = pings(200);
         let mut server = ServerSide::new(&KEY);
-        assert_eq!(deliver(&mut server, &d, &[0, 1, 199, 1, 135, 136, 198]), [true, true, true, false, false, true, true]);
+        assert_eq!(
+            deliver(&mut server, &d, &[0, 1, 199, 1, 135, 136, 198]),
+            [true, true, true, false, false, true, true]
+        );
     }
 
     #[test]

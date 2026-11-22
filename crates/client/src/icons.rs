@@ -35,11 +35,7 @@ impl Pen<'_> {
 
     fn poly(&self, pts: &[(f32, f32)], closed: bool) {
         let pts: Vec<Pos2> = pts.iter().map(|&(x, y)| self.pt(x, y)).collect();
-        let shape = if closed {
-            Shape::closed_line(pts, self.stroke)
-        } else {
-            Shape::line(pts, self.stroke)
-        };
+        let shape = if closed { Shape::closed_line(pts, self.stroke) } else { Shape::line(pts, self.stroke) };
         self.p.add(shape);
     }
 

@@ -35,7 +35,9 @@ fn ico_file(sizes: &[u32]) -> Vec<u8> {
         f.extend_from_slice(&offset.to_le_bytes());
         offset += img.len() as u32;
     }
-    images.iter().for_each(|img| f.extend_from_slice(img));
+    for img in &images {
+        f.extend_from_slice(img);
+    }
     f
 }
 

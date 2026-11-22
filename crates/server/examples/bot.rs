@@ -6,12 +6,20 @@
 
 use std::time::Duration;
 
-use t7_proto::*;
+use t7_proto::{
+    C2S, ChannelId, ClientStatus, DEFAULT_PORT, FrameError, PING_INTERVAL_SECS, PROTOCOL_VERSION, S2C, TextTarget,
+    identity, read_frame, tls, write_frame,
+};
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
 const SCRIPT: &[(&str, ChannelId, ClientStatus, Option<&str>)] = &[
-    ("Mara", 1, ClientStatus { muted: false, deafened: false, away: false }, Some("hey all, anyone up for a round later?")),
+    (
+        "Mara",
+        1,
+        ClientStatus { muted: false, deafened: false, away: false },
+        Some("hey all, anyone up for a round later?"),
+    ),
     ("Jonas", 1, ClientStatus { muted: true, deafened: false, away: false }, Some("sure, after dinner")),
     ("Kenji", 4, ClientStatus { muted: false, deafened: false, away: false }, None),
     ("Priya", 4, ClientStatus { muted: false, deafened: true, away: false }, None),
@@ -76,7 +84,7 @@ async fn run(
     let mut nonce = 0;
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(PING_INTERVAL_SECS)) => {
+            () = tokio::time::sleep(Duration::from_secs(PING_INTERVAL_SECS)) => {
                 nonce += 1;
                 write_frame(&mut w, &C2S::Ping { nonce }).await?;
             }

@@ -26,7 +26,7 @@ const MANIFEST_URL: &str = "https://github.com/Mavial/t7rs/releases/latest/downl
 /// Release signing key (the secret half is a GitHub Actions secret).
 const PUBLIC_KEY: &str = "d293f0fe813036683dd8b909c9577906c5b5545cfd0d41f1bf3cdc2a4edc2d24";
 const FIRST_CHECK: Duration = Duration::from_secs(5);
-const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
+const CHECK_EVERY: Duration = Duration::from_hours(6);
 const MAX_MANIFEST: u64 = 64 * 1024;
 const MAX_BUILD: u64 = 200 * 1024 * 1024;
 
@@ -185,9 +185,8 @@ fn verify(version: &str, target: &str, bytes: &[u8], sha256: &str, signature: &s
     }
     let key: [u8; 32] = from_hex(PUBLIC_KEY).and_then(|k| k.try_into().ok()).expect("valid built-in key");
     let key = VerifyingKey::from_bytes(&key).expect("valid built-in key");
-    let signature: [u8; 64] = from_hex(signature)
-        .and_then(|s| s.try_into().ok())
-        .ok_or("the update's signature is malformed")?;
+    let signature: [u8; 64] =
+        from_hex(signature).and_then(|s| s.try_into().ok()).ok_or("the update's signature is malformed")?;
     key.verify(signed_message(version, target, &actual).as_bytes(), &Signature::from_bytes(&signature))
         .map_err(|_| "the update isn't signed by the T7 release key; ignoring it".into())
 }

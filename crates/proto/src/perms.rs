@@ -21,7 +21,10 @@ pub enum Action<'a> {
     /// Join a password-protected channel without its password.
     SkipChannelPassword,
     /// Out of their channel (to where a new client would land), or off the server.
-    Kick { target: &'a ClientInfo, from_server: bool },
+    Kick {
+        target: &'a ClientInfo,
+        from_server: bool,
+    },
     Ban(&'a ClientInfo),
     /// See the ban list and lift bans.
     ManageBans,
@@ -117,10 +120,17 @@ mod tests {
             moderators: moderators.to_vec(),
         };
         let raid = ChannelInfo { temporary: true, creator: Some(9), ..ch(RAID, None, &[]) };
-        [ch(LOBBY, None, &[]), ch(GAMING, None, &[G, G2]), ch(SQUAD, Some(GAMING), &[S]), ch(DEEP, Some(SQUAD), &[]), ch(AFK, None, &[A]), raid]
-            .into_iter()
-            .map(|c| (c.id, c))
-            .collect()
+        [
+            ch(LOBBY, None, &[]),
+            ch(GAMING, None, &[G, G2]),
+            ch(SQUAD, Some(GAMING), &[S]),
+            ch(DEEP, Some(SQUAD), &[]),
+            ch(AFK, None, &[A]),
+            raid,
+        ]
+        .into_iter()
+        .map(|c| (c.id, c))
+        .collect()
     }
 
     fn client(id: u32, identity: Identity, channel: ChannelId) -> ClientInfo {

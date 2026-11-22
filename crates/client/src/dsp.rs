@@ -2,11 +2,11 @@
 //!
 //! 1. High-pass filter and echo cancellation (WebRTC AEC3): removes what the
 //!    speakers play from what the microphone hears.
-//! 2. RNNoise: a small neural network that removes background noise (fans,
+//! 2. `RNNoise`: a small neural network that removes background noise (fans,
 //!    hum, traffic) and reports how likely the frame is speech.
 //! 3. Adaptive gain (WebRTC AGC2): brings quiet microphones up to a normal level.
 //!
-//! The order matches WebRTC's own pipeline, with RNNoise in place of WebRTC's
+//! The order matches WebRTC's own pipeline, with `RNNoise` in place of WebRTC's
 //! noise suppressor: in an offline comparison it removed ~20 dB more fan noise
 //! while distorting speech less. The whole chain costs ~0.1 ms per 10 ms on a desktop CPU.
 
@@ -18,7 +18,7 @@ use sonora::{AudioProcessing, Config, StreamConfig};
 /// Samples per processing frame: 10 ms at 48 kHz.
 pub const FRAME: usize = 480;
 
-/// RNNoise works on 16-bit-scaled samples.
+/// `RNNoise` works on 16-bit-scaled samples.
 const I16_SCALE: f32 = 32768.0;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -193,7 +193,8 @@ mod tests {
     #[test]
     fn cleanup_off_leaves_voice_band_untouched() {
         let n = 48_000 * 2;
-        let tone: Vec<f32> = (0..n).map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / 48_000.0).sin() * 0.05).collect();
+        let tone: Vec<f32> =
+            (0..n).map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / 48_000.0).sin() * 0.05).collect();
         let off = Cleanup { noise_suppression: false, echo_cancellation: false, auto_gain: false };
         let (out, _) = run(&mut Processor::new(off), &tone, None);
         let change = rms_db(&tone[24_000..]) - rms_db(&out[24_000..]);

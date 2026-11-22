@@ -6,6 +6,7 @@
 //! exactly once no matter how many clients receive it.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,8 +16,8 @@ use t7_proto::perms::{self, Action};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     BanId, BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason,
-    MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo,
-    TextTarget, encode_frame, validate_nickname,
+    MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget,
+    encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -42,10 +43,19 @@ pub enum Event {
         /// Receives the assigned id, or `None` if the handshake was rejected.
         reply: oneshot::Sender<Option<ClientId>>,
     },
-    Message { id: ClientId, msg: C2S },
-    Left { id: ClientId, reason: LeaveReason },
+    Message {
+        id: ClientId,
+        msg: C2S,
+    },
+    Left {
+        id: ClientId,
+        reason: LeaveReason,
+    },
     /// A raw voice datagram, not yet authenticated.
-    Voice { from: SocketAddr, data: Vec<u8> },
+    Voice {
+        from: SocketAddr,
+        data: Vec<u8>,
+    },
 }
 
 struct Client {
@@ -176,9 +186,10 @@ impl Server {
                 }
                 let channel = sender.info.channel;
                 let audio = ToClient::Audio { from: id, seq, payload };
-                let listeners = self.clients.values_mut().filter(|c| {
-                    c.info.id != id && c.info.channel == channel && !c.info.status.deafened
-                });
+                let listeners = self
+                    .clients
+                    .values_mut()
+                    .filter(|c| c.info.id != id && c.info.channel == channel && !c.info.status.deafened);
                 for listener in listeners {
                     let Some(addr) = listener.voice_addr else { continue };
                     // Sealed per listener, with their key.
@@ -278,10 +289,7 @@ impl Server {
         if !taken(&base) {
             return base;
         }
-        (1..)
-            .map(|i| format!("{base}{i}"))
-            .find(|n| !taken(n))
-            .expect("infinite iterator")
+        (1..).map(|i| format!("{base}{i}")).find(|n| !taken(n)).expect("infinite iterator")
     }
 
     /// Where someone joining the server, or kicked out of `leaving`, lands:
@@ -358,7 +366,7 @@ impl Server {
             }
             C2S::Kick { target, from_server, reason } => self.kick(id, target, from_server, &reason),
             C2S::Ban { target, duration_secs, reason, include_ip } => {
-                self.ban(id, target, duration_secs, &reason, include_ip)
+                self.ban(id, target, duration_secs, &reason, include_ip);
             }
             C2S::ListBans => self.list_bans(id),
             C2S::Unban { id: ban } => self.unban(id, ban),
@@ -498,7 +506,8 @@ impl Server {
         let Some(reason) = self.reason(id, reason) else { return };
         let Some(t) = self.clients.get(&target) else { return self.error(id, "that user is no longer online") };
         if !self.allowed(id, Action::Ban(&t.info)) {
-            let msg = if self.clients[&id].info.admin { "you can't ban yourself" } else { "only admins can ban people" };
+            let msg =
+                if self.clients[&id].info.admin { "you can't ban yourself" } else { "only admins can ban people" };
             return self.error(id, msg);
         }
         if duration_secs == Some(0) {
@@ -682,11 +691,11 @@ pub fn unix_now() -> u64 {
 fn banned_message(ban: &BanInfo, now: u64) -> String {
     let mut msg = "You are banned from this server".to_owned();
     if !ban.reason.is_empty() {
-        msg.push_str(&format!(" ({})", ban.reason));
+        let _ = write!(msg, " ({})", ban.reason);
     }
     msg.push('.');
     if let Some(end) = ban.expires_unix {
-        msg.push_str(&format!(" The ban ends in {}.", describe_duration(end.saturating_sub(now))));
+        let _ = write!(msg, " The ban ends in {}.", describe_duration(end.saturating_sub(now)));
     }
     msg
 }

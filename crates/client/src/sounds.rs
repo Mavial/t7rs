@@ -113,7 +113,9 @@ impl Sound {
             Sound::UserDisconnected | Sound::UserLostConnection | Sound::UserLeft => {
                 &[Note { at: 0.00, hz: 1174.7, gain: 0.6 }, Note { at: 0.07, hz: 880.0, gain: 0.6 }]
             }
-            Sound::ChannelSwitched => &[Note { at: 0.00, hz: 784.0, gain: 0.7 }, Note { at: 0.00, hz: 1174.7, gain: 0.35 }],
+            Sound::ChannelSwitched => {
+                &[Note { at: 0.00, hz: 784.0, gain: 0.7 }, Note { at: 0.00, hz: 1174.7, gain: 0.35 }]
+            }
             Sound::Poke => &[
                 Note { at: 0.00, hz: 880.0, gain: 1.0 },
                 Note { at: 0.12, hz: 880.0, gain: 1.0 },
@@ -233,7 +235,8 @@ pub fn installed_packs() -> Vec<(String, PathBuf)> {
         .map(|entry| entry.path())
         .filter(|dir| {
             // Text-to-speech packs (`say("...")`, no audio files) aren't supported.
-            std::fs::read_to_string(dir.join("settings.ini")).is_ok_and(|ini| ini.contains("play(") || !ini.contains("say("))
+            std::fs::read_to_string(dir.join("settings.ini"))
+                .is_ok_and(|ini| ini.contains("play(") || !ini.contains("say("))
         })
         .map(|dir| {
             let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -415,7 +418,12 @@ mod tests {
     #[test]
     fn custom_folders_fall_back_to_chimes_and_load_wavs() {
         let dir = temp_dir("custom");
-        let spec = hound::WavSpec { channels: 2, sample_rate: 24_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 24_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
         let mut w = hound::WavWriter::create(dir.join("poke.wav"), spec).unwrap();
         for _ in 0..2400 {
             w.write_sample(i16::MAX / 2).unwrap();

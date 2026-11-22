@@ -36,7 +36,7 @@ const SPEAKING_FOR: Duration = Duration::from_millis(250);
 const ECHO_REFERENCE_MAX: usize = SAMPLE_RATE as usize / 2;
 /// Frames sent ahead of a voice-activation onset, so first syllables aren't clipped.
 const PRE_ROLL: usize = 2;
-/// Speech probability (RNNoise) above which a frame counts as talking.
+/// Speech probability (`RNNoise`) above which a frame counts as talking.
 const SPEECH: f32 = 0.5;
 const BITRATE: std::num::NonZeroU32 = std::num::NonZeroU32::new(32_000).unwrap();
 
@@ -187,8 +187,7 @@ impl Playback {
         let speaker = match speakers.entry(from) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
-                let Ok(decoder) = opus1::OpusDecoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono)
-                else {
+                let Ok(decoder) = opus1::OpusDecoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono) else {
                     return;
                 };
                 e.insert(Speaker {
@@ -196,7 +195,7 @@ impl Playback {
                     queue: VecDeque::with_capacity(MAX_BACKLOG + FRAME_SAMPLES),
                     primed: false,
                     next_seq: None,
-                    last_heard: now - SPEAKING_FOR * 4,
+                    last_heard: now.checked_sub(SPEAKING_FOR * 4).unwrap(),
                 })
             }
         };
@@ -273,11 +272,7 @@ impl Playback {
     pub fn speaking(&self) -> Vec<ClientId> {
         let now = Instant::now();
         let speakers = self.speakers.lock().unwrap();
-        speakers
-            .iter()
-            .filter(|(_, s)| now.duration_since(s.last_heard) < SPEAKING_FOR)
-            .map(|(&id, _)| id)
-            .collect()
+        speakers.iter().filter(|(_, s)| now.duration_since(s.last_heard) < SPEAKING_FOR).map(|(&id, _)| id).collect()
     }
 
     pub fn clear(&self) {
@@ -425,10 +420,11 @@ where
 /// gates it and encodes 20 ms frames. Ends when the input stream (and with it
 /// the sender) is dropped.
 fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink: &VoiceSink, ctx: &egui::Context) {
-    let mut encoder = match opus1::OpusEncoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono, opus1::Application::Voip) {
-        Ok(e) => e,
-        Err(e) => return shared.report(ctx, format!("Voice encoder failed: {e:?}")),
-    };
+    let mut encoder =
+        match opus1::OpusEncoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono, opus1::Application::Voip) {
+            Ok(e) => e,
+            Err(e) => return shared.report(ctx, format!("Voice encoder failed: {e:?}")),
+        };
     encoder.set_bitrate(opus1::Bitrate::BitsPerSecond(BITRATE));
     encoder.set_signal(opus1::Signal::Voice);
     // Each packet also carries a low-bitrate copy of the previous frame, so a
@@ -595,7 +591,7 @@ where
                 }
                 for (frame, &v) in data.chunks_exact_mut(channels).zip(&mono) {
                     let out = v.clamp(-1.0, 1.0);
-                    meter_energy += (out * out) as f64;
+                    meter_energy += f64::from(out * out);
                     frame.fill(T::from_sample(out));
                 }
                 // Once a second, at debug level: the level actually handed to the device.
@@ -625,7 +621,7 @@ fn report_stream_error(shared: &Shared, ctx: &egui::Context, what: &str, e: &cpa
 #[cfg(windows)]
 fn key_down_global(vk: u16) -> bool {
     // Works while another window (e.g. a game) has focus.
-    unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 }
+    unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000 != 0 }
 }
 
 #[cfg(not(windows))]
@@ -639,7 +635,8 @@ mod tests {
 
     fn encoded_tone(frames: usize) -> Vec<Vec<u8>> {
         let mut enc =
-            opus1::OpusEncoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono, opus1::Application::Voip).unwrap();
+            opus1::OpusEncoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono, opus1::Application::Voip)
+                .unwrap();
         let mut buf = [0u8; MAX_OPUS_PAYLOAD];
         (0..frames)
             .map(|f| {
@@ -687,7 +684,7 @@ mod tests {
         }
         p.push(3, 0, &[0xff; 3]);
         let mut speaking = p.speaking();
-        speaking.sort();
+        speaking.sort_unstable();
         assert!(speaking.starts_with(&[1, 2]));
         let both = mix_frames(&p, 3);
         let p1 = Playback::new(egui::Context::default());
@@ -706,12 +703,12 @@ mod tests {
         for (seq, pkt) in encoded_tone(5).iter().enumerate() {
             p.push(1, seq as u32, pkt);
         }
-        p.play_chime(crate::sounds::Sound::Poke, 1.0);
+        p.play_chime(Sound::Poke, 1.0);
         let mut deafened = vec![0.0; 3 * FRAME_SAMPLES];
         p.mix(&mut deafened, 0.0);
 
         let chime_only = Playback::new(egui::Context::default());
-        chime_only.play_chime(crate::sounds::Sound::Poke, 1.0);
+        chime_only.play_chime(Sound::Poke, 1.0);
         let mut expected = vec![0.0; 3 * FRAME_SAMPLES];
         chime_only.mix(&mut expected, 1.0);
         assert!(expected.iter().any(|v| v.abs() > 0.05), "chime should be audible");

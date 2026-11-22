@@ -14,7 +14,7 @@ pub struct Resampler {
 
 impl Resampler {
     pub fn new(from_hz: u32, to_hz: u32) -> Self {
-        Self { step: from_hz as f64 / to_hz as f64, pos: 0.0, prev: 0.0 }
+        Self { step: f64::from(from_hz) / f64::from(to_hz), pos: 0.0, prev: 0.0 }
     }
 
     /// Converts as much of `input` as possible, appending to `out` (push style:
@@ -104,7 +104,7 @@ mod tests {
             // After the first sample (which blends with the initial zero), output is the constant.
             assert!(out[2..].iter().all(|&v| (v - 0.5).abs() < 1e-6));
             let ratio = total_in as f64 / out.len() as f64;
-            assert!((ratio - from as f64 / to as f64).abs() < 0.01, "{from}->{to}: {ratio}");
+            assert!((ratio - f64::from(from) / f64::from(to)).abs() < 0.01, "{from}->{to}: {ratio}");
         }
     }
 }

@@ -17,11 +17,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite};
 pub use tokio_rustls::TlsAcceptor;
+use tokio_rustls::TlsConnector;
 pub use tokio_rustls::client::TlsStream as ClientStream;
 pub use tokio_rustls::server::TlsStream as ServerStream;
-use tokio_rustls::TlsConnector;
 
-/// The first byte of every TLS handshake record, so of every ClientHello.
+/// The first byte of every TLS handshake record, so of every `ClientHello`.
 pub const HANDSHAKE_RECORD: u8 = 0x16;
 
 /// Label for the connection's [`exporter`] value.
@@ -92,7 +92,10 @@ pub fn acceptor(cert: Vec<u8>, key: Vec<u8>) -> Result<TlsAcceptor, rustls::Erro
 #[derive(Debug)]
 pub enum ConnectError {
     /// The server's certificate is not the one pinned for this address.
-    CertChanged { pinned: Fingerprint, presented: Fingerprint },
+    CertChanged {
+        pinned: Fingerprint,
+        presented: Fingerprint,
+    },
     Io(std::io::Error),
 }
 
@@ -143,8 +146,7 @@ where
 /// 32 bytes that both ends of one TLS connection derive, and nobody else can:
 /// what a signature proving an identity on this connection binds to.
 pub fn exporter<D>(conn: &ConnectionCommon<D>) -> [u8; 32] {
-    conn.export_keying_material([0u8; 32], EXPORTER_LABEL, None)
-        .expect("the handshake is complete")
+    conn.export_keying_material([0u8; 32], EXPORTER_LABEL, None).expect("the handshake is complete")
 }
 
 fn provider() -> Arc<CryptoProvider> {
@@ -271,7 +273,8 @@ mod tests {
         // An impostor replays the real server's certificate but has to sign
         // the handshake with a key of its own.
         let real = new_cert();
-        let impostor_key = provider().key_provider.load_private_key(PrivatePkcs8KeyDer::from(new_cert().1).into()).unwrap();
+        let impostor_key =
+            provider().key_provider.load_private_key(PrivatePkcs8KeyDer::from(new_cert().1).into()).unwrap();
         let replayed = CertifiedKey::new(vec![real.0.clone().into()], impostor_key);
         let config = ServerConfig::builder_with_provider(provider())
             .with_protocol_versions(&[&rustls::version::TLS13])

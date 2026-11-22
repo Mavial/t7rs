@@ -161,38 +161,81 @@ pub enum C2S {
         identity: IdentityProof,
     },
     /// `password` is needed for password-protected channels (admins skip it).
-    JoinChannel { channel: ChannelId, password: Option<String> },
-    SendText { target: TextTarget, text: String },
+    JoinChannel {
+        channel: ChannelId,
+        password: Option<String>,
+    },
+    SendText {
+        target: TextTarget,
+        text: String,
+    },
     SetStatus(ClientStatus),
-    Ping { nonce: u64 },
+    Ping {
+        nonce: u64,
+    },
     Goodbye,
     /// Get someone's attention: a popup and a sound on their side (protocol 3).
-    Poke { target: ClientId, message: String },
+    Poke {
+        target: ClientId,
+        message: String,
+    },
     /// Anyone may create temporary channels; only admins permanent ones.
     /// The creator moves into the new channel.
-    CreateChannel { parent: Option<ChannelId>, settings: ChannelSettings, temporary: bool },
+    CreateChannel {
+        parent: Option<ChannelId>,
+        settings: ChannelSettings,
+        temporary: bool,
+    },
     /// Admins, or the creator of a temporary channel.
-    EditChannel { id: ChannelId, settings: ChannelSettings },
+    EditChannel {
+        id: ChannelId,
+        settings: ChannelSettings,
+    },
     /// Admins only. `position` is the index among the new siblings.
-    MoveChannel { id: ChannelId, parent: Option<ChannelId>, position: u32 },
+    MoveChannel {
+        id: ChannelId,
+        parent: Option<ChannelId>,
+        position: u32,
+    },
     /// Admins, or the creator of a temporary channel. People inside move to the default channel.
-    DeleteChannel { id: ChannelId },
+    DeleteChannel {
+        id: ChannelId,
+    },
     /// Admins only.
-    SetDefaultChannel { id: ChannelId },
+    SetDefaultChannel {
+        id: ChannelId,
+    },
     /// Become admin with the server's admin token.
-    Authenticate { token: String },
+    Authenticate {
+        token: String,
+    },
     /// Admins only. By identity, so someone offline can be removed too.
-    SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
+    SetModerator {
+        channel: ChannelId,
+        identity: Identity,
+        moderator: bool,
+    },
     /// Out of their channel to where a new client would land (admins and the channel's
     /// moderators), or off the server (admins). See [`perms`].
-    Kick { target: ClientId, from_server: bool, reason: String },
+    Kick {
+        target: ClientId,
+        from_server: bool,
+        reason: String,
+    },
     /// Admins only. Bans their identity, and their IP address with `include_ip`,
     /// for `duration_secs` (`None`: for good), and kicks off everyone it covers.
-    Ban { target: ClientId, duration_secs: Option<u64>, reason: String, include_ip: bool },
+    Ban {
+        target: ClientId,
+        duration_secs: Option<u64>,
+        reason: String,
+        include_ip: bool,
+    },
     /// Admins only; answered with [`S2C::Bans`].
     ListBans,
     /// Admins only; answered with the new [`S2C::Bans`].
-    Unban { id: BanId },
+    Unban {
+        id: BanId,
+    },
 }
 
 /// Server → client.
@@ -209,11 +252,22 @@ pub enum S2C {
     },
     /// Handshake refused; the server closes the connection afterwards.
     /// Servers also send it, outside TLS, to clients too old for TLS.
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
     ClientJoined(ClientInfo),
-    ClientLeft { id: ClientId, reason: LeaveReason },
-    ClientMoved { id: ClientId, channel: ChannelId },
-    ClientStatus { id: ClientId, status: ClientStatus },
+    ClientLeft {
+        id: ClientId,
+        reason: LeaveReason,
+    },
+    ClientMoved {
+        id: ClientId,
+        channel: ChannelId,
+    },
+    ClientStatus {
+        id: ClientId,
+        status: ClientStatus,
+    },
     Text {
         from: ClientId,
         /// `Channel` text carries the channel it was sent in, so clients can
@@ -223,16 +277,31 @@ pub enum S2C {
         text: String,
     },
     /// A non-fatal error caused by the last request (e.g. channel full).
-    Error { message: String },
-    Pong { nonce: u64 },
+    Error {
+        message: String,
+    },
+    Pong {
+        nonce: u64,
+    },
     /// Someone poked you (protocol 3).
-    Poked { from: ClientId, message: String },
+    Poked {
+        from: ClientId,
+        message: String,
+    },
     /// The whole channel list, sent after any change to it.
     Channels(Vec<ChannelInfo>),
-    ClientAdmin { id: ClientId, admin: bool },
+    ClientAdmin {
+        id: ClientId,
+        admin: bool,
+    },
     /// Sent to everyone before the kicked client is moved to the default
     /// channel, or disconnected with [`LeaveReason::Kicked`].
-    ClientKicked { id: ClientId, by: ClientId, from_server: bool, reason: String },
+    ClientKicked {
+        id: ClientId,
+        by: ClientId,
+        from_server: bool,
+        reason: String,
+    },
     /// The ban list, for an admin who asked.
     Bans(Vec<BanInfo>),
 }
@@ -268,8 +337,7 @@ impl From<std::io::Error> for FrameError {
 /// sockets, so a broadcast is serialised exactly once.
 pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
     let mut buf = vec![0u8; 4];
-    let mut buf = postcard::to_extend(msg, std::mem::take(&mut buf))
-        .expect("serialising into a Vec cannot fail");
+    let mut buf = postcard::to_extend(msg, std::mem::take(&mut buf)).expect("serialising into a Vec cannot fail");
     let len = (buf.len() - 4) as u32;
     buf[..4].copy_from_slice(&len.to_le_bytes());
     buf
@@ -329,10 +397,7 @@ mod tests {
             identity: identity::IdentityKey::from_seed([3; 32]).prove(&[4; 32]),
         };
         let frame = encode_frame(&msg);
-        assert_eq!(
-            u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize,
-            frame.len() - 4
-        );
+        assert_eq!(u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize, frame.len() - 4);
         let mut cursor = std::io::Cursor::new(frame);
         let mut scratch = Vec::new();
         let decoded: C2S = read_frame(&mut cursor, &mut scratch).await.unwrap();

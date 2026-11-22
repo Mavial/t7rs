@@ -69,7 +69,10 @@ pub enum Ended {
     ByUser,
     Failed(String),
     /// The server's certificate is not the one pinned for its address.
-    CertChanged { pinned: Fingerprint, presented: Fingerprint },
+    CertChanged {
+        pinned: Fingerprint,
+        presented: Fingerprint,
+    },
 }
 
 pub struct Net {
@@ -253,12 +256,17 @@ async fn session(
     };
     let _ = stream.set_nodelay(true);
     let server = stream.peer_addr().ok();
-    let (stream, fingerprint) = match tokio::time::timeout(CONNECT_TIMEOUT, tls::connect(stream, attempt.pinned)).await {
+    let (stream, fingerprint) = match tokio::time::timeout(CONNECT_TIMEOUT, tls::connect(stream, attempt.pinned)).await
+    {
         Ok(Ok(secured)) => secured,
         Ok(Err(ConnectError::CertChanged { pinned, presented })) => return Ended::CertChanged { pinned, presented },
-        Ok(Err(e)) => return Ended::Failed(format!("Could not connect securely to {target} ({e}). Is it an older T7 server?")),
+        Ok(Err(e)) => {
+            return Ended::Failed(format!("Could not connect securely to {target} ({e}). Is it an older T7 server?"));
+        }
         // A server from before TLS waits for the rest of a frame instead of answering.
-        Err(_) => return Ended::Failed(format!("{target} did not answer the secure handshake. Is it an older T7 server?")),
+        Err(_) => {
+            return Ended::Failed(format!("{target} did not answer the secure handshake. Is it an older T7 server?"));
+        }
     };
     events.emit(NetEvent::Secured(id, fingerprint));
     let identity = attempt.key.prove(&tls::exporter(stream.get_ref().1));

@@ -1,9 +1,7 @@
 //! Visual identity: neutral greys with a warm peach accent, after
 //! opencode's OC-2 desktop theme (anomalyco/opencode, `oc-2.json`, dark).
 
-use egui::{
-    self, Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle, Visuals,
-};
+use egui::{self, Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle, Visuals};
 
 pub const BG: Color32 = Color32::from_rgb(0x10, 0x10, 0x10);
 pub const PANEL: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
@@ -119,10 +117,7 @@ pub fn avatar_color(name: &str) -> Color32 {
         Color32::from_rgb(0x5c, 0x5c, 0x5c),
     ];
     // FNV-1a: tiny and stable across runs and platforms.
-    let hash = name
-        .to_lowercase()
-        .bytes()
-        .fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    let hash = name.to_lowercase().bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
     PALETTE[hash as usize % PALETTE.len()]
 }
 

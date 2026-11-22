@@ -106,10 +106,7 @@ impl Shell {
         }
         tracing::debug!(elapsed = ?started.elapsed(), "frame");
 
-        let delay = out
-            .viewport_output
-            .get(&egui::ViewportId::ROOT)
-            .map_or(Duration::MAX, |v| v.repaint_delay);
+        let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
         self.schedule(delay);
     }
 }
@@ -132,8 +129,8 @@ impl ApplicationHandler<RepaintAfter> for Shell {
                 return event_loop.exit();
             }
         };
-        let surface = softbuffer::Context::new(window.clone())
-            .and_then(|cx| softbuffer::Surface::new(&cx, window.clone()));
+        let surface =
+            softbuffer::Context::new(window.clone()).and_then(|cx| softbuffer::Surface::new(&cx, window.clone()));
         let surface = match surface {
             Ok(s) => s,
             Err(e) => {

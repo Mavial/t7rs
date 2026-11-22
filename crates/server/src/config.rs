@@ -104,8 +104,7 @@ impl Config {
                 .map_err(|e| format!("cannot write default config {}: {e}", path.display()))?;
             tracing::info!("wrote default config to {}", path.display());
         }
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))
     }
 

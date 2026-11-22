@@ -1,6 +1,8 @@
 //! Over-the-air updates: the release manifest (`latest.json`) and the message
 //! each build is signed with. Shared by the release tool and the client.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +42,10 @@ pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
 }
 
 pub fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 pub fn from_hex(s: &str) -> Option<Vec<u8>> {
