@@ -135,7 +135,7 @@ mod tests {
         let cfg: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
         assert_eq!(cfg.bind, "0.0.0.0:9988");
         let channels = Channels::from_config(&cfg.channels).unwrap();
-        let all = channels.snapshot();
+        let all: Vec<_> = t7_proto::perms::ChannelTree::channels(&channels).collect();
         assert_eq!(all.len(), 6);
         assert_eq!(channels.get(channels.default_id()).unwrap().name, "Lobby");
         let squad = all.iter().find(|c| c.name == "Squad 2").unwrap();

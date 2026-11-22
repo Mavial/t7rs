@@ -265,6 +265,7 @@ pub enum S2C {
         /// Seals this client's voice datagrams, both ways.
         voice_key: voice::VoiceKey,
         server: ServerInfo,
+        /// The channels this client sees, and the people in them.
         channels: Vec<ChannelInfo>,
         clients: Vec<ClientInfo>,
         permissions: perms::Permissions,
@@ -307,7 +308,7 @@ pub enum S2C {
         from: ClientId,
         message: String,
     },
-    /// The whole channel list, sent after any change to it.
+    /// Every channel this client sees, sent after any change to them.
     Channels(Vec<ChannelInfo>),
     ClientRole {
         id: ClientId,
@@ -325,9 +326,16 @@ pub enum S2C {
     Bans(Vec<BanInfo>),
     /// What this client may do, sent whenever that changes.
     Permissions(perms::Permissions),
-    /// Every role and who holds them, for clients that may manage roles,
-    /// sent whenever they change.
+    /// Every role and who holds them, for clients that may edit roles or
+    /// channel permissions, sent whenever they change.
     Roles(perms::Roles),
+    /// Someone already connected came into view: they moved into a channel
+    /// this client sees, or it now sees theirs.
+    ClientShown(ClientInfo),
+    /// Someone went out of view, the other way around. They are still connected.
+    ClientHidden {
+        id: ClientId,
+    },
 }
 
 #[derive(Debug)]

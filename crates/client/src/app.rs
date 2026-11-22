@@ -799,6 +799,26 @@ impl App {
                     self.sound(Sound::UserLeft);
                 }
             }
+            S2C::ClientShown(ref info) => {
+                self.apply_user_volume(info.id, &info.nickname);
+                let here = self.view.as_ref().and_then(ServerView::my_channel) == Some(info.channel);
+                let line = format!("{} joined the channel", info.nickname);
+                self.apply(&msg);
+                if here {
+                    self.push(1, LineKind::System, line);
+                    self.sound(Sound::UserJoined);
+                }
+            }
+            S2C::ClientHidden { id } => {
+                let Some(view) = &self.view else { return };
+                let Some(c) = view.clients.get(&id) else { return };
+                let (name, here) = (c.nickname.clone(), Some(c.channel) == view.my_channel());
+                self.apply(&msg);
+                if here {
+                    self.push(1, LineKind::System, format!("{name} left the channel"));
+                    self.sound(Sound::UserLeft);
+                }
+            }
             S2C::ClientStatus { .. } | S2C::Permissions(_) | S2C::Roles(_) => self.apply(&msg),
             S2C::Channels(_) => {
                 self.apply(&msg);

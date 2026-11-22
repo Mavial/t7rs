@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use t7_proto::perms::{Member, Perms, Role, RoleId, Roles};
+use t7_proto::perms::{Member, Perm, Perms, Role, RoleId, Roles};
 use t7_proto::{Identity, MAX_ROLE_NAME_LEN, MAX_ROLES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub enum RoleError {
     Everyone,
     /// Channel moderators hold it.
     Moderator,
+    /// Everyone must see the default channel.
+    EveryoneViews,
 }
 
 impl RoleError {
@@ -29,6 +31,7 @@ impl RoleError {
             RoleError::TooMany => format!("the server has the maximum of {MAX_ROLES} roles"),
             RoleError::Everyone => "everyone has the Everyone role; only its permissions change".into(),
             RoleError::Moderator => "the Moderator role can't be deleted: channel moderators hold it".into(),
+            RoleError::EveryoneViews => "Everyone keeps View channels: everyone has to see the default channel".into(),
         }
     }
 }
@@ -80,6 +83,9 @@ impl RoleStore {
         }
         if !ids.contains(&RoleId::MODERATOR) {
             return Err("the Moderator role (id 2) is missing: channel moderators hold it".into());
+        }
+        if !file.everyone.has(Perm::View) {
+            return Err(format!("everyone = [...] needs \"view\": {}", RoleError::EveryoneViews.message()));
         }
         let highest = ids.iter().map(|r| r.0).max().unwrap_or(0);
         let owner = file.owner;
@@ -162,6 +168,9 @@ impl RoleStore {
     }
 
     pub fn set_perms(&mut self, id: RoleId, perms: Perms) -> Result<(), RoleError> {
+        if id == RoleId::EVERYONE && !perms.has(Perm::View) {
+            return Err(RoleError::EveryoneViews);
+        }
         if id == RoleId::EVERYONE {
             self.roles.everyone = perms;
         } else {
@@ -311,10 +320,12 @@ mod tests {
         assert_eq!(store.roles().ranked.last().unwrap().id, dj);
         assert_eq!(store.move_to(RoleId::EVERYONE, 0), Err(RoleError::Everyone));
 
-        let perms = Perms::of(&[t7_proto::perms::Perm::Kick]);
+        let perms = Perms::of(&[Perm::Kick, Perm::View]);
         store.set_perms(dj, perms).unwrap();
         store.set_perms(RoleId::EVERYONE, perms).unwrap();
         assert_eq!((store.roles().role(dj).unwrap().perms, store.roles().everyone), (perms, perms));
+        assert_eq!(store.set_perms(RoleId::EVERYONE, Perms::NONE), Err(RoleError::EveryoneViews));
+        assert_eq!(store.set_perms(dj, Perms::NONE), Ok(()), "only Everyone's view is needed");
 
         assert_eq!(store.delete(RoleId::MODERATOR), Err(RoleError::Moderator));
         assert_eq!(store.delete(RoleId::EVERYONE), Err(RoleError::Everyone));

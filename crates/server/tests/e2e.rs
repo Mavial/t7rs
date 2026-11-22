@@ -1069,3 +1069,204 @@ async fn an_owner_reset_hands_the_server_to_the_next_claimer() {
     task.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Lobby, then Staff with Office in it, which Everyone may not view but the
+/// Moderator role may, and AFK.
+const PRIVATE: &str = r#"
+[[channels]]
+name = "Lobby"
+default = true
+
+[[channels]]
+name = "Staff"
+
+  [[channels.overrides]]
+  role = 0
+  deny = ["view"]
+
+  [[channels.overrides]]
+  role = 2
+  allow = ["view"]
+
+  [[channels.children]]
+  name = "Office"
+
+[[channels]]
+name = "AFK"
+"#;
+
+fn names(list: &[ChannelInfo]) -> Vec<&str> {
+    let mut names: Vec<&str> = list.iter().map(|c| c.name.as_str()).collect();
+    names.sort_unstable();
+    names
+}
+
+impl TestClient {
+    /// Everything that arrives until the answer to a ping: what the server
+    /// sent this client before it handled the ping.
+    async fn drain(&mut self) -> Vec<S2C> {
+        self.send(C2S::Ping { nonce: 9 }).await;
+        let mut got = Vec::new();
+        loop {
+            match self.recv().await {
+                S2C::Pong { nonce: 9 } => return got,
+                m => got.push(m),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators() {
+    let dir = data_dir("hidden");
+    let (addr, task) = start_in(PRIVATE, Some(dir.clone())).await;
+    let (mut owner, _, _) = claim(addr, &dir, HOME).await;
+    // The owner sees every channel, once it is the owner.
+    let S2C::Welcome { channels, .. } = TestClient::connect(addr, "admin", None).await.1 else { unreachable!() };
+    let [lobby, staff, office] = ["Lobby", "Staff", "Office"].map(|name| id_of(&channels, name));
+    let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let mod_id = welcomed_id(&wm);
+    let S2C::Welcome { channels, permissions, .. } = &wu else { unreachable!() };
+    assert_eq!(names(channels), ["AFK", "Lobby"]);
+    assert!(!permissions.sees(staff) && !permissions.sees(office));
+    assert!(channels.iter().all(|c| c.overrides.is_empty()), "only editors get overrides");
+
+    // Moderators hold Everyone too, and there the Moderator role's allow beats its deny.
+    owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
+    assert_eq!(names(&moder.channels().await), ["AFK", "Lobby", "Office", "Staff"]);
+
+    // In there, the moderator vanishes for the user, not for the owner.
+    moder.send(C2S::JoinChannel { channel: office, password: None }).await;
+    assert_eq!(user.until(|m| matches!(m, S2C::ClientHidden { .. })).await, S2C::ClientHidden { id: mod_id });
+    for c in [&mut owner, &mut moder] {
+        c.until(|m| *m == S2C::ClientMoved { id: mod_id, channel: office }).await;
+    }
+    // Someone connecting now doesn't see them either, nor what they say to the server.
+    let (mut late, wl) = TestClient::connect(addr, "late", None).await;
+    let S2C::Welcome { clients, .. } = &wl else { unreachable!() };
+    assert!(clients.iter().all(|c| c.id != mod_id), "{clients:?}");
+    moder.send(C2S::SendText { target: TextTarget::Server, text: "psst".into() }).await;
+    owner.until(|m| matches!(m, S2C::Text { from, .. } if *from == mod_id)).await;
+    let heard = late.drain().await;
+    assert!(heard.iter().all(|m| !matches!(m, S2C::Text { from, .. } if *from == mod_id)), "{heard:?}");
+
+    // The user can't join it, or reach the moderator.
+    user.send(C2S::JoinChannel { channel: office, password: None }).await;
+    assert_eq!(error(&mut user).await, "channel does not exist");
+    user.send(C2S::SendText { target: TextTarget::Client(mod_id), text: "hi".into() }).await;
+    assert!(error(&mut user).await.contains("no longer online"));
+
+    // Without the role, the moderator may not view where they are, so they
+    // go to the default channel, back in everyone's view.
+    owner.change_roles(assign("mod", RoleId::MODERATOR, false)).await;
+    let moved = moder.until(|m| matches!(m, S2C::ClientMoved { .. })).await;
+    assert_eq!(moved, S2C::ClientMoved { id: mod_id, channel: lobby });
+    let S2C::ClientShown(back) = user.until(|m| matches!(m, S2C::ClientShown(_))).await else { unreachable!() };
+    assert_eq!((back.id, back.channel), (mod_id, lobby));
+    let S2C::Welcome { channels, .. } = TestClient::connect(addr, "mod", None).await.1 else { unreachable!() };
+    assert_eq!(names(&channels), ["AFK", "Lobby"]);
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Games denies Everyone Speak and Send, and allows the Moderator role Speak;
+/// Squad in it allows Everyone Send again; Duo in Squad sets nothing.
+const LAYERED: &str = r#"
+[[channels]]
+name = "Lobby"
+default = true
+
+[[channels]]
+name = "Games"
+
+  [[channels.overrides]]
+  role = 0
+  deny = ["speak", "send_messages"]
+
+  [[channels.overrides]]
+  role = 2
+  allow = ["speak"]
+
+  [[channels.children]]
+  name = "Squad"
+
+    [[channels.children.overrides]]
+    role = 0
+    allow = ["send_messages"]
+
+    [[channels.children.children]]
+    name = "Duo"
+"#;
+
+/// Whether `permissions` let them speak and send messages in `channel`.
+fn talks(permissions: &perms::Permissions, channel: ChannelId) -> (bool, bool) {
+    (permissions.may_in(channel, Perm::Speak), permissions.may_in(channel, Perm::SendMessages))
+}
+
+#[tokio::test]
+async fn the_closest_setting_wins_inherit_takes_the_parents_and_allow_beats_deny() {
+    let dir = data_dir("layered");
+    let (addr, task) = start_in(LAYERED, Some(dir.clone())).await;
+    let (mut owner, _, channels) = claim(addr, &dir, HOME).await;
+    let [lobby, games, squad, duo] = ["Lobby", "Games", "Squad", "Duo"].map(|name| id_of(&channels, name));
+    let (_, wu) = TestClient::connect(addr, "user", None).await;
+    let S2C::Welcome { permissions, .. } = &wu else { unreachable!() };
+    assert_eq!(talks(permissions, lobby), (true, true));
+    assert_eq!(talks(permissions, games), (false, false));
+    // Squad says nothing about Speak, so Games' deny holds; its own allow
+    // of Send is closer than Games' deny.
+    assert_eq!(talks(permissions, squad), (false, true));
+    assert_eq!(talks(permissions, duo), (false, true), "Duo inherits Squad");
+
+    // Holding Everyone and Moderator, Games' allow for Moderator beats its deny for Everyone.
+    let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
+    owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
+    let S2C::Permissions(p) = moder.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
+    assert_eq!(talks(&p, games), (true, false));
+    assert_eq!(talks(&p, squad), (true, true));
+    assert_eq!(talks(&p, duo), (true, true));
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn new_channel(name: &str, parent: Option<ChannelId>, kind: ChannelKind) -> C2S {
+    C2S::CreateChannel { parent, settings: settings(name), temporary: false, kind }
+}
+
+#[tokio::test]
+async fn a_category_is_never_joined_or_nested() {
+    let (addr, mut admin, admin_id, channels) = start_owned("categories", HOME).await;
+    let lobby = id_of(&channels, "Lobby");
+    admin.send(new_channel("Games", None, ChannelKind::Category)).await;
+    let list = admin.channels().await;
+    let games = id_of(&list, "Games");
+    assert_eq!(list.iter().find(|c| c.id == games).unwrap().kind, ChannelKind::Category);
+    let after = admin.drain().await;
+    assert!(after.iter().all(|m| !matches!(m, S2C::ClientMoved { .. })), "its creator stays put: {after:?}");
+
+    admin.send(C2S::JoinChannel { channel: games, password: None }).await;
+    assert!(error(&mut admin).await.contains("category can't be joined"));
+    admin.send(C2S::SetDefaultChannel { id: games }).await;
+    assert!(error(&mut admin).await.contains("category can't be the default"));
+    admin.send(new_channel("Inner", Some(games), ChannelKind::Category)).await;
+    assert!(error(&mut admin).await.contains("only be at the top level"));
+    admin.send(C2S::MoveChannel { id: games, parent: Some(lobby), position: 0 }).await;
+    assert!(error(&mut admin).await.contains("only be at the top level"));
+    let temporary =
+        C2S::CreateChannel { parent: None, settings: settings("Pop-up"), temporary: true, kind: ChannelKind::Category };
+    admin.send(temporary).await;
+    assert!(error(&mut admin).await.contains("can't be temporary"));
+
+    // Channels go inside it, and people into those.
+    admin.send(new_channel("Squad", Some(games), ChannelKind::Voice)).await;
+    let list = admin.channels().await;
+    let squad = id_of(&list, "Squad");
+    assert_eq!(list.iter().find(|c| c.id == squad).unwrap().parent, Some(games));
+    let moved = admin.until(|m| matches!(m, S2C::ClientMoved { .. })).await;
+    assert_eq!(moved, S2C::ClientMoved { id: admin_id, channel: squad });
+    // Someone who may only make temporary channels makes no categories.
+    let (mut user, _) = TestClient::connect(addr, "user", None).await;
+    user.send(new_channel("Mine", None, ChannelKind::Category)).await;
+    assert!(error(&mut user).await.contains("can't create permanent channels"));
+}

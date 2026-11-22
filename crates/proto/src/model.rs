@@ -54,10 +54,10 @@ impl ServerView {
     /// Applies an event. Returns `false` for events that don't touch state.
     pub fn apply(&mut self, event: &S2C) -> bool {
         match event {
-            S2C::ClientJoined(info) => {
+            S2C::ClientJoined(info) | S2C::ClientShown(info) => {
                 self.clients.insert(info.id, info.clone());
             }
-            S2C::ClientLeft { id, .. } => {
+            S2C::ClientLeft { id, .. } | S2C::ClientHidden { id } => {
                 self.clients.remove(id);
             }
             S2C::ClientMoved { id, channel } => {

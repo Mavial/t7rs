@@ -15,9 +15,9 @@ use std::time::{Instant, SystemTime};
 use t7_proto::perms::{Perm, Permissions, Rank, RoleChange, RoleId, Standing, Subject};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
-    BanId, BanInfo, C2S, ChannelId, ChannelKind, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity,
-    LeaveReason, MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo,
-    TextTarget, encode_frame, validate_nickname,
+    BanId, BanInfo, C2S, ChannelId, ChannelInfo, ChannelKind, ChannelSettings, ClientId, ClientInfo, ClientStatus,
+    Identity, LeaveReason, MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C,
+    ServerInfo, TextTarget, encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -68,8 +68,10 @@ struct Client {
     /// Learned from the first authenticated datagram (works behind NAT).
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
-    /// What it was last told it may do.
+    /// What it was last told it may do, and so which channels it sees.
     permissions: Permissions,
+    /// Where it was last told each person it sees is, itself included.
+    known: HashMap<ClientId, ChannelId>,
 }
 
 impl Client {
@@ -254,14 +256,18 @@ impl Server {
 
         let id = self.next_id;
         self.next_id += 1;
-        let channel = self.landing_channel(None);
         let renamed = self.roles.seen(identity, &nickname);
         let role = self.roles.roles().title(identity);
-        let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), role, identity };
         let permissions = self.permissions_of(Subject { client: id, identity });
-        let manager = permissions.server.has(Perm::ManageRoles);
+        let channel = self.landing_channel(&permissions, None);
+        let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), role, identity };
+        let editor = permissions.edits_permissions();
 
-        let mut clients: Vec<ClientInfo> = self.clients.values().map(|c| c.info.clone()).collect();
+        let seen = self.clients.values().filter(|c| permissions.sees(c.info.channel));
+        let mut known: HashMap<ClientId, ChannelId> = seen.map(|c| (c.info.id, c.info.channel)).collect();
+        known.insert(id, channel);
+        let mut clients: Vec<ClientInfo> =
+            self.clients.values().filter(|c| known.contains_key(&c.info.id)).map(|c| c.info.clone()).collect();
         clients.push(info.clone());
         let mut voice_key = [0u8; 32];
         if let Err(e) = getrandom::fill(&mut voice_key) {
@@ -272,7 +278,7 @@ impl Server {
             your_id: id,
             voice_key,
             server: self.info.clone(),
-            channels: self.channels.snapshot(),
+            channels: self.channel_list(&permissions),
             clients,
             permissions: permissions.clone(),
         };
@@ -281,7 +287,10 @@ impl Server {
         }
 
         tracing::info!(%addr, id, nickname = %info.nickname, "client joined");
-        self.broadcast(&S2C::ClientJoined(info.clone()), |_| true);
+        for c in self.clients.values_mut().filter(|c| c.permissions.sees(channel)) {
+            c.known.insert(id, channel);
+        }
+        self.broadcast(&S2C::ClientJoined(info.clone()), |c| c.known.contains_key(&id));
         self.clients.insert(
             id,
             Client {
@@ -293,14 +302,15 @@ impl Server {
                 voice_addr: None,
                 voice_bucket: TokenBucket::voice(),
                 permissions,
+                known,
             },
         );
         if renamed {
             self.save_roles();
         }
-        if renamed || manager {
-            let managers = |c: &Client| c.permissions.server.has(Perm::ManageRoles) && (renamed || c.info.id == id);
-            self.broadcast(&S2C::Roles(self.roles.roles().clone()), managers);
+        if renamed || editor {
+            let editors = |c: &Client| c.permissions.edits_permissions() && (renamed || c.info.id == id);
+            self.broadcast(&S2C::Roles(self.roles.roles().clone()), editors);
         }
         Some(id)
     }
@@ -314,15 +324,17 @@ impl Server {
         (1..).map(|i| format!("{base}{i}")).find(|n| !taken(n)).expect("infinite iterator")
     }
 
-    /// Where someone joining the server, or kicked out of `leaving`, lands:
-    /// the default channel, or the first open channel with room if it's full.
-    fn landing_channel(&self, leaving: Option<ChannelId>) -> ChannelId {
+    /// Where someone who may do `permissions`, joining the server or kicked
+    /// out of `leaving`, lands: the default channel, or the first open channel
+    /// they may view with room if it's full. Everyone may view the default.
+    fn landing_channel(&self, permissions: &Permissions, leaving: Option<ChannelId>) -> ChannelId {
         let default = self.channels.default_id();
         std::iter::once(default)
             .chain(self.channels.ids_in_order())
             .find(|&ch| {
                 let joinable = self.channels.get(ch).is_some_and(|c| c.kind == ChannelKind::Voice);
-                Some(ch) != leaving && joinable && self.has_room(ch) && self.channels.password_ok(ch, None)
+                let open = self.has_room(ch) && self.channels.password_ok(ch, None);
+                Some(ch) != leaving && joinable && permissions.may_in(ch, Perm::View) && open
             })
             .unwrap_or(default)
     }
@@ -339,8 +351,20 @@ impl Server {
     }
 
     fn message(&mut self, id: ClientId, msg: C2S) {
-        if !self.clients.contains_key(&id) {
-            return;
+        let Some(client) = self.clients.get(&id) else { return };
+        // To a client, a channel it doesn't see doesn't exist.
+        let named = match &msg {
+            C2S::JoinChannel { channel, .. }
+            | C2S::EditChannel { id: channel, .. }
+            | C2S::DeleteChannel { id: channel }
+            | C2S::SetDefaultChannel { id: channel }
+            | C2S::SetModerator { channel, .. } => [Some(*channel), None],
+            C2S::CreateChannel { parent, .. } => [*parent, None],
+            C2S::MoveChannel { id: channel, parent, .. } => [Some(*channel), *parent],
+            _ => [None, None],
+        };
+        if named.into_iter().flatten().any(|c| !client.permissions.sees(c)) {
+            return self.error(id, "channel does not exist");
         }
         match msg {
             C2S::Hello { .. } => self.error(id, "already connected"),
@@ -350,7 +374,7 @@ impl Server {
                 let client = self.clients.get_mut(&id).expect("checked above");
                 if client.info.status != status {
                     client.info.status = status;
-                    self.broadcast(&S2C::ClientStatus { id, status }, |_| true);
+                    self.broadcast(&S2C::ClientStatus { id, status }, |c| c.known.contains_key(&id));
                 }
             }
             C2S::Ping { nonce } => self.send(id, &S2C::Pong { nonce }),
@@ -428,16 +452,13 @@ impl Server {
         if mine.rank <= highest {
             return self.error(id, "you can only manage roles, and the roles of people, below your own");
         }
+        let mut forgot = false;
         let changed = match change {
             RoleChange::Create { name } => self.roles.create(&name).map(drop),
             RoleChange::Rename { id, name } => self.roles.rename(id, &name),
             RoleChange::SetPermissions { id, perms } => self.roles.set_perms(id, perms),
             RoleChange::Move { id, position } => self.roles.move_to(id, position as usize),
-            RoleChange::Delete { id } => self.roles.delete(id).map(|()| {
-                if self.channels.forget_role(id) {
-                    self.save_channels();
-                }
-            }),
+            RoleChange::Delete { id } => self.roles.delete(id).map(|()| forgot = self.channels.forget_role(id)),
             RoleChange::Assign { identity, role, held: false } => self.roles.revoke(identity, role).map(drop),
             RoleChange::Assign { identity, role, held: true } => {
                 let online = self.clients.values().find(|c| c.info.identity == identity);
@@ -450,7 +471,10 @@ impl Server {
         match changed {
             Ok(()) => {
                 self.save_roles();
-                self.refresh(true);
+                if forgot {
+                    self.save_channels();
+                }
+                self.refresh(forgot, true);
             }
             Err(e) => self.error(id, &e.message()),
         }
@@ -465,7 +489,7 @@ impl Server {
             return;
         }
         let may = self.standing(id, Some(channel)).perms;
-        if !may.has(Perm::Join) {
+        if !may.has(Perm::View) || !may.has(Perm::Join) {
             return self.error(id, "you can't join this channel");
         }
         if !may.has(Perm::Bypass) && !self.channels.password_ok(channel, password) {
@@ -481,7 +505,33 @@ impl Server {
 
     fn move_to(&mut self, id: ClientId, channel: ChannelId) {
         self.clients.get_mut(&id).expect("exists").info.channel = channel;
-        self.broadcast(&S2C::ClientMoved { id, channel }, |_| true);
+        self.sync_about(id);
+    }
+
+    /// Tells everyone what changed about where `subject` is, as far as they
+    /// see it: that it moved, came into view, or went out of it.
+    fn sync_about(&mut self, subject: ClientId) {
+        let info = self.clients[&subject].info.clone();
+        let mut told = [Vec::new(), Vec::new(), Vec::new()];
+        for c in self.clients.values_mut() {
+            let sees = c.info.id == subject || c.permissions.sees(info.channel);
+            let was = if sees { c.known.insert(subject, info.channel) } else { c.known.remove(&subject) };
+            let news = match (was, sees) {
+                (Some(at), true) if at != info.channel => 0,
+                (None, true) => 1,
+                (Some(_), false) => 2,
+                _ => continue,
+            };
+            told[news].push(c.info.id);
+        }
+        let channel = info.channel;
+        let news =
+            [S2C::ClientMoved { id: subject, channel }, S2C::ClientShown(info), S2C::ClientHidden { id: subject }];
+        for (msg, to) in news.iter().zip(told) {
+            if !to.is_empty() {
+                self.broadcast(msg, |c| to.contains(&c.info.id));
+            }
+        }
     }
 
     /// What a client may do in `channel`, or on the server as a whole with `None`.
@@ -497,36 +547,79 @@ impl Server {
         self.roles.roles().permissions(who, &self.channels)
     }
 
-    /// Tells each client what changed about what it may do and the role shown
-    /// next to it, and sends the roles to those who may manage them: all of
-    /// them when `roles_changed`, else only those who just became able to.
-    fn refresh(&mut self, roles_changed: bool) {
-        let mut managers = Vec::new();
-        let mut retitled = Vec::new();
+    /// Brings every client up to date after channels or roles changed: what
+    /// it may do, the channels it sees, who it sees in them, and the role
+    /// shown next to each. Editors get the roles: all of them when
+    /// `roles_changed`, else only those who just became editors. Anyone who
+    /// may no longer view their channel moves to the default channel.
+    fn refresh(&mut self, channels_changed: bool, roles_changed: bool) {
         let ids: Vec<ClientId> = self.clients.keys().copied().collect();
-        for id in ids {
+        let (mut regranted, mut lists, mut editors, mut retitled) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for &id in &ids {
             let client = &self.clients[&id];
-            let permissions = self.permissions_of(client.subject());
-            let manager = permissions.server.has(Perm::ManageRoles);
-            if manager && (roles_changed || !client.permissions.server.has(Perm::ManageRoles)) {
-                managers.push(id);
+            let (was, now) = (&client.permissions, self.permissions_of(client.subject()));
+            let editor = now.edits_permissions();
+            if channels_changed || editor != was.edits_permissions() || !was.channels.keys().eq(now.channels.keys()) {
+                lists.push(id);
+            }
+            if editor && (roles_changed || !was.edits_permissions()) {
+                editors.push(id);
+            }
+            if now != *was {
+                regranted.push(id);
             }
             let role = self.roles.roles().title(client.info.identity);
             if role != client.info.role {
-                retitled.push(S2C::ClientRole { id, role: role.clone() });
-            }
-            if permissions != client.permissions {
-                self.send(id, &S2C::Permissions(permissions.clone()));
+                retitled.push(id);
             }
             let client = self.clients.get_mut(&id).expect("exists");
-            client.permissions = permissions;
+            client.permissions = now;
             client.info.role = role;
         }
-        if !managers.is_empty() {
-            self.broadcast(&S2C::Roles(self.roles.roles().clone()), |c| managers.contains(&c.info.id));
+        let default = self.channels.default_id();
+        let mut evicted = false;
+        for c in self.clients.values_mut().filter(|c| !c.permissions.may_in(c.info.channel, Perm::View)) {
+            c.info.channel = default;
+            evicted = true;
         }
-        for msg in retitled {
-            self.broadcast(&msg, |_| true);
+
+        for id in regranted {
+            self.send(id, &S2C::Permissions(self.clients[&id].permissions.clone()));
+        }
+        self.send_channel_lists(&lists);
+        for &id in &ids {
+            self.sync_about(id);
+        }
+        if !editors.is_empty() {
+            self.broadcast(&S2C::Roles(self.roles.roles().clone()), |c| editors.contains(&c.info.id));
+        }
+        for id in retitled {
+            let role = self.clients[&id].info.role.clone();
+            self.broadcast(&S2C::ClientRole { id, role }, |c| c.known.contains_key(&id));
+        }
+        if evicted {
+            self.remove_abandoned_channels();
+        }
+    }
+
+    /// The channels someone who may do `permissions` sees, with what they set
+    /// for each role if it may edit that.
+    fn channel_list(&self, permissions: &Permissions) -> Vec<ChannelInfo> {
+        let editor = permissions.edits_permissions();
+        let list = permissions.channels.keys().filter_map(|c| self.channels.get(*c));
+        list.map(|c| ChannelInfo { overrides: if editor { c.overrides.clone() } else { Vec::new() }, ..c.clone() })
+            .collect()
+    }
+
+    /// Sends each of `to` the channels it sees, encoding each different list once.
+    fn send_channel_lists(&mut self, to: &[ClientId]) {
+        let mut frames: HashMap<(Vec<ChannelId>, bool), Frame> = HashMap::new();
+        for id in to {
+            let permissions = &self.clients[id].permissions;
+            let key = (permissions.channels.keys().copied().collect(), permissions.edits_permissions());
+            let frame =
+                frames.entry(key).or_insert_with(|| encode(&S2C::Channels(self.channel_list(permissions)))).clone();
+            deliver(&mut self.dead, &self.clients[id], frame);
         }
     }
 
@@ -552,10 +645,11 @@ impl Server {
         match self.channels.create(parent, settings, temporary, kind, id) {
             Ok(channel) => {
                 self.channels_changed(!temporary);
-                if kind == ChannelKind::Voice {
+                // Unless it's a category, or the channel above hides it from them.
+                if kind == ChannelKind::Voice && self.clients[&id].permissions.may_in(channel, Perm::View) {
                     self.move_to(id, channel);
-                    self.remove_abandoned_channels();
                 }
+                self.remove_abandoned_channels();
             }
             Err(e) => self.error(id, &e.message()),
         }
@@ -601,7 +695,7 @@ impl Server {
         }
         tracing::info!(id, %nickname, identity = %identity.to_hex(), "server claimed: this is its owner now");
         self.save_roles();
-        self.refresh(true);
+        self.refresh(false, true);
     }
 
     /// Why `id` may not do `perm`, which `verb` names, to `target` in
@@ -629,7 +723,9 @@ impl Server {
 
     fn kick(&mut self, id: ClientId, target: ClientId, from_server: bool, reason: &str) {
         let Some(reason) = self.reason(id, reason) else { return };
-        let Some(t) = self.clients.get(&target) else { return self.error(id, "that user is no longer online") };
+        let Some(t) = self.clients.get(&target).filter(|_| self.knows(id, target)) else {
+            return self.error(id, "that user is no longer online");
+        };
         let channel = (!from_server).then_some(t.info.channel);
         if let Some(msg) = self.refusal(id, target, (Perm::Kick, "kick"), channel) {
             return self.error(id, &msg);
@@ -647,13 +743,15 @@ impl Server {
     /// Tells everyone, then moves `target` where a joining client would land, or disconnects it.
     fn eject(&mut self, target: ClientId, by: ClientId, from_server: bool, reason: String) {
         tracing::info!(target, by, from_server, reason, "client kicked");
-        self.broadcast(&S2C::ClientKicked { id: target, by, from_server, reason }, |_| true);
+        let notice = S2C::ClientKicked { id: target, by, from_server, reason };
+        self.broadcast(&notice, |c| c.known.contains_key(&target));
         if from_server {
             // Its writer sends the notice before it closes the connection.
             self.remove(target, LeaveReason::Kicked);
         } else {
-            let leaving = self.clients[&target].info.channel;
-            self.move_to(target, self.landing_channel(Some(leaving)));
+            let t = &self.clients[&target];
+            let landing = self.landing_channel(&t.permissions, Some(t.info.channel));
+            self.move_to(target, landing);
             self.remove_abandoned_channels();
         }
     }
@@ -670,7 +768,9 @@ impl Server {
 
     fn ban(&mut self, id: ClientId, target: ClientId, duration_secs: Option<u64>, reason: &str, include_ip: bool) {
         let Some(reason) = self.reason(id, reason) else { return };
-        let Some(t) = self.clients.get(&target) else { return self.error(id, "that user is no longer online") };
+        let Some(t) = self.clients.get(&target).filter(|_| self.knows(id, target)) else {
+            return self.error(id, "that user is no longer online");
+        };
         if let Some(msg) = self.refusal(id, target, (Perm::Ban, "ban"), None) {
             return self.error(id, &msg);
         }
@@ -752,11 +852,10 @@ impl Server {
         }
     }
 
-    /// Sends everyone the new channel list and what they may do in it; saves
-    /// it when permanent channels changed.
+    /// Sends everyone the channels they see now and what they may do there;
+    /// saves them when permanent channels changed.
     fn channels_changed(&mut self, save: bool) {
-        self.broadcast(&S2C::Channels(self.channels.snapshot()), |_| true);
-        self.refresh(false);
+        self.refresh(true, false);
         if save {
             self.save_channels();
         }
@@ -788,8 +887,8 @@ impl Server {
         if message.chars().count() > MAX_POKE_LEN {
             return self.error(id, "poke message is too long");
         }
-        if target == id || !self.clients.contains_key(&target) {
-            return self.error(id, "that user is no longer online");
+        if let Some(why) = self.unreachable(id, target) {
+            return self.error(id, &why);
         }
         if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
             return self.error(id, "you are poking too fast");
@@ -815,11 +914,11 @@ impl Server {
         }
         let msg = S2C::Text { from: id, target, channel, text: text.to_owned() };
         match target {
-            TextTarget::Server => self.broadcast(&msg, |_| true),
+            TextTarget::Server => self.broadcast(&msg, |c| c.known.contains_key(&id)),
             TextTarget::Channel => self.broadcast(&msg, |c| c.info.channel == channel),
             TextTarget::Client(to) => {
-                if to == id || !self.clients.contains_key(&to) {
-                    return self.error(id, "that user is no longer online");
+                if let Some(why) = self.unreachable(id, to) {
+                    return self.error(id, &why);
                 }
                 // Recipient and sender (echo, so the sender sees it confirmed).
                 self.broadcast(&msg, |c| c.info.id == to || c.info.id == id);
@@ -827,11 +926,31 @@ impl Server {
         }
     }
 
+    /// Whether `id` sees `other`.
+    fn knows(&self, id: ClientId, other: ClientId) -> bool {
+        self.clients.get(&id).is_some_and(|c| c.known.contains_key(&other))
+    }
+
+    /// Why `id` can't message or poke `target`, if it can't: only people who
+    /// see each other reach each other.
+    fn unreachable(&self, id: ClientId, target: ClientId) -> Option<String> {
+        if target == id || !self.knows(id, target) {
+            Some("that user is no longer online".into())
+        } else if !self.knows(target, id) {
+            Some(format!("{} can't see you", self.clients[&target].info.nickname))
+        } else {
+            None
+        }
+    }
+
     fn remove(&mut self, id: ClientId, reason: LeaveReason) {
         if let Some(client) = self.clients.remove(&id) {
             tracing::info!(addr = %client.addr, id, nickname = %client.info.nickname, ?reason, "client left");
             // Dropping `client.outbox` ends its writer task, which closes the socket.
-            self.broadcast(&S2C::ClientLeft { id, reason }, |_| true);
+            self.broadcast(&S2C::ClientLeft { id, reason }, |c| c.known.contains_key(&id));
+            for c in self.clients.values_mut() {
+                c.known.remove(&id);
+            }
             self.remove_abandoned_channels();
         }
     }
@@ -850,15 +969,20 @@ impl Server {
         self.broadcast(msg, |c| c.info.id == id);
     }
 
-    /// Encodes once and enqueues to every matching client. A client whose
-    /// queue is full is too slow to keep up and gets disconnected.
+    /// Encodes once and enqueues to every matching client.
     fn broadcast(&mut self, msg: &S2C, filter: impl Fn(&Client) -> bool) {
         let frame = encode(msg);
         for client in self.clients.values().filter(|c| filter(c)) {
-            if client.outbox.try_send(frame.clone()).is_err() && !self.dead.contains(&client.info.id) {
-                self.dead.push(client.info.id);
-            }
+            deliver(&mut self.dead, client, frame.clone());
         }
+    }
+}
+
+/// Enqueues a frame to a client. One whose queue is full is too slow to keep
+/// up, and joins the `dead` to be disconnected.
+fn deliver(dead: &mut Vec<ClientId>, client: &Client, frame: Frame) {
+    if client.outbox.try_send(frame).is_err() && !dead.contains(&client.info.id) {
+        dead.push(client.info.id);
     }
 }
 

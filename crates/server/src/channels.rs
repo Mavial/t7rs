@@ -185,11 +185,6 @@ impl Channels {
         })
     }
 
-    /// Everything clients need to draw the tree.
-    pub fn snapshot(&self) -> Vec<ChannelInfo> {
-        self.map.values().map(|c| c.info.clone()).collect()
-    }
-
     pub fn default_id(&self) -> ChannelId {
         self.default
     }
@@ -584,7 +579,7 @@ mod tests {
     #[test]
     fn the_default_channel_is_flagged() {
         let mut ch = three();
-        let flagged = |ch: &Channels| ch.snapshot().iter().filter(|c| c.default).map(|c| c.id).collect::<Vec<_>>();
+        let flagged = |ch: &Channels| ch.channels().filter(|c| c.default).map(|c| c.id).collect::<Vec<_>>();
         assert_eq!(flagged(&ch), [1]);
         assert!(ch.get(1).unwrap().default);
         ch.set_default(4).unwrap();
