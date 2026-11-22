@@ -286,6 +286,13 @@ pub enum C2S {
         target: ClientId,
         muted: bool,
     },
+    /// Moves someone into `channel`, if you may move people out of where they
+    /// are and into `channel`, their role is below yours, and they may see
+    /// it. A full channel, or one with a password, needs your Bypass.
+    MoveMember {
+        target: ClientId,
+        channel: ChannelId,
+    },
 }
 
 /// Server → client.

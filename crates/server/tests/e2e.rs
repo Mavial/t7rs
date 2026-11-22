@@ -1611,3 +1611,51 @@ async fn a_server_mute_holds_across_reconnects_until_lifted_or_a_restart() {
     task.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn people_move_only_those_below_them_into_channels_they_can_see() {
+    let dir = data_dir("move-members");
+    let (addr, task) = start_in(PRIVATE, Some(dir.clone())).await;
+    let (mut owner, _, _) = claim(addr, &dir, HOME).await;
+    let S2C::Welcome { channels, .. } = TestClient::connect(addr, "admin", None).await.1 else { unreachable!() };
+    let [lobby, office, afk] = ["Lobby", "Office", "AFK"].map(|name| id_of(&channels, name));
+    let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
+    let (mut mover, _) = TestClient::connect(addr, "mover", None).await;
+    let (_boss, wb) = TestClient::connect(addr, "boss", None).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let (boss_id, user_id) = (welcomed_id(&wb), welcomed_id(&wu));
+    owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
+    owner.change_roles(assign("boss", RoleId::ADMIN, true)).await;
+    // A mover may move people, but not past a password.
+    let roles = owner.change_roles(RoleChange::Create { name: "Mover".into() }).await;
+    let movers = roles.ranked.last().unwrap().id;
+    let perms = Perms::of(&[Perm::View, Perm::Join, Perm::MoveMembers]);
+    owner.change_roles(RoleChange::SetPermissions { id: movers, perms }).await;
+    owner.change_roles(assign("mover", movers, true)).await;
+    moder.until(|m| matches!(m, S2C::Permissions(p) if p.sees(office))).await;
+
+    // A moderator moves someone without a role, who hears of it.
+    moder.send(C2S::MoveMember { target: user_id, channel: afk }).await;
+    user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: afk }).await;
+
+    // Not into a channel they can't see, though the moderator can.
+    moder.send(C2S::MoveMember { target: user_id, channel: office }).await;
+    assert_eq!(error(&mut moder).await, "user can't see Office");
+    // Nor anyone whose role isn't below the mover's.
+    moder.send(C2S::MoveMember { target: boss_id, channel: afk }).await;
+    assert!(error(&mut moder).await.contains("can't move boss: their role isn't below yours"));
+    // Nor without Move members.
+    user.send(C2S::MoveMember { target: boss_id, channel: afk }).await;
+    assert_eq!(error(&mut user).await, "you can't move boss");
+
+    // A password needs the mover's Bypass, which the moderator has.
+    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Lobby") };
+    owner.send(C2S::EditChannel { id: lobby, settings: locked }).await;
+    mover.until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.id == lobby && c.has_password))).await;
+    mover.send(C2S::MoveMember { target: user_id, channel: lobby }).await;
+    assert_eq!(error(&mut mover).await, "Lobby has a password");
+    moder.send(C2S::MoveMember { target: user_id, channel: lobby }).await;
+    user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: lobby }).await;
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}

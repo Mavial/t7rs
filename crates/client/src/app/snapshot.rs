@@ -340,12 +340,20 @@ type Step = (f32, f32, Option<bool>);
 /// A scene that moves the pointer first, one step a frame, to open a menu.
 type Menu = (&'static str, (u32, u32), fn(&egui::Context) -> App, &'static [Step]);
 
-const MENUS: &[Menu] = &[(
-    "19-user-roles",
-    (1100, 720),
-    connected,
-    &[(80.0, 226.0, Some(true)), (80.0, 226.0, Some(false)), (150.0, 330.0, None)],
-)];
+const MENUS: &[Menu] = &[
+    (
+        "19-user-roles",
+        (1100, 720),
+        connected,
+        &[(80.0, 226.0, Some(true)), (80.0, 226.0, Some(false)), (150.0, 330.0, None)],
+    ),
+    (
+        "29-user-move-to",
+        (1100, 720),
+        connected,
+        &[(80.0, 340.0, Some(true)), (80.0, 340.0, Some(false)), (150.0, 240.0, None)],
+    ),
+];
 
 fn render(
     name: &str,

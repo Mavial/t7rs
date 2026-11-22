@@ -146,11 +146,15 @@ enum TreeAction {
     ServerMute { target: ClientId, muted: bool },
     ServerSettings,
     SetRole { identity: Identity, role: RoleId, held: bool },
+    MoveMember { target: ClientId, channel: ChannelId },
     Fold(String),
 }
 
 /// Payload while dragging yourself onto another channel.
 struct DragSelf;
+
+/// Payload while dragging someone else onto another channel, to move them.
+struct DragMember(ClientId);
 
 /// Payload while dragging a channel to rearrange the tree.
 struct DragChannel(ChannelId);
@@ -1248,6 +1252,7 @@ impl App {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     let mine = view.my_channel();
                     let dragging_self = egui::DragAndDrop::has_payload_of_type::<DragSelf>(ui.ctx());
+                    let dragging_member = egui::DragAndDrop::payload::<DragMember>(ui.ctx()).map(|d| d.0);
                     let dragging_channel = egui::DragAndDrop::payload::<DragChannel>(ui.ctx()).map(|d| d.0);
                     let pointer = ui.input(|i| i.pointer.interact_pos());
                     let server = match &self.conn {
@@ -1291,7 +1296,13 @@ impl App {
                             }
                             _ => None,
                         };
+                        // Someone dragged here would move: not where they are, and only where we may move people.
+                        let member_drop = dragging_member.filter(|m| {
+                            let elsewhere = view.clients.get(m).is_some_and(|c| c.channel != ch_id);
+                            elsewhere && resp.contains_pointer() && !category && view.may_in(ch_id, Perm::MoveMembers)
+                        });
                         let drop_hover = (dragging_self && resp.contains_pointer() && !is_mine && !category)
+                            || member_drop.is_some()
                             || matches!(channel_drop, Some((Zone::Into, Outcome::Move(_))));
                         let bg = if drop_hover {
                             theme::ACCENT_BG
@@ -1421,6 +1432,10 @@ impl App {
                             || (dragging_self && resp.dnd_release_payload::<DragSelf>().is_some())
                         {
                             join = Some(ch_id);
+                        } else if let Some(target) = member_drop
+                            && resp.dnd_release_payload::<DragMember>().is_some()
+                        {
+                            action = Some(TreeAction::MoveMember { target, channel: ch_id });
                         }
                         if may_rearrange {
                             resp.dnd_set_drag_payload(DragChannel(ch_id));
@@ -1506,7 +1521,8 @@ impl App {
 
                         for c in clients {
                             let is_me = c.id == view.my_id;
-                            let sense = if is_me { Sense::click_and_drag() } else { Sense::click() };
+                            let movable = is_me || view.may_in(ch_id, Perm::MoveMembers);
+                            let sense = if movable { Sense::click_and_drag() } else { Sense::click() };
                             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), sense);
                             if resp.hovered() {
                                 ui.painter().rect_filled(
@@ -1613,6 +1629,12 @@ impl App {
                                 if resp.double_clicked() {
                                     private = Some(c.id);
                                 }
+                                if movable && resp.drag_started() {
+                                    resp.dnd_set_drag_payload(DragMember(c.id));
+                                }
+                                if resp.dragged() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                }
                                 resp.context_menu(|ui| {
                                     if ui.button("Send private message").clicked() {
                                         private = Some(c.id);
@@ -1630,8 +1652,34 @@ impl App {
                                     let mutes = view.may_in(ch_id, Perm::MuteMembers);
                                     let set_moderator = view.may_in(ch_id, Perm::ManagePermissions);
                                     let roles = view.roles.as_ref().filter(|_| view.may(Perm::ManageRoles));
-                                    if kicks.iter().any(|k| k.2) || ban || mutes || set_moderator || roles.is_some() {
+                                    if movable
+                                        || kicks.iter().any(|k| k.2)
+                                        || ban
+                                        || mutes
+                                        || set_moderator
+                                        || roles.is_some()
+                                    {
                                         ui.separator();
+                                    }
+                                    if movable {
+                                        ui.menu_button("Move to", |ui| {
+                                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                                for &(depth, to) in view.tree() {
+                                                    let Some(dest) = view.channels.get(&to) else { continue };
+                                                    if dest.kind == ChannelKind::Category {
+                                                        ui.label(RichText::new(dest.name.to_uppercase()).size(11.5));
+                                                        continue;
+                                                    }
+                                                    let label = format!("{}{}", "    ".repeat(depth), dest.name);
+                                                    let may = to != ch_id && view.may_in(to, Perm::MoveMembers);
+                                                    if ui.add_enabled(may, egui::Button::new(label)).clicked() {
+                                                        action =
+                                                            Some(TreeAction::MoveMember { target: c.id, channel: to });
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                        });
                                     }
                                     if let Some(roles) = roles {
                                         ui.menu_button("Roles", |ui| {
@@ -1740,6 +1788,9 @@ impl App {
                         self.net.send(C2S::ChangeRoles(RoleChange::Assign { identity, role, held }));
                     }
                     Some(TreeAction::Fold(name)) => self.fold(name),
+                    Some(TreeAction::MoveMember { target, channel }) => {
+                        self.net.send(C2S::MoveMember { target, channel });
+                    }
                     None => {}
                 }
             },

@@ -377,7 +377,8 @@ impl Server {
             | C2S::DeleteChannel { id: channel }
             | C2S::SetDefaultChannel { id: channel }
             | C2S::SetModerator { channel, .. }
-            | C2S::SetOverride { channel, .. } => [Some(*channel), None],
+            | C2S::SetOverride { channel, .. }
+            | C2S::MoveMember { channel, .. } => [Some(*channel), None],
             C2S::CreateChannel { parent, .. } => [*parent, None],
             C2S::MoveChannel { id: channel, parent, .. } => [Some(*channel), *parent],
             _ => [None, None],
@@ -452,6 +453,49 @@ impl Server {
                 self.set_override(id, channel, Override::new(role, allow, deny));
             }
             C2S::ServerMute { target, muted } => self.server_mute(id, target, muted),
+            C2S::MoveMember { target, channel } => self.move_member(id, target, channel),
+        }
+    }
+
+    /// Moves `target` into `channel` for someone who may move people out of
+    /// where `target` is and into `channel`, and stands above them where they
+    /// are. They must be able to see it, and only a mover who may bypass
+    /// limits and passwords puts them in a full or locked channel.
+    fn move_member(&mut self, id: ClientId, target: ClientId, channel: ChannelId) {
+        let Some(t) = self.clients.get(&target).filter(|_| self.knows(id, target)) else {
+            return self.error(id, "that user is no longer online");
+        };
+        let (from, name, sees) = (t.info.channel, t.info.nickname.clone(), t.permissions.may_in(channel, Perm::View));
+        let Some(to) = self.channels.get(channel) else { return self.error(id, "channel does not exist") };
+        let (kind, to) = (to.kind, to.name.clone());
+        if kind == ChannelKind::Category {
+            return self.error(id, "nobody can be in a category; move them into a channel in it");
+        }
+        if from == channel {
+            return;
+        }
+        if let Some(msg) = self.refusal(id, target, (Perm::MoveMembers, "move"), Some(from)) {
+            return self.error(id, &msg);
+        }
+        let mine = self.standing(id, Some(channel)).perms;
+        if !mine.has(Perm::MoveMembers) {
+            return self.error(id, &format!("you can't move people into {to}"));
+        }
+        if !sees {
+            return self.error(id, &format!("{name} can't see {to}"));
+        }
+        if !mine.has(Perm::Bypass) && !self.channels.password_ok(channel, None) {
+            return self.error(id, &format!("{to} has a password"));
+        }
+        if !mine.has(Perm::Bypass) && !self.has_room(channel) {
+            return self.error(id, &format!("{to} is full"));
+        }
+        if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
+            return self.error(id, "you are moving people too fast");
+        }
+        tracing::info!(target, by = id, channel, "client moved");
+        if let Err(e) = self.enter(target, channel) {
+            self.error(id, &format!("no room for {name} there: {}", e.message()));
         }
     }
 
