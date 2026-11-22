@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use t7_proto::{ChannelId, ChannelInfo, MAX_CHANNEL_DEPTH};
+use t7_proto::{ChannelId, ChannelInfo, ChannelKind, MAX_CHANNEL_DEPTH};
 
 /// Which part of the hovered row the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +38,7 @@ pub struct DropTarget {
 /// Why the server would refuse a drop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
+    CategoryPlacement,
     IntoItself,
     PermanentUnderTemporary,
     TooDeep,
@@ -47,6 +48,7 @@ pub enum Refusal {
 impl Refusal {
     pub fn message(self) -> String {
         match self {
+            Refusal::CategoryPlacement => "Categories stay at the top level".into(),
             Refusal::IntoItself => "A channel can't go inside itself".into(),
             Refusal::PermanentUnderTemporary => "Permanent channels can't go inside a temporary one".into(),
             Refusal::TooDeep => format!("Channels nest at most {MAX_CHANNEL_DEPTH} levels deep"),
@@ -88,6 +90,9 @@ pub fn drop_target(
     };
 
     if let Some(p) = parent {
+        if moving.kind == ChannelKind::Category {
+            return Outcome::NotAllowed(Refusal::CategoryPlacement);
+        }
         if is_within(channels, p, dragged) {
             return Outcome::NotAllowed(Refusal::IntoItself);
         }
@@ -148,9 +153,9 @@ fn depth(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
     depth
 }
 
-/// Levels in the subtree under and including `id`.
 fn height(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
-    1 + children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0)
+    let below = children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0);
+    (1 + below).max(channels.get(&id).map_or(1, |c| c.kind.levels_including_rooms()))
 }
 
 #[cfg(test)]
@@ -168,8 +173,10 @@ mod tests {
             temporary: false,
             has_password: false,
             default: false,
-            creator: None,
+            owner: None,
             moderators: Vec::new(),
+            kind: ChannelKind::Voice,
+            overrides: Vec::new(),
         }
     }
 
@@ -254,6 +261,24 @@ mod tests {
         let mut t = tree();
         t.insert(7, ch(7, Some(2), 1, "afk"));
         assert_eq!(drop_target(&t, 5, 2, Zone::Into), Outcome::NotAllowed(Refusal::NameTaken));
+    }
+
+    #[test]
+    fn categories_stay_at_the_top_and_take_channels_in() {
+        let mut t = tree();
+        t.get_mut(&5).unwrap().kind = ChannelKind::Category;
+        assert_eq!(drop_target(&t, 5, 3, Zone::Before), Outcome::NotAllowed(Refusal::CategoryPlacement));
+        assert_eq!(drop_target(&t, 5, 1, Zone::Into), Outcome::NotAllowed(Refusal::CategoryPlacement));
+        assert_eq!(drop_target(&t, 5, 1, Zone::Before), to(None, 0));
+        assert_eq!(drop_target(&t, 6, 5, Zone::Into), to(Some(5), 0));
+    }
+
+    #[test]
+    fn a_lobby_keeps_a_level_for_its_rooms() {
+        let mut t = tree();
+        t.get_mut(&6).unwrap().kind = ChannelKind::Lobby;
+        assert_eq!(drop_target(&t, 6, 3, Zone::Into), Outcome::NotAllowed(Refusal::TooDeep));
+        assert_eq!(drop_target(&t, 6, 2, Zone::Into), to(Some(2), 1));
     }
 
     #[test]

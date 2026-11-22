@@ -8,6 +8,7 @@ use t7_proto::identity::IdentityKey;
 use t7_proto::tls::Fingerprint;
 
 use crate::audio::AudioSettings;
+use crate::net::ServerKey;
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
 #[serde(default)]
@@ -18,8 +19,9 @@ pub struct Settings {
     pub recent: Vec<Recent>,
     /// Per-person volume by nickname; only values other than 100% are kept.
     pub user_volumes: std::collections::BTreeMap<String, f32>,
-    /// Certificate fingerprint per `net::canonical_address`, pinned on first connect.
-    pub server_certs: std::collections::BTreeMap<String, Fingerprint>,
+    /// Certificate fingerprint per server, pinned on first connect.
+    pub server_certs: std::collections::BTreeMap<ServerKey, Fingerprint>,
+    pub folded: std::collections::BTreeMap<ServerKey, std::collections::BTreeSet<String>>,
     /// Made on the first connect.
     pub identity_key: Option<IdentityKey>,
 }
@@ -115,7 +117,8 @@ mod tests {
             audio: AudioSettings { ptt_key: Some(crate::audio::PttKey { vk: 0x56 }), ..Default::default() },
             recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
             user_volumes: [("Some One".to_owned(), 0.5)].into(),
-            server_certs: [("1.2.3.4:9988".to_owned(), Fingerprint([0xab; 32]))].into(),
+            server_certs: [(ServerKey::of("1.2.3.4"), Fingerprint([0xab; 32]))].into(),
+            folded: [(ServerKey::of("1.2.3.4"), ["Games".to_owned()].into())].into(),
             identity_key: Some(new_identity_key()),
         };
         let text = toml::to_string(&s).unwrap();

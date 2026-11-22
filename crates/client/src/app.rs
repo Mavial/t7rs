@@ -6,17 +6,18 @@ use egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, text::LayoutJob, vec2,
 };
 use t7_proto::model::ServerView;
-use t7_proto::perms::{Perm, Perms, Rank, RoleChange, RoleId, Roles, Scope};
+use t7_proto::perms::{Override, Perm, Perms, Rank, RoleChange, RoleId, Roles, Scope, Setting};
 use t7_proto::tls::Fingerprint;
 use t7_proto::{
-    BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason, MAX_CHANNEL_DEPTH,
-    MAX_CHANNEL_NAME_LEN, MAX_CHANNEL_TOPIC_LEN, MAX_REASON_LEN, MAX_ROLE_NAME_LEN, PasswordChange, S2C, TextTarget,
+    BanInfo, C2S, ChannelId, ChannelInfo, ChannelKind, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason,
+    MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN, MAX_CHANNEL_TOPIC_LEN, MAX_REASON_LEN, MAX_ROLE_NAME_LEN, PasswordChange,
+    S2C, Speech, TextTarget,
 };
 
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
 use crate::channel_drop::{self, DropTarget, Outcome, Zone};
 use crate::icons::{self, Icon};
-use crate::net::{self, Ended, Net, NetEvent, SessionId};
+use crate::net::{Ended, Net, NetEvent, ServerKey, SessionId};
 use crate::ptt;
 use crate::settings::{self, Recent, Settings};
 use crate::sounds::{self, Pack, Resolved, Sound};
@@ -24,6 +25,44 @@ use crate::theme::{self, Btn};
 
 #[cfg(test)]
 mod snapshot;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_sends_only_the_roles_whose_settings_changed() {
+        let view = Perms::of(&[Perm::View]);
+        let saved = [
+            Override::denying(RoleId::EVERYONE, view),
+            Override::allowing(RoleId::MODERATOR, view),
+            Override::allowing(RoleId::ADMIN, view),
+        ];
+        let mut form = ChannelForm {
+            editing: Some(4),
+            parent: None,
+            kind: ChannelKind::Voice,
+            tab: FormTab::Permissions,
+            name: "Staff".into(),
+            topic: String::new(),
+            limited: false,
+            limit: 5,
+            had_password: false,
+            protected: false,
+            password: String::new(),
+            temporary: false,
+            focused: false,
+            overrides: saved.to_vec(),
+            permissions_role: RoleId::EVERYONE,
+        };
+        assert_eq!(form.override_changes(4, &saved), []);
+        let dj = Override::allowing(RoleId(7), Perms::of(&[Perm::Speak]));
+        form.overrides = vec![saved[0], saved[2], dj];
+        let set = |o: Override| C2S::SetOverride { channel: 4, role: o.role, allow: o.allow(), deny: o.deny() };
+        let cleared = Override::inheriting(RoleId::MODERATOR);
+        assert_eq!(form.override_changes(4, &saved), [set(cleared), set(dj)]);
+    }
+}
 
 const MAX_LINES: usize = 1000;
 /// Width of the recent-server cards and the button above them.
@@ -45,7 +84,9 @@ enum Conn {
         address: String,
         password: String,
     },
-    Connected,
+    Connected {
+        server: ServerKey,
+    },
 }
 
 enum LineKind {
@@ -100,12 +141,17 @@ enum TreeAction {
     SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
     Kick { target: ClientId, from_server: bool },
     Ban(ClientId),
+    ServerMute { target: ClientId, muted: bool },
     ServerSettings,
     SetRole { identity: Identity, role: RoleId, held: bool },
+    MoveMember { target: ClientId, channel: ChannelId },
+    Fold(String),
 }
 
 /// Payload while dragging yourself onto another channel.
 struct DragSelf;
+
+struct DragMember(ClientId);
 
 struct DragChannel(ChannelId);
 
@@ -203,6 +249,8 @@ enum ChannelDialog {
 struct ChannelForm {
     editing: Option<ChannelId>,
     parent: Option<ChannelId>,
+    kind: ChannelKind,
+    tab: FormTab,
     name: String,
     topic: String,
     limited: bool,
@@ -213,9 +261,26 @@ struct ChannelForm {
     password: String,
     temporary: bool,
     focused: bool,
+    overrides: Vec<Override>,
+    permissions_role: RoleId,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormTab {
+    Channel,
+    Permissions,
 }
 
 impl ChannelForm {
+    fn override_changes(&self, channel: ChannelId, saved: &[Override]) -> Vec<C2S> {
+        let of = |list: &[Override], role| {
+            list.iter().find(|o| o.role == role).copied().unwrap_or(Override::inheriting(role))
+        };
+        let roles: std::collections::BTreeSet<RoleId> = self.overrides.iter().chain(saved).map(|o| o.role).collect();
+        let changed = roles.into_iter().map(|role| of(&self.overrides, role)).filter(|o| *o != of(saved, o.role));
+        changed.map(|o| C2S::SetOverride { channel, role: o.role, allow: o.allow(), deny: o.deny() }).collect()
+    }
+
     fn settings(&self) -> ChannelSettings {
         let password = if self.had_password && !self.protected {
             PasswordChange::Remove
@@ -353,7 +418,7 @@ impl App {
             return;
         }
         self.settings.nickname.clone_from(&nickname);
-        let pinned = self.settings.server_certs.get(&net::canonical_address(&address)).copied();
+        let pinned = self.settings.server_certs.get(&ServerKey::of(&address)).copied();
         let login_password = Some(password.clone()).filter(|p| !p.is_empty());
         let key = self.settings.identity_key.get_or_insert_with(settings::new_identity_key).clone();
         self.session = self.net.connect(address.clone(), nickname, login_password, pinned, key);
@@ -393,6 +458,8 @@ impl App {
         self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
             editing: None,
             parent,
+            kind: ChannelKind::Voice,
+            tab: FormTab::Channel,
             name: String::new(),
             topic: String::new(),
             limited: false,
@@ -402,14 +469,20 @@ impl App {
             password: String::new(),
             temporary: !permanent || parent_temporary,
             focused: false,
+            overrides: Vec::new(),
+            permissions_role: RoleId::EVERYONE,
         }));
     }
 
     fn open_edit_channel(&mut self, channel: ChannelId) {
-        let Some(ch) = self.view.as_ref().and_then(|v| v.channels.get(&channel)) else { return };
+        let Some(view) = &self.view else { return };
+        let Some(ch) = view.channels.get(&channel) else { return };
+        let tab = if view.may_rename(channel) { FormTab::Channel } else { FormTab::Permissions };
         self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
             editing: Some(channel),
             parent: ch.parent,
+            kind: ch.kind,
+            tab,
             name: ch.name.clone(),
             topic: ch.topic.clone(),
             limited: ch.max_clients.is_some(),
@@ -419,6 +492,8 @@ impl App {
             password: String::new(),
             temporary: ch.temporary,
             focused: false,
+            overrides: ch.overrides.clone(),
+            permissions_role: RoleId::EVERYONE,
         }));
     }
 
@@ -437,6 +512,17 @@ impl App {
         self.channel_dialog = Some(ChannelDialog::Delete { channel, name: ch.name.clone(), occupants });
     }
 
+    fn toggle_folded(&mut self, name: String) {
+        let Conn::Connected { server } = &self.conn else { return };
+        let folded = self.settings.folded.entry(server.clone()).or_default();
+        if !folded.remove(&name) {
+            folded.insert(name);
+        }
+        if folded.is_empty() {
+            self.settings.folded.remove(server);
+        }
+    }
+
     /// Moves a channel one place up (`-1`) or down (`+1`) among its siblings.
     fn shift_channel(&mut self, channel: ChannelId, delta: i32) {
         let Some(view) = &self.view else { return };
@@ -452,7 +538,7 @@ impl App {
         let mic_off = |s: ClientStatus| s.muted || s.deafened;
         let was_off = mic_off(self.settings.status);
         self.settings.status = status;
-        if matches!(self.conn, Conn::Connected) {
+        if matches!(self.conn, Conn::Connected { .. }) {
             self.net.send(C2S::SetStatus(status));
             match (was_off, mic_off(status)) {
                 (false, true) => self.sound(Sound::MicMuted),
@@ -460,6 +546,10 @@ impl App {
                 _ => {}
             }
         }
+    }
+
+    fn my_speech(&self) -> Speech {
+        self.view.as_ref().and_then(ServerView::me).map_or(Speech::Allowed, |me| me.speech)
     }
 
     fn sound(&self, sound: Sound) {
@@ -581,7 +671,7 @@ impl App {
 
     fn send_chat(&mut self) {
         let text = self.input.trim().to_owned();
-        if text.is_empty() || !matches!(self.conn, Conn::Connected) {
+        if text.is_empty() || !matches!(self.conn, Conn::Connected { .. }) {
             return;
         }
         let target = match self.tabs[self.active_tab].kind {
@@ -649,7 +739,7 @@ impl App {
                 NetEvent::Secured(s, fingerprint) if s == self.session => {
                     // Trust on first use: the first certificate seen at an address is pinned.
                     if let Conn::Connecting { address, .. } = &self.conn {
-                        self.settings.server_certs.entry(net::canonical_address(address)).or_insert(fingerprint);
+                        self.settings.server_certs.entry(ServerKey::of(address)).or_insert(fingerprint);
                     }
                 }
                 NetEvent::Closed(s, ended) if s == self.session => self.on_closed(ended),
@@ -672,7 +762,7 @@ impl App {
         };
         let kicked = self.kicked.take();
         let reason = kicked.clone().or(reason);
-        let was_connected = matches!(self.conn, Conn::Connected);
+        let was_connected = matches!(self.conn, Conn::Connected { .. });
         self.conn = Conn::Disconnected;
         self.view = None;
         self.ping = None;
@@ -704,6 +794,7 @@ impl App {
                     Conn::Connecting { address, .. } => address.clone(),
                     _ => String::new(),
                 };
+                let server_key = ServerKey::of(&address);
                 let recent = Recent { address, server_name: server.name.clone() };
                 self.settings.recent.retain(|r| r.address != recent.address);
                 self.settings.recent.insert(0, recent);
@@ -715,7 +806,7 @@ impl App {
                     self.apply_user_volume(c.id, &c.nickname);
                 }
                 self.view = Some(ServerView::new(your_id, server, channels, clients, permissions));
-                self.conn = Conn::Connected;
+                self.conn = Conn::Connected { server: server_key };
                 self.voice.connected_at = Some(Instant::now());
                 self.voice.seen = None;
                 self.tabs = base_tabs();
@@ -792,7 +883,42 @@ impl App {
                     self.sound(Sound::UserLeft);
                 }
             }
+            S2C::ClientShown(ref info) => {
+                self.apply_user_volume(info.id, &info.nickname);
+                let here = self.view.as_ref().and_then(ServerView::my_channel) == Some(info.channel);
+                let line = format!("{} joined the channel", info.nickname);
+                self.apply(&msg);
+                if here {
+                    self.push(1, LineKind::System, line);
+                    self.sound(Sound::UserJoined);
+                }
+            }
+            S2C::ClientHidden { id } => {
+                let Some(view) = &self.view else { return };
+                let Some(c) = view.clients.get(&id) else { return };
+                let (name, here) = (c.nickname.clone(), Some(c.channel) == view.my_channel());
+                self.apply(&msg);
+                if here {
+                    self.push(1, LineKind::System, format!("{name} left the channel"));
+                    self.sound(Sound::UserLeft);
+                }
+            }
             S2C::ClientStatus { .. } | S2C::Permissions(_) | S2C::Roles(_) => self.apply(&msg),
+            S2C::ClientSpeech { id, speech } => {
+                let mine = self.view.as_ref().is_some_and(|v| v.my_id == id);
+                let was = self.my_speech();
+                self.apply(&msg);
+                let line = match (was, speech) {
+                    (_, Speech::ServerMuted) => Some("A moderator muted you on the server"),
+                    (Speech::ServerMuted, _) => Some("A moderator unmuted you on the server"),
+                    (_, Speech::NotHere) => Some("You can't speak in this channel"),
+                    (_, Speech::Allowed) => None,
+                };
+                if let Some(line) = line.filter(|_| mine) {
+                    let tab = self.active_tab;
+                    self.push(tab, LineKind::System, line);
+                }
+            }
             S2C::Channels(_) => {
                 self.apply(&msg);
                 self.sync_channel_tab_title();
@@ -884,7 +1010,7 @@ impl App {
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     match self.conn {
-                        Conn::Connected => {
+                        Conn::Connected { .. } => {
                             if ui.add(Btn::secondary("Disconnect")).clicked() {
                                 self.disconnect();
                             }
@@ -926,8 +1052,8 @@ impl App {
 
     fn status_pill(&self, ui: &mut egui::Ui) {
         let (color, text) = match &self.conn {
-            Conn::Connected if self.voice.blocked() => (theme::AMBER, "Connected · no voice".to_owned()),
-            Conn::Connected => {
+            Conn::Connected { .. } if self.voice.blocked() => (theme::AMBER, "Connected · no voice".to_owned()),
+            Conn::Connected { .. } => {
                 let ping = match self.voice.rtt.or(self.ping) {
                     Some(p) if p < Duration::from_millis(1) => " · <1 ms".to_owned(),
                     Some(p) => format!(" · {} ms", p.as_millis()),
@@ -979,8 +1105,12 @@ impl App {
                     ui.spacing_mut().item_spacing.y = 1.0;
                     ui.label(RichText::new(&nick).size(13.5).strong().color(theme::TEXT));
                     let s = self.settings.status;
-                    let (txt, col) = if !matches!(self.conn, Conn::Connected) {
+                    let (txt, col) = if !matches!(self.conn, Conn::Connected { .. }) {
                         ("Offline", theme::TEXT_FAINT)
+                    } else if self.my_speech() == Speech::ServerMuted {
+                        ("Muted on the server", theme::RED)
+                    } else if self.my_speech() == Speech::NotHere {
+                        ("Can't speak here", theme::AMBER)
                     } else if s.away {
                         ("Away", theme::AMBER)
                     } else if s.deafened {
@@ -1005,6 +1135,7 @@ impl App {
                     let (r, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
                     ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_STRONG));
                     let mut s = self.settings.status;
+                    let speech = self.my_speech();
                     let changed = toggle(ui, &mut s.away, Icon::Moon, Icon::Moon, theme::AMBER, "Away")
                         | toggle(
                             ui,
@@ -1014,14 +1145,26 @@ impl App {
                             theme::RED,
                             "Turn sound off (Ctrl+Shift+D)",
                         )
-                        | toggle(
-                            ui,
-                            &mut s.muted,
-                            Icon::Mic,
-                            Icon::MicOff,
-                            theme::RED,
-                            "Mute microphone (Ctrl+Shift+M)",
-                        );
+                        | match speech {
+                            Speech::Allowed => toggle(
+                                ui,
+                                &mut s.muted,
+                                Icon::Mic,
+                                Icon::MicOff,
+                                theme::RED,
+                                "Mute microphone (Ctrl+Shift+M)",
+                            ),
+                            Speech::NotHere => {
+                                let tip = "You can't speak in this channel";
+                                mic_held(ui, Icon::MicOff, theme::TEXT_FAINT, tip);
+                                false
+                            }
+                            Speech::ServerMuted => {
+                                let tip = "A moderator muted you on the server. Only a moderator can unmute you.";
+                                mic_held(ui, Icon::MicLocked, theme::RED, tip);
+                                false
+                            }
+                        };
                     if changed {
                         self.set_status(s);
                     }
@@ -1091,15 +1234,33 @@ impl App {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     let mine = view.my_channel();
                     let dragging_self = egui::DragAndDrop::has_payload_of_type::<DragSelf>(ui.ctx());
+                    let dragging_member = egui::DragAndDrop::payload::<DragMember>(ui.ctx()).map(|d| d.0);
                     let dragging_channel = egui::DragAndDrop::payload::<DragChannel>(ui.ctx()).map(|d| d.0);
                     let pointer = ui.input(|i| i.pointer.interact_pos());
-                    for &(depth, ch_id) in view.tree() {
+                    let folded = match &self.conn {
+                        Conn::Connected { server } => self.settings.folded.get(server),
+                        _ => None,
+                    };
+                    let mut in_folded_category = false;
+                    for (row, &(depth, ch_id)) in view.tree().iter().enumerate() {
                         let ch = &view.channels[&ch_id];
+                        let category = ch.kind == ChannelKind::Category;
+                        let lobby = ch.kind == ChannelKind::Lobby;
+                        if depth == 0 {
+                            in_folded_category = category && folded.is_some_and(|f| f.contains(&ch.name));
+                        } else if in_folded_category {
+                            continue;
+                        }
+                        if category && row > 0 {
+                            ui.add_space(6.0);
+                        }
                         let manages_it = manages(view, Scope::Channel(ch_id));
                         let may_rearrange = manages_it && may_renumber_children(view, ch.parent);
                         let clients = view.clients_in(ch_id);
                         let indent = depth as f32 * 18.0;
-                        let is_mine = mine == Some(ch_id);
+                        let row_stands_for =
+                            |channel| channel == ch_id || (in_folded_category && view.within(channel, ch_id));
+                        let is_mine = mine.is_some_and(row_stands_for);
                         let full = ch.max_clients.is_some_and(|m| clients.len() as u32 >= m);
 
                         let sense = if may_rearrange { Sense::click_and_drag() } else { Sense::click() };
@@ -1114,7 +1275,12 @@ impl App {
                             }
                             _ => None,
                         };
-                        let drop_hover = (dragging_self && resp.contains_pointer() && !is_mine)
+                        let member_drop = dragging_member.filter(|m| {
+                            let elsewhere = view.clients.get(m).is_some_and(|c| c.channel != ch_id);
+                            elsewhere && resp.contains_pointer() && !category && view.may_in(ch_id, Perm::MoveMembers)
+                        });
+                        let drop_hover = (dragging_self && resp.contains_pointer() && !is_mine && !category)
+                            || member_drop.is_some()
                             || matches!(channel_drop, Some((Zone::Into, Outcome::Move(_))));
                         let bg = if drop_hover {
                             theme::ACCENT_BG
@@ -1152,24 +1318,49 @@ impl App {
                             );
                         }
                         let icon_color = if is_mine { theme::ACCENT_TEXT } else { theme::TEXT_FAINT };
+                        let (icon, icon_size) = match (ch.kind, in_folded_category) {
+                            (ChannelKind::Voice, _) => (Icon::Speaker, 15.0),
+                            (ChannelKind::Lobby, _) => (Icon::SpeakerPlus, 15.0),
+                            (ChannelKind::Category, false) => (Icon::ChevronDown, 13.0),
+                            (ChannelKind::Category, true) => (Icon::ChevronRight, 13.0),
+                        };
                         icons::paint(
                             p,
                             egui::Rect::from_center_size(
                                 egui::pos2(rect.left() + indent + TREE_ICON_X, rect.center().y),
-                                vec2(15.0, 15.0),
+                                vec2(icon_size, icon_size),
                             ),
-                            Icon::Speaker,
+                            icon,
                             icon_color,
                         );
                         let name_color = if is_mine { theme::TEXT } else { theme::TEXT_DIM };
-                        let name_rect = p.text(
-                            egui::pos2(rect.left() + indent + TREE_TEXT_X, rect.center().y),
-                            Align2::LEFT_CENTER,
-                            &ch.name,
-                            FontId::proportional(13.5),
-                            name_color,
-                        );
+                        let name_rect = if category {
+                            p.text(
+                                egui::pos2(rect.left() + indent + TREE_TEXT_X, rect.center().y),
+                                Align2::LEFT_CENTER,
+                                ch.name.to_uppercase(),
+                                FontId::proportional(12.0),
+                                name_color,
+                            )
+                        } else {
+                            p.text(
+                                egui::pos2(rect.left() + indent + TREE_TEXT_X, rect.center().y),
+                                Align2::LEFT_CENTER,
+                                &ch.name,
+                                FontId::proportional(13.5),
+                                name_color,
+                            )
+                        };
                         let mut after = name_rect.right() + 6.0;
+                        let hidden = manages_it && view.hidden(ch_id);
+                        if hidden {
+                            let r = egui::Rect::from_center_size(
+                                egui::pos2(after + 7.0, rect.center().y),
+                                vec2(14.0, 14.0),
+                            );
+                            icons::paint(p, r, Icon::Eye, theme::TEXT_FAINT);
+                            after += 19.0;
+                        }
                         if ch.has_password {
                             let r = egui::Rect::from_center_size(
                                 egui::pos2(after + 6.0, rect.center().y),
@@ -1188,9 +1379,14 @@ impl App {
                             );
                         }
 
+                        let people = if in_folded_category && category {
+                            view.clients.values().filter(|c| row_stands_for(c.channel)).count()
+                        } else {
+                            clients.len()
+                        };
                         let count = match ch.max_clients {
-                            Some(m) => format!("{}/{}", clients.len(), m),
-                            None if !clients.is_empty() => clients.len().to_string(),
+                            Some(m) => format!("{people}/{m}"),
+                            None if people > 0 => people.to_string(),
                             None => String::new(),
                         };
                         if !count.is_empty() {
@@ -1205,9 +1401,18 @@ impl App {
                         }
 
                         // Releasing takes the payload whatever its type, so ask only for the one being dragged.
-                        if resp.double_clicked() || (dragging_self && resp.dnd_release_payload::<DragSelf>().is_some())
+                        if category {
+                            if resp.clicked() {
+                                action = Some(TreeAction::Fold(ch.name.clone()));
+                            }
+                        } else if resp.double_clicked()
+                            || (dragging_self && resp.dnd_release_payload::<DragSelf>().is_some())
                         {
                             join = Some(ch_id);
+                        } else if let Some(target) = member_drop
+                            && resp.dnd_release_payload::<DragMember>().is_some()
+                        {
+                            action = Some(TreeAction::MoveMember { target, channel: ch_id });
                         }
                         if may_rearrange {
                             resp.dnd_set_drag_payload(DragChannel(ch_id));
@@ -1238,20 +1443,31 @@ impl App {
                         if ch.temporary {
                             tip.push("Temporary: removed once everyone has left.".into());
                         }
+                        if lobby {
+                            tip.push("Join to open a room of your own in it.".into());
+                        }
+                        if hidden {
+                            tip.push("Hidden: only those allowed to view it see it.".into());
+                        }
                         let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip.join("\n")) };
                         resp.context_menu(|ui| {
-                            if ui.add_enabled(!is_mine && !full, egui::Button::new("Join channel")).clicked() {
-                                join = Some(ch_id);
-                                ui.close();
+                            if !category {
+                                let join_label = if lobby { "Open a room" } else { "Join channel" };
+                                if ui.add_enabled(!is_mine && !full, egui::Button::new(join_label)).clicked() {
+                                    join = Some(ch_id);
+                                    ui.close();
+                                }
+                                ui.separator();
                             }
-                            ui.separator();
                             let may_create = view.may_in(ch_id, Perm::CreateTemporary) || manages_it;
-                            if depth + 1 < MAX_CHANNEL_DEPTH && may_create && ui.button("Create sub-channel…").clicked()
-                            {
+                            let create = if category { "Create channel…" } else { "Create sub-channel…" };
+                            if depth + 1 < MAX_CHANNEL_DEPTH && may_create && ui.button(create).clicked() {
                                 action = Some(TreeAction::Create(Some(ch_id)));
                                 ui.close();
                             }
-                            if manages_it && ui.button("Edit channel…").clicked() {
+                            let edit = if category { "Edit category…" } else { "Edit channel…" };
+                            let may_edit = view.may_rename(ch_id) || view.may_in(ch_id, Perm::ManagePermissions);
+                            if may_edit && ui.button(edit).clicked() {
                                 action = Some(TreeAction::Edit(ch_id));
                                 ui.close();
                             }
@@ -1266,12 +1482,14 @@ impl App {
                             if view.may(Perm::ManageChannels)
                                 && !ch.default
                                 && !ch.temporary
+                                && ch.kind == ChannelKind::Voice
                                 && ui.button("Make default channel").clicked()
                             {
                                 action = Some(TreeAction::MakeDefault(ch_id));
                                 ui.close();
                             }
-                            if manages_it && !ch.default && ui.button("Delete channel…").clicked() {
+                            let delete = if category { "Delete category…" } else { "Delete channel…" };
+                            if manages_it && !ch.default && ui.button(delete).clicked() {
                                 action = Some(TreeAction::Delete(ch_id));
                                 ui.close();
                             }
@@ -1279,7 +1497,8 @@ impl App {
 
                         for c in clients {
                             let is_me = c.id == view.my_id;
-                            let sense = if is_me { Sense::click_and_drag() } else { Sense::click() };
+                            let movable = is_me || view.may_in(ch_id, Perm::MoveMembers);
+                            let sense = if movable { Sense::click_and_drag() } else { Sense::click() };
                             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), sense);
                             if resp.hovered() {
                                 ui.painter().rect_filled(
@@ -1312,7 +1531,9 @@ impl App {
                             } else {
                                 None
                             };
-                            if let Some((icon, color)) = badge {
+                            let owns_room = ch.temporary && ch.owner == Some(c.id);
+                            let room_badge = owns_room.then_some((Icon::Crown, theme::AMBER));
+                            for (icon, color) in badge.into_iter().chain(room_badge) {
                                 let r = egui::Rect::from_center_size(
                                     egui::pos2(name_end + 11.0, rect.center().y),
                                     vec2(12.0, 12.0),
@@ -1342,23 +1563,35 @@ impl App {
                                 );
                             }
                             let mut x = rect.right() - TREE_RIGHT_PAD - 7.0;
-                            for (on, icon, col) in [
-                                (c.status.away, Icon::Moon, theme::AMBER),
-                                (c.status.deafened, Icon::HeadphonesOff, theme::RED),
-                                (c.status.muted, Icon::MicOff, theme::RED),
-                            ] {
-                                if on {
-                                    let r =
-                                        egui::Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(14.0, 14.0));
-                                    icons::paint(p, r, icon, col);
-                                    x -= 18.0;
+                            let (mic, why) = match (c.status.muted, c.speech) {
+                                (_, Speech::ServerMuted) => {
+                                    (Some((Icon::MicLocked, theme::RED)), Some("Muted on the server"))
                                 }
+                                (true, _) => (Some((Icon::MicOff, theme::RED)), None),
+                                (false, Speech::NotHere) => {
+                                    (Some((Icon::MicOff, theme::TEXT_FAINT)), Some("Can't speak here"))
+                                }
+                                (false, Speech::Allowed) => (None, None),
+                            };
+                            let status = [
+                                c.status.away.then_some((Icon::Moon, theme::AMBER)),
+                                c.status.deafened.then_some((Icon::HeadphonesOff, theme::RED)),
+                                mic,
+                            ];
+                            for (icon, col) in status.into_iter().flatten() {
+                                let r = egui::Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(14.0, 14.0));
+                                icons::paint(p, r, icon, col);
+                                x -= 18.0;
                             }
 
-                            let resp = match &c.role {
-                                Some(role) => resp.on_hover_text(role),
-                                None => resp,
-                            };
+                            let titles: Vec<&str> = c
+                                .role
+                                .as_deref()
+                                .into_iter()
+                                .chain(owns_room.then_some("Owns this room"))
+                                .chain(why)
+                                .collect();
+                            let resp = if titles.is_empty() { resp } else { resp.on_hover_text(titles.join("\n")) };
                             if is_me {
                                 if resp.drag_started() {
                                     resp.dnd_set_drag_payload(DragSelf);
@@ -1370,6 +1603,12 @@ impl App {
                             } else {
                                 if resp.double_clicked() {
                                     private = Some(c.id);
+                                }
+                                if movable && resp.drag_started() {
+                                    resp.dnd_set_drag_payload(DragMember(c.id));
+                                }
+                                if resp.dragged() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                                 }
                                 resp.context_menu(|ui| {
                                     if ui.button("Send private message").clicked() {
@@ -1385,10 +1624,37 @@ impl App {
                                         (true, "Kick from server…", view.may(Perm::Kick)),
                                     ];
                                     let ban = view.may(Perm::Ban);
+                                    let mutes = view.may_in(ch_id, Perm::MuteMembers);
                                     let set_moderator = view.may_in(ch_id, Perm::ManagePermissions);
                                     let roles = view.roles.as_ref().filter(|_| view.may(Perm::ManageRoles));
-                                    if kicks.iter().any(|k| k.2) || ban || set_moderator || roles.is_some() {
+                                    if movable
+                                        || kicks.iter().any(|k| k.2)
+                                        || ban
+                                        || mutes
+                                        || set_moderator
+                                        || roles.is_some()
+                                    {
                                         ui.separator();
+                                    }
+                                    if movable {
+                                        ui.menu_button("Move to", |ui| {
+                                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                                for &(depth, to) in view.tree() {
+                                                    let Some(dest) = view.channels.get(&to) else { continue };
+                                                    if dest.kind == ChannelKind::Category {
+                                                        ui.label(RichText::new(dest.name.to_uppercase()).size(11.5));
+                                                        continue;
+                                                    }
+                                                    let label = format!("{}{}", "    ".repeat(depth), dest.name);
+                                                    let may = to != ch_id && view.may_in(to, Perm::MoveMembers);
+                                                    if ui.add_enabled(may, egui::Button::new(label)).clicked() {
+                                                        action =
+                                                            Some(TreeAction::MoveMember { target: c.id, channel: to });
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                        });
                                     }
                                     if let Some(roles) = roles {
                                         ui.menu_button("Roles", |ui| {
@@ -1414,6 +1680,14 @@ impl App {
                                     if ban && ui.button("Ban…").clicked() {
                                         action = Some(TreeAction::Ban(c.id));
                                         ui.close();
+                                    }
+                                    if mutes {
+                                        let muted = c.speech == Speech::ServerMuted;
+                                        let label = if muted { "Unmute on server" } else { "Mute on server" };
+                                        if ui.button(label).clicked() {
+                                            action = Some(TreeAction::ServerMute { target: c.id, muted: !muted });
+                                            ui.close();
+                                        }
                                     }
                                     if set_moderator {
                                         let moderator = ch.moderators.contains(&c.identity);
@@ -1483,9 +1757,14 @@ impl App {
                     }
                     Some(TreeAction::Kick { target, from_server }) => self.open_kick(target, from_server),
                     Some(TreeAction::Ban(target)) => self.open_ban(target),
+                    Some(TreeAction::ServerMute { target, muted }) => self.net.send(C2S::ServerMute { target, muted }),
                     Some(TreeAction::ServerSettings) => self.open_server_settings(),
                     Some(TreeAction::SetRole { identity, role, held }) => {
                         self.net.send(C2S::ChangeRoles(RoleChange::Assign { identity, role, held }));
+                    }
+                    Some(TreeAction::Fold(name)) => self.toggle_folded(name),
+                    Some(TreeAction::MoveMember { target, channel }) => {
+                        self.net.send(C2S::MoveMember { target, channel });
                     }
                     None => {}
                 }
@@ -1674,9 +1953,10 @@ impl App {
     /// Keeps the audio engine and its shared state in line with the app state.
     fn drive_audio(&mut self, ctx: &egui::Context) {
         let s = self.settings.status;
+        let silenced = self.my_speech() != Speech::Allowed;
         let v = &mut self.voice;
-        v.shared.set_status(s.muted, s.deafened);
-        let connected = matches!(self.conn, Conn::Connected);
+        v.shared.set_status(s.muted || silenced, s.deafened);
+        let connected = matches!(self.conn, Conn::Connected { .. });
         // A last sound (like "disconnected") finishes before the devices close.
         let finishing = v.engine.is_some() && v.playback.effects_active();
         let wanted = connected || self.audio_dialog.is_some() || finishing;
@@ -1698,7 +1978,7 @@ impl App {
         if v.shared.transmitting() || !v.playback.speaking().is_empty() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
-        if matches!(self.conn, Conn::Connected) && !v.reachable() {
+        if matches!(self.conn, Conn::Connected { .. }) && !v.reachable() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         if let Some(err) = v.shared.take_error() {
@@ -1708,6 +1988,7 @@ impl App {
     }
 
     fn audio_dialog(&mut self, ctx: &egui::Context) {
+        let speech = self.my_speech();
         let Some(dlg) = &mut self.audio_dialog else { return };
         let mut a: AudioSettings = self.settings.audio.clone();
         let mut restart = false;
@@ -1738,6 +2019,11 @@ impl App {
                 row(ui, "Speakers", |ui| restart |= device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs));
 
                 section(ui, "Transmit");
+                match speech {
+                    Speech::Allowed => {}
+                    Speech::NotHere => hint(ui, "You can't speak in this channel, so nothing is sent."),
+                    Speech::ServerMuted => hint(ui, "A moderator muted you on the server, so nothing is sent."),
+                }
                 row(ui, "Mode", |ui| {
                     theme::segmented(
                         ui,
@@ -2127,7 +2413,7 @@ impl App {
         });
         if trust {
             let change = self.cert_change.take().expect("dialog open");
-            self.settings.server_certs.insert(net::canonical_address(&change.address), change.presented);
+            self.settings.server_certs.insert(ServerKey::of(&change.address), change.presented);
             let nickname = self.settings.nickname.clone();
             self.connect(change.address, nickname, change.password);
         } else if cancel || modal.should_close() {
@@ -2158,6 +2444,9 @@ impl App {
             ChannelDialog::Form(f) => f.editing,
             _ => None,
         };
+        let may_rename = editing.is_none_or(|id| view.is_some_and(|v| v.may_rename(id)));
+        let may_manage = editing.is_none_or(|id| view.is_some_and(|v| v.may_in(id, Perm::ManageChannels)));
+        let saved_overrides = view.zip(editing).and_then(|(v, id)| v.channels.get(&id)).map(|c| c.overrides.clone());
         let moderators: Option<Vec<(Identity, Option<String>)>> = view
             .zip(editing)
             .filter(|(v, id)| v.may_in(*id, Perm::ManagePermissions))
@@ -2178,80 +2467,61 @@ impl App {
             .as_ref()
             .and_then(|v| v.channels.values().find(|c| c.default).map(|c| c.name.clone()))
             .unwrap_or_else(|| "the default channel".into());
+        let kinds: Vec<(ChannelKind, &str)> = match (view, editing) {
+            (Some(v), None) if may_create_permanent => {
+                let above = parent.and_then(|p| v.tree().iter().find(|(_, id)| *id == p));
+                let parent_depth = above.map_or(0, |(d, _)| d + 1);
+                let lobby_fits = parent_depth + ChannelKind::Lobby.levels_including_rooms() <= MAX_CHANNEL_DEPTH;
+                let in_temporary = parent.and_then(|p| v.channels.get(&p)).is_some_and(|c| c.temporary);
+                let lobby = (lobby_fits && !in_temporary).then_some((ChannelKind::Lobby, "Lobby"));
+                let category = parent.is_none().then_some((ChannelKind::Category, "Category"));
+                [Some((ChannelKind::Voice, "Channel")), lobby, category].into_iter().flatten().collect()
+            }
+            _ => Vec::new(),
+        };
 
-        let mut send: Option<C2S> = None;
+        let mut send: Vec<C2S> = Vec::new();
         let mut close = false;
         let modal = theme::modal("channel-dialog").show(ctx, |ui| {
-            ui.set_width(380.0);
+            ui.set_width(if moderators.is_some() { 420.0 } else { 380.0 });
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             match dialog {
                 ChannelDialog::Form(form) => {
+                    let (noun, general) = match form.kind {
+                        ChannelKind::Voice => ("channel", "Channel"),
+                        ChannelKind::Category => ("category", "Category"),
+                        ChannelKind::Lobby => ("lobby", "Lobby"),
+                    };
                     let title = match (&form.editing, &parent_name) {
                         (Some(_), _) => format!("Edit {}", form.name),
-                        (None, Some(parent)) => format!("New channel in {parent}"),
-                        (None, None) => "New channel".to_owned(),
+                        (None, Some(parent)) => format!("New {noun} in {parent}"),
+                        (None, None) => format!("New {noun}"),
                     };
                     dialog_header(ui, &title, "");
-                    field_label(ui, "Name");
-                    let name = ui.add(text_input(&mut form.name).char_limit(MAX_CHANNEL_NAME_LEN));
-                    if !form.focused {
-                        name.request_focus();
-                        form.focused = true;
+                    if moderators.is_some() {
+                        theme::segmented(
+                            ui,
+                            &mut form.tab,
+                            &[(FormTab::Channel, general), (FormTab::Permissions, "Permissions")],
+                        );
+                        ui.add_space(14.0);
+                    } else if kinds.len() > 1 {
+                        theme::segmented(ui, &mut form.kind, &kinds);
+                        ui.add_space(14.0);
                     }
-                    ui.add_space(8.0);
-                    field_label(ui, "Topic (optional)");
-                    ui.add(text_input(&mut form.topic).char_limit(MAX_CHANNEL_TOPIC_LEN));
-                    ui.add_space(8.0);
-                    if !form.had_password || form.protected {
-                        let label = if form.had_password {
-                            "New password (empty keeps the current one)"
-                        } else {
-                            "Password (optional)"
-                        };
-                        field_label(ui, label);
-                        ui.add(text_input(&mut form.password).password(true));
-                        ui.add_space(8.0);
-                    }
-                    if form.had_password {
-                        theme::switch(ui, &mut form.protected, "Password protected");
-                    }
-                    theme::switch(ui, &mut form.limited, "Limit how many can join");
-                    if form.limited {
-                        row(ui, "Up to", |ui| {
-                            ui.add(egui::DragValue::new(&mut form.limit).range(1..=1000).suffix(" people"));
-                        });
-                    }
-                    if form.editing.is_none() {
-                        if may_create_permanent {
-                            theme::switch(ui, &mut form.temporary, "Temporary")
-                                .on_hover_text("Removed once everyone has left");
-                        } else {
-                            hint(ui, "Temporary: removed once everyone has left. You'll move into it.");
+                    match (form.tab, view.zip(form.editing)) {
+                        (FormTab::Permissions, Some((view, channel))) => {
+                            permissions_tab(ui, view, channel, form);
+                            if let Some(list) = &moderators {
+                                moderator_list(ui, form.kind, list, &mut unmoderate);
+                            }
                         }
-                    }
-                    if let Some(list) = &moderators {
-                        section(ui, "Moderators");
-                        if list.is_empty() {
-                            hint(ui, "Nobody yet. Right-click someone in this channel to make them a moderator.");
-                        }
-                        for (identity, nickname) in list {
-                            ui.horizontal(|ui| {
-                                ui.set_min_height(28.0);
-                                if let Some(name) = nickname {
-                                    ui.label(RichText::new(name).color(theme::TEXT));
-                                } else {
-                                    ui.label(
-                                        RichText::new(identity.to_string())
-                                            .font(FontId::monospace(12.5))
-                                            .color(theme::TEXT_DIM),
-                                    );
-                                    ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT));
+                        _ => {
+                            ui.add_enabled_ui(may_rename, |ui| {
+                                channel_fields(ui, form, may_create_permanent, may_manage);
+                                if may_rename && !may_manage {
+                                    hint(ui, "As its moderator you can change the name and topic.");
                                 }
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.add(Btn::secondary("Remove").small()).clicked() {
-                                        unmoderate = Some(*identity);
-                                    }
-                                });
                             });
                         }
                     }
@@ -2260,10 +2530,21 @@ impl App {
                         let label = if form.editing.is_some() { "Save" } else { "Create" };
                         if ui.add_enabled(ready, Btn::primary(label)).clicked() || (ready && enter) {
                             let settings = form.settings();
-                            send = Some(match form.editing {
-                                Some(id) => C2S::EditChannel { id, settings },
-                                None => C2S::CreateChannel { parent: form.parent, settings, temporary: form.temporary },
-                            });
+                            match form.editing {
+                                Some(id) => {
+                                    if may_rename {
+                                        send.push(C2S::EditChannel { id, settings });
+                                    }
+                                    let saved = saved_overrides.as_deref().unwrap_or_default();
+                                    send.extend(form.override_changes(id, saved));
+                                }
+                                None => send.push(C2S::CreateChannel {
+                                    parent: form.parent,
+                                    settings,
+                                    temporary: form.temporary && form.kind == ChannelKind::Voice,
+                                    kind: form.kind,
+                                }),
+                            }
                         }
                         if ui.add(Btn::secondary("Cancel")).clicked() {
                             close = true;
@@ -2279,7 +2560,7 @@ impl App {
                     }
                     dialog_footer(ui, |ui| {
                         if ui.add(Btn::primary("Join")).clicked() || enter {
-                            send = Some(C2S::JoinChannel { channel: *channel, password: Some(password.clone()) });
+                            send.push(C2S::JoinChannel { channel: *channel, password: Some(password.clone()) });
                         }
                         if ui.add(Btn::secondary("Cancel")).clicked() {
                             close = true;
@@ -2296,7 +2577,7 @@ impl App {
                     dialog_header(ui, &format!("Delete {name}?"), &text);
                     dialog_footer(ui, |ui| {
                         if ui.add(Btn::danger("Delete")).clicked() {
-                            send = Some(C2S::DeleteChannel { id: *channel });
+                            send.push(C2S::DeleteChannel { id: *channel });
                         }
                         if ui.add(Btn::secondary("Cancel")).clicked() {
                             close = true;
@@ -2318,7 +2599,7 @@ impl App {
                     let ready = !token.trim().is_empty();
                     dialog_footer(ui, |ui| {
                         if ui.add_enabled(ready, Btn::primary("Claim")).clicked() || (ready && enter) {
-                            send = Some(C2S::ClaimOwnership { token: token.trim().to_owned() });
+                            send.push(C2S::ClaimOwnership { token: token.trim().to_owned() });
                         }
                         if ui.add(Btn::secondary("Cancel")).clicked() {
                             close = true;
@@ -2330,13 +2611,193 @@ impl App {
         if let (Some(identity), Some(channel)) = (unmoderate, editing) {
             self.net.send(C2S::SetModerator { channel, identity, moderator: false });
         }
-        if let Some(msg) = send {
-            self.net.send(msg);
+        if !send.is_empty() {
+            for msg in send {
+                self.net.send(msg);
+            }
             close = true;
         }
         if close || modal.should_close() {
             self.channel_dialog = None;
         }
+    }
+}
+
+/// a category has only the first two, and only those who manage the channel
+/// change the last two.
+fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, may_create_permanent: bool, may_manage: bool) {
+    field_label(ui, "Name");
+    let name = ui.add(text_input(&mut form.name).char_limit(MAX_CHANNEL_NAME_LEN));
+    if !form.focused {
+        name.request_focus();
+        form.focused = true;
+    }
+    ui.add_space(8.0);
+    field_label(ui, "Topic (optional)");
+    ui.add(text_input(&mut form.topic).char_limit(MAX_CHANNEL_TOPIC_LEN));
+    ui.add_space(8.0);
+    match form.kind {
+        ChannelKind::Voice => {}
+        ChannelKind::Category => {
+            return hint(ui, "A heading for the channels in it, at the top of the tree. Nobody joins it.");
+        }
+        ChannelKind::Lobby => {
+            return hint(ui, "Joining it opens a temporary room in it that you own. Nobody stays in the lobby itself.");
+        }
+    }
+    ui.add_enabled_ui(may_manage, |ui| {
+        if !form.had_password || form.protected {
+            let label =
+                if form.had_password { "New password (empty keeps the current one)" } else { "Password (optional)" };
+            field_label(ui, label);
+            ui.add(text_input(&mut form.password).password(true));
+            ui.add_space(8.0);
+        }
+        if form.had_password {
+            theme::switch(ui, &mut form.protected, "Password protected");
+        }
+        theme::switch(ui, &mut form.limited, "Limit how many can join");
+        if form.limited {
+            row(ui, "Up to", |ui| {
+                ui.add(egui::DragValue::new(&mut form.limit).range(1..=1000).suffix(" people"));
+            });
+        }
+    });
+    if form.editing.is_none() {
+        if may_create_permanent {
+            theme::switch(ui, &mut form.temporary, "Temporary").on_hover_text("Removed once everyone has left");
+        } else {
+            hint(ui, "Temporary: removed once everyone has left. You'll move into it.");
+        }
+    }
+}
+
+fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, form: &mut ChannelForm) {
+    let (Some(roles), Some(saved)) = (&view.roles, view.channels.get(&channel)) else {
+        ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
+        return;
+    };
+    if form.permissions_role != RoleId::EVERYONE && roles.role(form.permissions_role).is_none() {
+        form.permissions_role = RoleId::EVERYONE;
+    }
+    let mine = view.my_rank_in(channel);
+    let name = |role: RoleId| roles.role(role).map_or("Everyone", |r| r.name.as_str());
+    row(ui, "Role", |ui| {
+        egui::ComboBox::from_id_salt("override-role").selected_text(name(form.permissions_role)).width(220.0).show_ui(
+            ui,
+            |ui| {
+                for role in roles.ranked.iter().map(|r| r.id).chain([RoleId::EVERYONE]) {
+                    let set = form.overrides.iter().any(|o| o.role == role);
+                    let label = if set { format!("{}  •", name(role)) } else { name(role).to_owned() };
+                    ui.selectable_value(&mut form.permissions_role, role, label);
+                }
+            },
+        );
+    });
+    let editable = mine > roles.height(form.permissions_role);
+    ui.add_space(4.0);
+    if editable {
+        hint(ui, "A dash inherits from the channel above. The grey word is what that gives.");
+    } else {
+        hint(ui, "Only roles below yours can be changed.");
+    }
+    ui.add_space(6.0);
+
+    let here = ChannelInfo { overrides: form.overrides.clone(), ..saved.clone() };
+    let inherited = roles.inherited(form.permissions_role, &here, view);
+    let before = form.overrides.iter().find(|o| o.role == form.permissions_role).copied();
+    let mut set = before.unwrap_or(Override::inheriting(form.permissions_role));
+    ui.add_enabled_ui(editable, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for perm in Perms::CHANNEL.iter() {
+            let mut setting = set.get(perm);
+            ui.horizontal(|ui| {
+                ui.set_min_height(30.0);
+                ui.label(RichText::new(perm_label(perm)).color(theme::TEXT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    tri_state(ui, &mut setting, perm);
+                    if setting == Setting::Inherit {
+                        let gives = if inherited.has(perm) { "allowed" } else { "denied" };
+                        ui.label(RichText::new(gives).size(11.5).color(theme::TEXT_FAINT));
+                    }
+                });
+            });
+            set.set(perm, setting);
+        }
+    });
+    if Some(set) != before && !(before.is_none() && set.is_empty()) {
+        form.overrides.retain(|o| o.role != form.permissions_role);
+        if !set.is_empty() {
+            form.overrides.push(set);
+        }
+    }
+}
+
+fn tri_state(ui: &mut egui::Ui, setting: &mut Setting, perm: Perm) {
+    let options = [
+        (Setting::Deny, Icon::Cross, theme::RED, "Deny"),
+        (Setting::Inherit, Icon::Dash, theme::TEXT, "Inherit"),
+        (Setting::Allow, Icon::Check, theme::GREEN, "Allow"),
+    ];
+    let segment = vec2(30.0, 22.0);
+    let (track, _) = ui.allocate_exact_size(vec2(segment.x * 3.0 + 4.0, segment.y + 4.0), Sense::hover());
+    ui.painter().rect(
+        track,
+        CornerRadius::same(theme::RADIUS),
+        theme::SURFACE,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    for (i, (option, icon, color, tip)) in options.into_iter().enumerate() {
+        let min = egui::pos2(track.left() + 2.0 + segment.x * i as f32, track.top() + 2.0);
+        let rect = egui::Rect::from_min_size(min, segment);
+        let resp = ui.interact(rect, ui.scope_id().with((perm.key(), i)), Sense::click()).on_hover_text(tip);
+        if resp.clicked() {
+            *setting = option;
+        }
+        let selected = *setting == option;
+        let fill = match (selected, option) {
+            (true, Setting::Inherit) => theme::SURFACE_ACTIVE,
+            (true, _) => color.gamma_multiply(0.2),
+            (false, _) if resp.hovered() => theme::SURFACE_HOVER,
+            (false, _) => Color32::TRANSPARENT,
+        };
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::same(theme::RADIUS - 2), fill);
+        let ink = if selected { color } else { theme::TEXT_FAINT };
+        icons::paint(p, egui::Rect::from_center_size(rect.center(), vec2(14.0, 14.0)), icon, ink);
+    }
+}
+
+fn moderator_list(
+    ui: &mut egui::Ui,
+    kind: ChannelKind,
+    list: &[(Identity, Option<String>)],
+    unmoderate: &mut Option<Identity>,
+) {
+    let joinable = kind != ChannelKind::Category;
+    if !joinable && list.is_empty() {
+        return;
+    }
+    section(ui, "Moderators");
+    if list.is_empty() {
+        hint(ui, "Nobody yet. Right-click someone in this channel to make them a moderator.");
+    }
+    for (identity, nickname) in list {
+        ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
+            if let Some(name) = nickname {
+                ui.label(RichText::new(name).color(theme::TEXT));
+            } else {
+                ui.label(RichText::new(identity.to_string()).font(FontId::monospace(12.5)).color(theme::TEXT_DIM));
+                ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(Btn::secondary("Remove").small()).clicked() {
+                    *unmoderate = Some(*identity);
+                }
+            });
+        });
     }
 }
 
@@ -2645,6 +3106,13 @@ fn tab_button(ui: &mut egui::Ui, label: &str, active: bool, unread: u32) -> egui
         p.galley(pill.center() - count.size() / 2.0, count, theme::ON_ACCENT);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn mic_held(ui: &mut egui::Ui, icon: Icon, color: Color32, tip: &str) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), theme::SURFACE);
+    icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
+    resp.on_hover_text(tip);
 }
 
 /// An icon toggle button, tinted with `on_color` while on (muted, deafened...).

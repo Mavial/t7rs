@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use t7_proto::identity::IdentityKey;
 use t7_proto::tls::{self, ConnectError, Fingerprint};
 use t7_proto::voice::{self, ToClient, ToServer};
@@ -196,8 +197,14 @@ async fn run_session(
 }
 
 /// The key under which a server's certificate is pinned: one per host and port.
-pub fn canonical_address(address: &str) -> String {
-    with_default_port(address).to_ascii_lowercase()
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ServerKey(String);
+
+impl ServerKey {
+    pub fn of(address: &str) -> ServerKey {
+        ServerKey(with_default_port(address).to_ascii_lowercase())
+    }
 }
 
 /// Adds the default port when the user typed just a host name.
@@ -391,7 +398,7 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_address, with_default_port};
+    use super::{ServerKey, with_default_port};
 
     #[test]
     fn default_port() {
@@ -403,8 +410,7 @@ mod tests {
 
     #[test]
     fn one_pin_per_server() {
-        assert_eq!(canonical_address(" Example.COM "), "example.com:9988");
-        assert_eq!(canonical_address("example.com:9988"), "example.com:9988");
-        assert_ne!(canonical_address("example.com:9989"), "example.com:9988");
+        assert_eq!(ServerKey::of(" Example.COM "), ServerKey::of("example.com:9988"));
+        assert_ne!(ServerKey::of("example.com:9989"), ServerKey::of("example.com:9988"));
     }
 }
