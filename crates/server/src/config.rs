@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use serde::Deserialize;
-use t7_proto::{ChannelId, ChannelInfo, DEFAULT_PORT};
+use serde::{Deserialize, Serialize};
+use t7_proto::DEFAULT_PORT;
 
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -12,21 +12,27 @@ pub struct Config {
     /// Empty string = no password.
     pub password: String,
     pub max_clients: u32,
+    /// Empty = generate one on first start and keep it in `admin_token.txt`.
+    pub admin_token: String,
+    /// Seeds `channels.toml` on first start; after that, that file is used.
     pub channels: Vec<ChannelConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+/// One channel, as written in the config and in `channels.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelConfig {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub topic: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_clients: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
     /// New clients land in this channel. The first channel is used if none is marked.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChannelConfig>,
 }
 
@@ -38,6 +44,7 @@ impl Default for Config {
             bind: format!("0.0.0.0:{DEFAULT_PORT}"),
             password: String::new(),
             max_clients: 128,
+            admin_token: String::new(),
             channels: Vec::new(),
         }
     }
@@ -46,19 +53,28 @@ impl Default for Config {
 pub const DEFAULT_CONFIG: &str = r#"# T7 server configuration
 
 name = "T7 Server"
-welcome = "Welcome! Double-click a channel to join it."
+welcome = "Welcome! Double-click a channel to join it. Right-click for more."
 bind = "0.0.0.0:9988"
 # Leave empty for a public server.
 password = ""
 max_clients = 128
+# Lets people manage all channels (in T7: the ⋯ menu next to CHANNELS).
+# Leave empty to generate one on first start; it is printed in the log and
+# kept in admin_token.txt next to this file.
+admin_token = ""
 
-# Channels form a tree via `children`. Mark one with `default = true` to make
-# it the landing channel (otherwise the first channel is used).
+# The channels a new server starts with. On first start they are copied to
+# channels.toml next to this file, which then holds the live channel tree as
+# admins edit it in T7. Delete channels.toml to start over from these.
+# Channels nest via `children`; `default = true` marks where people land.
 
 [[channels]]
 name = "Lobby"
-topic = "Hang out here"
+topic = "Say hi"
 default = true
+
+[[channels]]
+name = "Hangout"
 
 [[channels]]
 name = "Gaming"
@@ -71,9 +87,6 @@ topic = "Squad up"
   [[channels.children]]
   name = "Squad 2"
   max_clients = 5
-
-[[channels]]
-name = "Music"
 
 [[channels]]
 name = "AFK"
@@ -90,62 +103,31 @@ impl Config {
         }
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let cfg: Config =
-            toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
-        if cfg.channels.is_empty() {
-            return Err("config must define at least one channel".into());
-        }
-        Ok(cfg)
+        toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))
     }
 
     pub fn password(&self) -> Option<&str> {
         Some(self.password.as_str()).filter(|p| !p.is_empty())
-    }
-
-    /// Flattens the channel tree. Returns the channels and the default channel id.
-    pub fn flatten_channels(&self) -> (Vec<ChannelInfo>, ChannelId) {
-        fn walk(
-            list: &[ChannelConfig],
-            parent: Option<ChannelId>,
-            out: &mut Vec<ChannelInfo>,
-            default: &mut Option<ChannelId>,
-        ) {
-            for (order, c) in list.iter().enumerate() {
-                let id = out.len() as ChannelId + 1;
-                out.push(ChannelInfo {
-                    id,
-                    parent,
-                    name: c.name.clone(),
-                    topic: c.topic.clone(),
-                    max_clients: c.max_clients,
-                    order: order as u32,
-                });
-                if c.default && default.is_none() {
-                    *default = Some(id);
-                }
-                walk(&c.children, Some(id), out, default);
-            }
-        }
-        let mut out = Vec::new();
-        let mut default = None;
-        walk(&self.channels, None, &mut out, &mut default);
-        (out, default.unwrap_or(1))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::Channels;
 
     #[test]
-    fn default_config_flattens() {
+    fn default_config_builds_a_channel_tree() {
         let cfg: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
         assert_eq!(cfg.bind, "0.0.0.0:9988");
-        let (channels, default) = cfg.flatten_channels();
-        assert_eq!(channels.len(), 6);
-        assert_eq!(default, 1);
-        let squad = channels.iter().find(|c| c.name == "Squad 2").unwrap();
-        assert_eq!(squad.parent, Some(2));
+        let channels = Channels::from_config(&cfg.channels);
+        let all = channels.snapshot();
+        assert_eq!(all.len(), 6);
+        assert_eq!(channels.get(channels.default_id()).unwrap().name, "Lobby");
+        let squad = all.iter().find(|c| c.name == "Squad 2").unwrap();
+        assert_eq!(channels.get(squad.parent.unwrap()).unwrap().name, "Gaming");
         assert_eq!(squad.max_clients, Some(5));
+        // Saving and reloading keeps the tree.
+        assert_eq!(Channels::from_config(&channels.to_config()).to_config(), channels.to_config());
     }
 }

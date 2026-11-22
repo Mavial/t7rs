@@ -53,6 +53,15 @@ impl ServerView {
                     c.status = *status;
                 }
             }
+            S2C::ClientAdmin { id, admin } => {
+                if let Some(c) = self.clients.get_mut(id) {
+                    c.admin = *admin;
+                }
+            }
+            S2C::Channels(list) => {
+                self.channels = list.iter().map(|c| (c.id, c.clone())).collect();
+                self.rebuild_tree();
+            }
             _ => return false,
         }
         true
@@ -121,6 +130,10 @@ mod tests {
             topic: String::new(),
             max_clients: None,
             order,
+            temporary: false,
+            has_password: false,
+            default: false,
+            creator: None,
         }
     }
 
@@ -136,6 +149,7 @@ mod tests {
             nickname: "me".into(),
             channel: 1,
             status: ClientStatus::default(),
+            admin: false,
         };
         let mut v = ServerView::new(
             1,
@@ -144,6 +158,9 @@ mod tests {
             vec![me],
         );
         assert_eq!(v.tree(), &[(0, 1), (1, 2), (0, 3)]);
+
+        v.apply(&S2C::Channels(vec![chan(1, None, 1), chan(3, None, 0)]));
+        assert_eq!(v.tree(), &[(0, 3), (0, 1)], "channel list replaced and re-sorted");
 
         v.apply(&S2C::ClientMoved { id: 1, channel: 3 });
         assert_eq!(v.my_channel(), Some(3));

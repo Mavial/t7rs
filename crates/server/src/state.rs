@@ -5,19 +5,22 @@
 //! no locks and a total order of events, and every broadcast is serialised
 //! exactly once no matter how many clients receive it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
-    C2S, ChannelId, ChannelInfo, ClientId, ClientInfo, ClientStatus, LeaveReason,
-    MAX_POKE_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, POKE_PROTOCOL, PROTOCOL_VERSION, S2C, ServerInfo,
-    TextTarget, encode_frame, validate_nickname,
+    C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, LeaveReason, MAX_POKE_LEN,
+    MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget, encode_frame,
+    validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
+
+use crate::channels::Channels;
 
 /// A complete, ready-to-write frame shared between all recipients.
 pub type Frame = Arc<[u8]>;
@@ -43,8 +46,6 @@ pub enum Event {
 
 struct Client {
     info: ClientInfo,
-    /// The client's protocol version: decides which newer messages it understands.
-    protocol: u16,
     addr: SocketAddr,
     outbox: mpsc::Sender<Frame>,
     text_bucket: TokenBucket,
@@ -94,9 +95,10 @@ impl TokenBucket {
 pub struct Server {
     info: ServerInfo,
     password: Option<String>,
-    channels: HashMap<ChannelId, ChannelInfo>,
-    channel_list: Vec<ChannelInfo>,
-    default_channel: ChannelId,
+    channels: Channels,
+    /// Where permanent channel changes are saved (`None`: not saved).
+    channels_file: Option<PathBuf>,
+    admin_token: String,
     clients: HashMap<ClientId, Client>,
     next_id: ClientId,
     /// Clients whose outbox overflowed or closed; removed after the current event.
@@ -109,16 +111,17 @@ impl Server {
     pub fn new(
         info: ServerInfo,
         password: Option<String>,
-        channels: Vec<ChannelInfo>,
-        default_channel: ChannelId,
+        channels: Channels,
+        channels_file: Option<PathBuf>,
+        admin_token: String,
         udp: Arc<UdpSocket>,
     ) -> Self {
         Self {
             info,
             password,
-            channels: channels.iter().map(|c| (c.id, c.clone())).collect(),
-            channel_list: channels,
-            default_channel,
+            channels,
+            channels_file,
+            admin_token,
             clients: HashMap::new(),
             next_id: 1,
             dead: Vec::new(),
@@ -218,7 +221,7 @@ impl Server {
         let id = self.next_id;
         self.next_id += 1;
         let channel = self.default_channel_for_join();
-        let info = ClientInfo { id, nickname, channel, status: ClientStatus::default() };
+        let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), admin: false };
 
         let mut clients: Vec<ClientInfo> = self.clients.values().map(|c| c.info.clone()).collect();
         clients.push(info.clone());
@@ -233,7 +236,7 @@ impl Server {
             your_id: id,
             voice_token,
             server: self.info.clone(),
-            channels: self.channel_list.clone(),
+            channels: self.channels.snapshot(),
             clients,
         };
         if outbox.try_send(encode(&welcome)).is_err() {
@@ -246,7 +249,6 @@ impl Server {
             id,
             Client {
                 info,
-                protocol,
                 addr,
                 outbox,
                 text_bucket: TokenBucket::text(),
@@ -270,16 +272,17 @@ impl Server {
             .expect("infinite iterator")
     }
 
-    /// The default channel, or the first channel with room if it's full.
+    /// The default channel, or the first open channel with room if it's full.
     fn default_channel_for_join(&self) -> ChannelId {
-        std::iter::once(self.default_channel)
-            .chain(self.channel_list.iter().map(|c| c.id))
-            .find(|&ch| self.has_room(ch))
-            .unwrap_or(self.default_channel)
+        let default = self.channels.default_id();
+        std::iter::once(default)
+            .chain(self.channels.ids_in_order())
+            .find(|&ch| self.has_room(ch) && self.channels.password_ok(ch, None))
+            .unwrap_or(default)
     }
 
     fn has_room(&self, channel: ChannelId) -> bool {
-        match self.channels.get(&channel).and_then(|c| c.max_clients) {
+        match self.channels.get(channel).and_then(|c| c.max_clients) {
             Some(max) => self.count_in(channel) < max,
             None => true,
         }
@@ -295,7 +298,7 @@ impl Server {
         }
         match msg {
             C2S::Hello { .. } => self.error(id, "already connected"),
-            C2S::JoinChannel { channel } => self.move_client(id, channel),
+            C2S::JoinChannel { channel, password } => self.join_channel(id, channel, password.as_deref()),
             C2S::SendText { target, text } => self.text(id, target, text),
             C2S::SetStatus(status) => {
                 let client = self.clients.get_mut(&id).expect("checked above");
@@ -307,21 +310,146 @@ impl Server {
             C2S::Ping { nonce } => self.send(id, &S2C::Pong { nonce }),
             C2S::Goodbye => self.remove(id, LeaveReason::Disconnected),
             C2S::Poke { target, message } => self.poke(id, target, message),
+            C2S::CreateChannel { parent, settings, temporary } => self.create_channel(id, parent, settings, temporary),
+            C2S::EditChannel { id: channel, settings } => self.edit_channel(id, channel, &settings),
+            C2S::MoveChannel { id: channel, parent, position } => {
+                if !self.is_admin(id) {
+                    return self.error(id, "only admins can rearrange channels");
+                }
+                match self.channels.move_to(channel, parent, position) {
+                    Ok(()) => self.channels_changed(true),
+                    Err(e) => self.error(id, &e.message()),
+                }
+            }
+            C2S::DeleteChannel { id: channel } => self.delete_channel(id, channel),
+            C2S::SetDefaultChannel { id: channel } => {
+                if !self.is_admin(id) {
+                    return self.error(id, "only admins can change the default channel");
+                }
+                match self.channels.set_default(channel) {
+                    Ok(()) => self.channels_changed(true),
+                    Err(e) => self.error(id, &e.message()),
+                }
+            }
+            C2S::Authenticate { token } => self.authenticate(id, &token),
         }
     }
 
-    fn move_client(&mut self, id: ClientId, channel: ChannelId) {
-        if !self.channels.contains_key(&channel) {
+    fn join_channel(&mut self, id: ClientId, channel: ChannelId, password: Option<&str>) {
+        if self.channels.get(channel).is_none() {
             return self.error(id, "channel does not exist");
         }
         if self.clients[&id].info.channel == channel {
             return;
         }
+        if !self.is_admin(id) && !self.channels.password_ok(channel, password) {
+            let msg = if password.is_some() { "wrong channel password" } else { "this channel needs a password" };
+            return self.error(id, msg);
+        }
         if !self.has_room(channel) {
             return self.error(id, "channel is full");
         }
+        self.move_to(id, channel);
+        self.remove_abandoned_channels();
+    }
+
+    fn move_to(&mut self, id: ClientId, channel: ChannelId) {
         self.clients.get_mut(&id).expect("exists").info.channel = channel;
         self.broadcast(&S2C::ClientMoved { id, channel }, |_| true);
+    }
+
+    fn is_admin(&self, id: ClientId) -> bool {
+        self.clients.get(&id).is_some_and(|c| c.info.admin)
+    }
+
+    /// Admins manage every channel; anyone manages the temporary channels they made.
+    fn may_manage(&self, id: ClientId, channel: ChannelId) -> bool {
+        self.is_admin(id) || self.channels.get(channel).is_some_and(|c| c.temporary && c.creator == Some(id))
+    }
+
+    fn create_channel(&mut self, id: ClientId, parent: Option<ChannelId>, settings: ChannelSettings, temporary: bool) {
+        if !temporary && !self.is_admin(id) {
+            return self.error(id, "only admins can create permanent channels");
+        }
+        if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
+            return self.error(id, "you are creating channels too fast");
+        }
+        match self.channels.create(parent, &settings, temporary, id) {
+            Ok(channel) => {
+                self.channels_changed(!temporary);
+                self.move_to(id, channel);
+                self.remove_abandoned_channels();
+            }
+            Err(e) => self.error(id, &e.message()),
+        }
+    }
+
+    fn edit_channel(&mut self, id: ClientId, channel: ChannelId, settings: &ChannelSettings) {
+        if !self.may_manage(id, channel) {
+            return self.error(id, "you can't edit this channel");
+        }
+        let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
+        match self.channels.edit(channel, settings) {
+            Ok(()) => self.channels_changed(permanent),
+            Err(e) => self.error(id, &e.message()),
+        }
+    }
+
+    fn delete_channel(&mut self, id: ClientId, channel: ChannelId) {
+        if !self.may_manage(id, channel) {
+            return self.error(id, "you can't delete this channel");
+        }
+        let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
+        let removed: HashSet<ChannelId> = match self.channels.delete(channel) {
+            Ok(removed) => removed.into_iter().collect(),
+            Err(e) => return self.error(id, &e.message()),
+        };
+        let default = self.channels.default_id();
+        let evicted: Vec<ClientId> =
+            self.clients.values().filter(|c| removed.contains(&c.info.channel)).map(|c| c.info.id).collect();
+        for client in evicted {
+            self.move_to(client, default);
+        }
+        self.channels_changed(permanent);
+    }
+
+    fn authenticate(&mut self, id: ClientId, token: &str) {
+        if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
+            return self.error(id, "too many attempts, wait a moment");
+        }
+        if self.admin_token.is_empty() || token.trim() != self.admin_token {
+            return self.error(id, "wrong admin token");
+        }
+        let client = self.clients.get_mut(&id).expect("exists");
+        if !client.info.admin {
+            client.info.admin = true;
+            tracing::info!(id, nickname = %client.info.nickname, "client is now admin");
+            self.broadcast(&S2C::ClientAdmin { id, admin: true }, |_| true);
+        }
+    }
+
+    /// Sends everyone the new channel list; saves it when permanent channels changed.
+    fn channels_changed(&mut self, save: bool) {
+        self.broadcast(&S2C::Channels(self.channels.snapshot()), |_| true);
+        if save
+            && let Some(path) = &self.channels_file
+            && let Err(e) = self.channels.save(path)
+        {
+            tracing::error!("cannot save channels to {}: {e}", path.display());
+        }
+    }
+
+    /// Temporary channels disappear once nobody is in them (or below them).
+    fn remove_abandoned_channels(&mut self) {
+        let occupied: HashSet<ChannelId> = self.clients.values().map(|c| c.info.channel).collect();
+        let abandoned = self.channels.abandoned_temporaries(&occupied);
+        if abandoned.is_empty() {
+            return;
+        }
+        for channel in abandoned {
+            let _ = self.channels.delete(channel);
+        }
+        self.channels_changed(false);
     }
 
     fn poke(&mut self, id: ClientId, target: ClientId, message: String) {
@@ -329,12 +457,8 @@ impl Server {
         if message.chars().count() > MAX_POKE_LEN {
             return self.error(id, "poke message is too long");
         }
-        let Some(to) = self.clients.get(&target).filter(|_| target != id) else {
+        if target == id || !self.clients.contains_key(&target) {
             return self.error(id, "that user is no longer online");
-        };
-        if to.protocol < POKE_PROTOCOL {
-            let name = to.info.nickname.clone();
-            return self.error(id, &format!("{name} can't be poked: their T7 is out of date"));
         }
         if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
             return self.error(id, "you are poking too fast");
@@ -373,6 +497,7 @@ impl Server {
             tracing::info!(addr = %client.addr, id, nickname = %client.info.nickname, ?reason, "client left");
             // Dropping `client.outbox` ends its writer task, which closes the socket.
             self.broadcast(&S2C::ClientLeft { id, reason }, |_| true);
+            self.remove_abandoned_channels();
         }
     }
 

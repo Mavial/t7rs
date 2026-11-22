@@ -13,11 +13,10 @@ pub mod voice;
 
 /// This build's protocol. New messages are only ever appended to the enums
 /// below, so older clients keep working for everything they know about.
-pub const PROTOCOL_VERSION: u16 = 3;
-/// Oldest client protocol a server still accepts.
-pub const MIN_PROTOCOL_VERSION: u16 = 2;
-/// First protocol that understands [`S2C::Poked`].
-pub const POKE_PROTOCOL: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
+/// Oldest client protocol a server still accepts. Protocol 4 changed the
+/// channel and client records, so older clients can't follow along.
+pub const MIN_PROTOCOL_VERSION: u16 = 4;
 /// Default port of a T7 server (TCP for control, UDP for voice).
 pub const DEFAULT_PORT: u16 = 9988;
 /// Upper bound for a single frame. Protects both sides from memory abuse.
@@ -26,6 +25,11 @@ pub const MAX_FRAME_LEN: usize = 256 * 1024;
 pub const MAX_NICKNAME_LEN: usize = 32;
 pub const MAX_TEXT_LEN: usize = 2000;
 pub const MAX_POKE_LEN: usize = 100;
+pub const MAX_CHANNEL_NAME_LEN: usize = 40;
+pub const MAX_CHANNEL_TOPIC_LEN: usize = 200;
+/// Channels nest at most this deep (top level is depth 1).
+pub const MAX_CHANNEL_DEPTH: usize = 3;
+pub const MAX_CHANNELS: usize = 200;
 
 /// How often the client sends a ping, and how long the server waits for
 /// any traffic before considering the connection dead.
@@ -61,6 +65,29 @@ pub struct ChannelInfo {
     pub max_clients: Option<u32>,
     /// Sort key among siblings (lower first).
     pub order: u32,
+    /// Deleted automatically once nobody is in it (or in its sub-channels).
+    pub temporary: bool,
+    pub has_password: bool,
+    /// Where new clients land.
+    pub default: bool,
+    /// Who made a temporary channel; they may edit and delete it.
+    pub creator: Option<ClientId>,
+}
+
+/// The editable part of a channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelSettings {
+    pub name: String,
+    pub topic: String,
+    pub max_clients: Option<u32>,
+    pub password: PasswordChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PasswordChange {
+    Keep,
+    Remove,
+    Set(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +96,8 @@ pub struct ClientInfo {
     pub nickname: String,
     pub channel: ChannelId,
     pub status: ClientStatus,
+    /// Server admin: may manage every channel.
+    pub admin: bool,
 }
 
 /// Where a text message goes.
@@ -98,13 +127,27 @@ pub enum C2S {
         nickname: String,
         password: Option<String>,
     },
-    JoinChannel { channel: ChannelId },
+    /// `password` is needed for password-protected channels (admins skip it).
+    JoinChannel { channel: ChannelId, password: Option<String> },
     SendText { target: TextTarget, text: String },
     SetStatus(ClientStatus),
     Ping { nonce: u64 },
     Goodbye,
     /// Get someone's attention: a popup and a sound on their side (protocol 3).
     Poke { target: ClientId, message: String },
+    /// Anyone may create temporary channels; only admins permanent ones.
+    /// The creator moves into the new channel.
+    CreateChannel { parent: Option<ChannelId>, settings: ChannelSettings, temporary: bool },
+    /// Admins, or the creator of a temporary channel.
+    EditChannel { id: ChannelId, settings: ChannelSettings },
+    /// Admins only. `position` is the index among the new siblings.
+    MoveChannel { id: ChannelId, parent: Option<ChannelId>, position: u32 },
+    /// Admins, or the creator of a temporary channel. People inside move to the default channel.
+    DeleteChannel { id: ChannelId },
+    /// Admins only.
+    SetDefaultChannel { id: ChannelId },
+    /// Become admin with the server's admin token.
+    Authenticate { token: String },
 }
 
 /// Server → client.
@@ -138,6 +181,9 @@ pub enum S2C {
     Pong { nonce: u64 },
     /// Someone poked you (protocol 3).
     Poked { from: ClientId, message: String },
+    /// The whole channel list, sent after any change to it.
+    Channels(Vec<ChannelInfo>),
+    ClientAdmin { id: ClientId, admin: bool },
 }
 
 #[derive(Debug)]

@@ -52,7 +52,7 @@ async fn start(cfg_text: &str) -> std::net::SocketAddr {
     };
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        if let Err(e) = t7_server::serve(listener, &cfg).await {
+        if let Err(e) = t7_server::serve(listener, &cfg, None).await {
             panic!("test server failed: {e}");
         }
     });
@@ -81,7 +81,7 @@ async fn join_move_chat_leave() {
     }
 
     // b moves away; channel chat no longer reaches b, but server chat does.
-    b.send(C2S::JoinChannel { channel: 4 }).await;
+    b.send(C2S::JoinChannel { channel: 4, password: None }).await;
     for c in [&mut a, &mut b] {
         assert_eq!(c.recv().await, S2C::ClientMoved { id: b_id, channel: 4 });
     }
@@ -118,10 +118,10 @@ async fn full_channel_and_password() {
     let (mut a, _) = TestClient::connect(addr, "a", Some("secret")).await;
     let (mut b, _) = TestClient::connect(addr, "b", Some("secret")).await;
     a.recv().await; // b joined
-    a.send(C2S::JoinChannel { channel: 2 }).await;
+    a.send(C2S::JoinChannel { channel: 2, password: None }).await;
     a.recv().await;
     b.recv().await;
-    b.send(C2S::JoinChannel { channel: 2 }).await;
+    b.send(C2S::JoinChannel { channel: 2, password: None }).await;
     assert!(matches!(b.recv().await, S2C::Error { .. }));
 }
 
@@ -174,7 +174,7 @@ async fn voice_is_routed_within_the_channel() {
         (Voice::open(addr, &wa).await, Voice::open(addr, &wb).await, Voice::open(addr, &wc).await);
 
     // c leaves for another channel; wait until everyone has seen the move.
-    c.send(C2S::JoinChannel { channel: 4 }).await;
+    c.send(C2S::JoinChannel { channel: 4, password: None }).await;
     for t in [&mut a, &mut b, &mut c] {
         while !matches!(t.recv().await, S2C::ClientMoved { .. }) {}
     }
@@ -210,27 +210,17 @@ async fn voice_is_routed_within_the_channel() {
 }
 
 #[tokio::test]
-async fn pokes_reach_new_clients_and_old_clients_still_connect() {
+async fn pokes_and_protocol_versions() {
     let addr = start(DEFAULT_CONFIG).await;
     let (mut a, wa) = TestClient::connect(addr, "a", None).await;
     let (mut b, wb) = TestClient::connect(addr, "b", None).await;
-    // A client from before pokes existed is still welcome.
-    let (_old, wold) = TestClient::connect_as(addr, "old", None, MIN_PROTOCOL_VERSION).await;
-    let (S2C::Welcome { your_id: a_id, .. }, S2C::Welcome { your_id: b_id, .. }, S2C::Welcome { your_id: old_id, .. }) =
-        (&wa, &wb, &wold)
-    else {
-        panic!("not welcomed: {wold:?}");
+    let (S2C::Welcome { your_id: a_id, .. }, S2C::Welcome { your_id: b_id, .. }) = (&wa, &wb) else {
+        panic!("not welcomed");
     };
-    for _ in 0..2 {
-        a.recv().await; // b, old joined
-    }
-    b.recv().await; // old joined
+    a.recv().await; // b joined
 
     a.send(C2S::Poke { target: *b_id, message: "  over here  ".into() }).await;
     assert_eq!(b.recv().await, S2C::Poked { from: *a_id, message: "over here".into() });
-
-    a.send(C2S::Poke { target: *old_id, message: String::new() }).await;
-    assert!(matches!(a.recv().await, S2C::Error { ref message } if message.contains("out of date")));
 
     a.send(C2S::Poke { target: *a_id, message: String::new() }).await;
     assert!(matches!(a.recv().await, S2C::Error { .. }), "can't poke yourself");
@@ -238,6 +228,150 @@ async fn pokes_reach_new_clients_and_old_clients_still_connect() {
     a.send(C2S::Poke { target: *b_id, message: "x".repeat(MAX_POKE_LEN + 1) }).await;
     assert!(matches!(a.recv().await, S2C::Error { .. }));
 
+    let (_, too_old) = TestClient::connect_as(addr, "old", None, MIN_PROTOCOL_VERSION - 1).await;
+    assert!(matches!(too_old, S2C::Rejected { ref reason } if reason.contains("update your T7")));
     let (_, too_new) = TestClient::connect_as(addr, "future", None, PROTOCOL_VERSION + 1).await;
     assert!(matches!(too_new, S2C::Rejected { ref reason } if reason.contains("server needs an update")));
+}
+
+impl TestClient {
+    /// Skips messages until one matches.
+    async fn until(&mut self, want: impl Fn(&S2C) -> bool) -> S2C {
+        loop {
+            let m = self.recv().await;
+            if want(&m) {
+                return m;
+            }
+        }
+    }
+    async fn channels(&mut self) -> Vec<ChannelInfo> {
+        match self.until(|m| matches!(m, S2C::Channels(_))).await {
+            S2C::Channels(list) => list,
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// The default config with a known admin token.
+fn with_admin_token(token: &str) -> String {
+    DEFAULT_CONFIG.replace(r#"admin_token = """#, &format!(r#"admin_token = "{token}""#))
+}
+
+fn settings(name: &str) -> ChannelSettings {
+    ChannelSettings { name: name.into(), topic: String::new(), max_clients: None, password: PasswordChange::Keep }
+}
+
+fn id_of(list: &[ChannelInfo], name: &str) -> ChannelId {
+    list.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no channel {name}")).id
+}
+
+#[tokio::test]
+async fn channels_are_managed_with_permissions() {
+    let cfg = with_admin_token("sekrit");
+    let addr = start(&cfg).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let (mut admin, wa) = TestClient::connect(addr, "admin", None).await;
+    let (S2C::Welcome { your_id: user_id, channels, .. }, S2C::Welcome { your_id: admin_id, .. }) = (&wu, &wa) else {
+        panic!("not welcomed");
+    };
+    let (user_id, admin_id) = (*user_id, *admin_id);
+    let lobby = id_of(channels, "Lobby");
+    user.recv().await; // admin joined
+
+    // Anyone can make a temporary channel and is moved into it.
+    user.send(C2S::CreateChannel { parent: None, settings: settings("Raid"), temporary: true }).await;
+    let list = user.channels().await;
+    let raid = id_of(&list, "Raid");
+    assert!(list.iter().find(|c| c.id == raid).unwrap().temporary);
+    assert_eq!(user.recv().await, S2C::ClientMoved { id: user_id, channel: raid });
+
+    // ...but not a permanent one, and not edit channels they didn't make.
+    user.send(C2S::CreateChannel { parent: None, settings: settings("Mine"), temporary: false }).await;
+    assert!(matches!(user.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { ref message } if message.contains("only admins")));
+    user.send(C2S::DeleteChannel { id: lobby }).await;
+    assert!(matches!(user.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { .. }));
+
+    // The creator may edit their temporary channel, adding a password.
+    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Raid Night") };
+    user.send(C2S::EditChannel { id: raid, settings: locked }).await;
+    let list = user.channels().await;
+    assert!(list.iter().any(|c| c.name == "Raid Night" && c.has_password));
+
+    // A wrong token is refused; the right one makes you admin, and everyone hears about it.
+    admin.send(C2S::Authenticate { token: "guess".into() }).await;
+    assert!(matches!(admin.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { ref message } if message.contains("wrong admin token")));
+    admin.send(C2S::Authenticate { token: "sekrit".into() }).await;
+    assert_eq!(user.until(|m| matches!(m, S2C::ClientAdmin { .. })).await, S2C::ClientAdmin { id: admin_id, admin: true });
+
+    // Admins skip channel passwords; others need them.
+    admin.send(C2S::JoinChannel { channel: raid, password: None }).await;
+    assert_eq!(admin.until(|m| matches!(m, S2C::ClientMoved { .. })).await, S2C::ClientMoved { id: admin_id, channel: raid });
+
+    // Admins make permanent channels, rearrange them and pick the default.
+    admin.send(C2S::CreateChannel { parent: None, settings: settings("Music"), temporary: false }).await;
+    let music = id_of(&admin.channels().await, "Music");
+    admin.send(C2S::MoveChannel { id: music, parent: None, position: 0 }).await;
+    let list = admin.channels().await;
+    assert_eq!(list.iter().find(|c| c.id == music).unwrap().order, 0);
+    admin.send(C2S::SetDefaultChannel { id: music }).await;
+    assert!(admin.channels().await.iter().any(|c| c.id == music && c.default));
+
+    // Deleting a channel moves the people inside to the default channel.
+    user.send(C2S::JoinChannel { channel: lobby, password: None }).await;
+    user.until(|m| matches!(m, S2C::ClientMoved { id, .. } if *id == user_id)).await;
+    admin.send(C2S::DeleteChannel { id: lobby }).await;
+    assert_eq!(user.until(|m| matches!(m, S2C::ClientMoved { .. })).await, S2C::ClientMoved { id: user_id, channel: music });
+    assert!(user.channels().await.iter().all(|c| c.id != lobby));
+
+    // The temporary channel vanished when the admin (its last occupant) left it.
+    admin.send(C2S::JoinChannel { channel: music, password: None }).await;
+    let list = admin.channels().await;
+    assert!(list.iter().all(|c| c.id != raid), "empty temporary channel should be gone");
+}
+
+#[tokio::test]
+async fn channel_edits_survive_a_restart() {
+    let dir = std::env::temp_dir().join(format!("t7-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg: Config = toml::from_str(&with_admin_token("t")).unwrap();
+
+    let run =|dir: std::path::PathBuf, cfg_text: String| async move {
+        let cfg: Config = toml::from_str(&cfg_text).unwrap();
+        let listener = loop {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            if std::net::UdpSocket::bind(l.local_addr().unwrap()).is_ok() {
+                break l;
+            }
+        };
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { t7_server::serve(listener, &cfg, Some(&dir)).await });
+        (addr, task)
+    };
+    let cfg_text = with_admin_token("t");
+    let (addr, task) = run(dir.clone(), cfg_text.clone()).await;
+    let (mut admin, _) = TestClient::connect(addr, "admin", None).await;
+    admin.send(C2S::Authenticate { token: "t".into() }).await;
+    admin.send(C2S::CreateChannel { parent: None, settings: settings("Saved"), temporary: false }).await;
+    admin.channels().await;
+    task.abort();
+    drop(admin);
+
+    let (addr, task) = run(dir.clone(), cfg_text).await;
+    let (_, welcome) = TestClient::connect(addr, "later", None).await;
+    let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed") };
+    assert!(channels.iter().any(|c| c.name == "Saved"), "channel lost on restart");
+    assert_eq!(channels.len(), Channels::count(&cfg) + 1);
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Channel count of a config, for comparisons.
+struct Channels;
+impl Channels {
+    fn count(cfg: &Config) -> usize {
+        fn walk(list: &[t7_server::config::ChannelConfig]) -> usize {
+            list.iter().map(|c| 1 + walk(&c.children)).sum()
+        }
+        walk(&cfg.channels)
+    }
 }

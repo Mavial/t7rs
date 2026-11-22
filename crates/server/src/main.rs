@@ -41,16 +41,20 @@ fn main() {
             .await
             .unwrap_or_else(|e| fail(format!("cannot bind {}: {e}", cfg.bind)));
         tracing::info!(
-            "\"{}\" listening on {} (TCP control + UDP voice, {} channels{})",
+            "\"{}\" listening on {} (TCP control + UDP voice{})",
             cfg.name,
             cfg.bind,
-            cfg.flatten_channels().0.len(),
             if cfg.password().is_some() { ", password protected" } else { "" }
         );
+        // channels.toml and the admin token live next to the config file.
+        let data_dir = match args.config.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.to_owned(),
+            _ => std::path::PathBuf::from("."),
+        };
         tokio::select! {
-            res = t7_server::serve(listener, &cfg) => {
+            res = t7_server::serve(listener, &cfg, Some(&data_dir)) => {
                 if let Err(e) = res {
-                    fail(format!("cannot open voice socket on {}: {e}", cfg.bind));
+                    fail(format!("server failed: {e}"));
                 }
             }
             _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),

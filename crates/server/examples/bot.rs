@@ -13,9 +13,9 @@ use tokio::net::TcpStream;
 const SCRIPT: &[(&str, ChannelId, ClientStatus, Option<&str>)] = &[
     ("Mara", 1, ClientStatus { muted: false, deafened: false, away: false }, Some("hey all, anyone up for a round later?")),
     ("Jonas", 1, ClientStatus { muted: true, deafened: false, away: false }, Some("sure, after dinner")),
-    ("Kenji", 3, ClientStatus { muted: false, deafened: false, away: false }, None),
-    ("Priya", 3, ClientStatus { muted: false, deafened: true, away: false }, None),
-    ("Ola", 5, ClientStatus { muted: false, deafened: false, away: false }, None),
+    ("Kenji", 4, ClientStatus { muted: false, deafened: false, away: false }, None),
+    ("Priya", 4, ClientStatus { muted: false, deafened: true, away: false }, None),
+    ("Ola", 2, ClientStatus { muted: false, deafened: false, away: false }, None),
     ("Dmitri", 6, ClientStatus { muted: true, deafened: true, away: true }, None),
 ];
 
@@ -56,7 +56,7 @@ async fn run(
     let (r, mut w) = TcpStream::connect(addr).await?.into_split();
     let mut r = BufReader::new(r);
     write_frame(&mut w, &C2S::Hello { protocol: PROTOCOL_VERSION, nickname, password: None }).await?;
-    write_frame(&mut w, &C2S::JoinChannel { channel }).await?;
+    write_frame(&mut w, &C2S::JoinChannel { channel, password: None }).await?;
     write_frame(&mut w, &C2S::SetStatus(status)).await?;
     if let Some(text) = line {
         tokio::time::sleep(Duration::from_millis(400 + seq * 500)).await;
