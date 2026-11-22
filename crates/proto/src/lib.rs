@@ -86,7 +86,7 @@ pub struct ChannelInfo {
     /// Where new clients land.
     pub default: bool,
     /// Who owns a temporary channel: they moderate it, and may edit and
-    /// delete it. Its creator, until they leave it.
+    /// delete it. Its creator, then whoever has been in it longest.
     pub owner: Option<ClientId>,
     /// They hold the Moderator role in this channel and every channel below it.
     pub moderators: Vec<Identity>,

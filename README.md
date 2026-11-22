@@ -7,8 +7,8 @@ one server you host yourself, a tree of channels, and people in them. No account
 no cloud, no bloat.
 
 > **Status:** voice works. Server, channel tree, presence, voice chat per channel
-> (voice activation or push-to-talk), text chat (server, channel, private), and
-> mute / sound off / away.
+> (voice activation or push-to-talk), text chat (server, channel, private),
+> mute / sound off / away, roles and channel permissions, and rooms of your own.
 
 ## Quick start
 
@@ -47,10 +47,11 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Connect | `Ctrl+S`, the Connect button, or click a recent server |
 | Switch channel | Double-click a channel, drag yourself onto it, or right-click → Join. Channels with a lock ask for a password |
 | New channel | The ⋯ button next to CHANNELS, or right-click a channel → Create sub-channel. Yours are temporary: they disappear once everyone has left |
-| Edit, rearrange, delete | Right-click a channel. Admins can also drag a channel above, below or into another one. Anyone can edit or delete the temporary channels they made. Moderators can edit their channels, and admins can do everything |
-| Become admin | ⋯ → Admin login, with the server's admin token. T7 remembers it per server |
-| Kick, ban, choose moderators | Right-click a user. The menu shows what your role allows. See [Permissions](#permissions) |
-| Ban list | ⋯ → Bans… (admins), with Unban |
+| A room of your own | Double-click a lobby, like **Create a room**. T7 opens a temporary room for you in it, and you own it |
+| Edit, rearrange, delete | Right-click a channel. Those who manage channels can also drag a channel above, below or into another one. A room's owner can edit or delete the room, and a channel's moderators can rename it |
+| Claim a server | ⋯ → Claim ownership…, with the claim token from the server's log. See [Roles & permissions](#roles--permissions) |
+| Kick, ban, mute, move | Right-click a user. The menu shows what your role allows. Drag someone onto a channel to move them |
+| Roles and the ban list | ⋯ → Server settings…, with a Roles tab and a Bans tab |
 | Private message | Double-click a user, or right-click → Send private message |
 | Close a PM tab | Middle-click it, or right-click → Close |
 | Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right. Sound off silences the other people, not notification sounds |
@@ -75,44 +76,91 @@ Notifications you can pick a sound pack instead:
 
 Nickname, recent servers, status and voice settings are remembered between sessions.
 
-## Permissions
+## Roles & permissions
 
-Each person has one of three roles on a server. The strongest comes first.
+Each server has ordered roles. A role grants yes-or-no permissions, and each
+channel can change them for each role. The server works out what each person
+may do, enforces it, and sends each client its own permissions. The client
+shows only the menu entries those allow. The rules live in
+`crates/proto/src/perms.rs`.
 
-| Role | Who | May |
+A new server has these roles, strongest first. Each role there also has the
+permissions of the roles below it.
+
+| Role | Who | Adds |
 | --- | --- | --- |
-| Admin | Anyone who logged in with the server's admin token | Everything, including kicks off the server, bans, the ban list, and choosing moderators |
-| Channel moderator | An identity that an admin made moderator of a channel | In that channel and every channel below it: edit the channel, and kick people out of it |
-| Everyone | Everyone else | Join, talk, chat and poke. Make temporary channels, and edit or delete the ones they made |
+| Owner | Whoever claimed the server | Everything |
+| Admin | People the owner or an admin gave it | Manage channels, Manage channel permissions, Ban, Manage roles |
+| Moderator | People given it, and a channel's listed moderators in that channel | Join full or locked channels, Move members, Mute members, Kick |
+| Everyone | Every connection | View, Join, Speak, Send messages, Create temporary channels |
 
-The server and the client share one set of rules (`crates/proto/src/perms.rs`).
-The server enforces them, and the client shows only the menu entries they allow.
-
-- **Identity:** on its first connect T7 makes an ed25519 key and keeps it as
-  `identity_key` in its `settings.toml`. Every connection proves the key with a
-  signature over that connection's TLS exporter value, so the proof can't be
-  replayed on another connection or server. Bans and moderator rights follow
-  the key, not the nickname. Copy `identity_key` to be the same person on
-  another computer. Without it, you are someone new.
-- **Moderators:** an admin right-clicks someone and picks **Make moderator of**
-  the channel they are in. Moderators have a star next to their name in the
-  channel tree. Admins see a channel's moderators in its edit dialog and can
-  remove them there, online or not. Moderators can't delete or move channels,
-  change the default channel, choose moderators, or kick anyone off the
-  server. They can't kick admins or other moderators of the same channel or a
-  higher one.
+- **Claim the server:** on first start the server logs a claim token. In T7,
+  open ⋯ next to CHANNELS, pick **Claim ownership…** and enter the token. The
+  first person to use it becomes the owner, and the token stops working. If
+  the owner loses their identity, stop the server and run
+  `t7-server owner reset`. It prints a new claim token. The old owner stays
+  the owner until someone redeems it.
+- **Roles:** ⋯ → **Server settings…** → **Roles** lists the roles. There you
+  create, rename and reorder roles, switch their permissions, and remove
+  members, online or not. To give someone a role, right-click them and open
+  **Roles**.
+  You act only on roles, and on people, below your own highest role.
+- **Channel permissions:** right-click a channel → **Edit channel…** →
+  **Permissions**. Pick a role, then allow (check), deny (cross) or inherit
+  (dash) each permission. Inherit takes the value from the channel above, and
+  at the top from the role. The closest channel that sets a permission wins.
+  On one channel, an allow for one of your roles beats a deny for another.
+- **Channel moderators:** right-click someone in a channel → **Make moderator
+  of** that channel. Listed moderators hold the Moderator role in that channel
+  and the ones below it, and can change its name and topic. They have a star
+  next to their name. The channel's edit dialog lists them, online or not.
+- **Categories:** a category is a heading at the top level that folds when
+  you click it. Nobody joins it. Its permissions apply to the channels in it,
+  so a private category hides everything inside.
+- **Hidden channels:** without View on a channel you don't see it, the
+  channels below it, or the people in them. People who manage channels still
+  see it, with an eye. Everyone always sees the default channel.
+- **Lobbies:** joining a lobby opens a temporary room under it, named after
+  you, and moves you in. Nobody stays in the lobby itself, and its rooms have
+  its permissions. A new server has one, **Create a room**. To make one, pick
+  **Lobby** in the new channel dialog. A lobby can't be at the third level,
+  because its rooms go below it.
+- **Room owners:** whoever makes a temporary channel owns it, and has a crown
+  next to their name. In their room they kick, move and mute like a
+  moderator, and edit or delete it. They rank just above Everyone, so
+  moderators can still act on them. When the owner leaves, the person who has
+  been in the room longest becomes its owner.
+- **Speak:** the server drops the voice of anyone without Speak in their
+  channel. They see "Can't speak here" and a greyed-out microphone button.
+  Others see a grey crossed-out microphone next to them.
+- **Server mute:** right-click someone → **Mute on server**. It needs Mute
+  members in their channel and a role above theirs. The server drops their
+  voice on every connection with their identity, across reconnects, until
+  someone unmutes them. A server restart clears it. They see a locked
+  microphone and "Muted on the server". Their own mute button keeps its
+  setting.
+- **Move:** drag someone onto a channel, or right-click them → **Move to**. It
+  needs Move members where they are and in the new channel, and a role above
+  theirs. They must be able to see the new channel. A full or locked channel
+  also needs Join full or locked channels.
 - **Kick:** **Kick from channel…** moves someone to the default channel, or,
   if that is full or has a password, to the first open channel with room.
-  **Kick from server…** (admins) disconnects them, and they can connect again.
+  **Kick from server…** disconnects them, and they can connect again.
   Everyone sees who kicked whom and the reason in chat. Nobody can kick or ban
   themselves.
-- **Ban:** **Ban…** (admins) bans someone for 1 hour, 1 day, 1 week or for good,
-  and kicks them off the server. The ban covers their identity from any
-  address. **Also ban IP address** (on by default) also kicks off and keeps
-  out every other identity at their address, which includes everyone else
-  behind it, like a household or a LAN. The server refuses an IP ban on the
-  admin's own address. A banned person who tries to connect sees the reason
-  and how long the ban has left.
+- **Ban:** **Ban…** bans someone for 1 hour, 1 day, 1 week or for good, and
+  kicks them off the server. The ban covers their identity from any address.
+  **Also ban IP address** (on by default) also kicks off and keeps out every
+  other identity at their address, which includes everyone else behind it,
+  like a household or a LAN. The server refuses an IP ban on your own
+  address. A banned person who tries to connect sees the reason and how long
+  the ban has left.
+- **Identity:** on its first connect T7 makes an ed25519 key and keeps it as
+  `identity_key` in its `settings.toml`. Every connection proves the key with
+  a signature over that connection's TLS exporter value, so the proof can't
+  be replayed on another connection or server. Roles, bans, mutes and
+  moderator rights follow the key, not the nickname. Copy `identity_key` to be
+  the same person on another computer. Without it, you are someone new.
 
 ## Server configuration
 
@@ -124,7 +172,6 @@ welcome = "Welcome!"
 bind = "0.0.0.0:9988"
 password = ""          # empty = public
 max_clients = 128
-admin_token = ""       # empty = generate one (see below)
 
 [[channels]]
 name = "Lobby"
@@ -135,23 +182,31 @@ name = "Gaming"
   [[channels.children]]
   name = "Squad 1"
   max_clients = 5
+
+[[channels]]
+name = "Create a room"
+kind = "lobby"         # or "category" for a heading over the channels in it
 ```
 
 The server keeps more files next to its config:
 
 - `channels.toml`: the live channel tree. On first start it is copied from the
-  config's `[[channels]]`; after that admins edit channels in T7 and the server
-  saves every change here. Temporary channels are never saved. Delete the file
-  to start over from the config. A channel's `moderators` holds the identities
-  (64 hex digits each) that moderate it. The config's `[[channels]]` take the
-  same key.
+  config's `[[channels]]`; after that people who manage channels edit them in
+  T7 and the server saves every change here. Temporary channels are never
+  saved. Delete the file to start over from the config. A channel's
+  `moderators` holds the identities (64 hex digits each) that moderate it,
+  `overrides` what it allows and denies each role (role 0 is Everyone), and
+  `kind` whether it is a `"category"` or a `"lobby"`. The config's
+  `[[channels]]` take the same keys.
 - `bans.toml`: the ban list, saved at every ban and unban. Expired bans are
-  dropped when the server starts and when an admin opens the ban list. To
+  dropped when the server starts and when someone opens the ban list. To
   lift a ban by hand, stop the server and delete its `[[bans]]` entry.
   `next_id` keeps ban ids from being reused, so leave it in place.
-- `admin_token.txt`: the admin token, generated on first start (unless
-  `admin_token` is set) and printed in the log at every start. Anyone with it
-  can manage all channels, so share it only with your admins.
+- `roles.toml`: the roles in order with their permissions, who holds them
+  with the nickname they last used, the owner, and the claim token until
+  someone redeems it. Saved at every change. Edit it only while the server is
+  stopped. Servers from before roles delete their `admin_token.txt` on first
+  start and log a claim token instead. Server mutes are never saved.
 - `tls_cert.der` and `tls_key.der`: the server's TLS certificate and private
   key, made on first start. See [Security](#security).
 
@@ -164,7 +219,7 @@ Set log verbosity with `RUST_LOG=debug`.
 ## Security
 
 - **Control connection:** TLS 1.3 (rustls on ring), so nicknames, passwords,
-  chat, admin tokens and voice keys never cross the network in the clear.
+  chat, claim tokens and voice keys never cross the network in the clear.
 - **Voice:** each client gets a random 32-byte key over TLS when it joins.
   Every voice datagram, in both directions and pings included, is sealed with
   ChaCha20-Poly1305. The server opens each frame with the speaker's key and
@@ -189,12 +244,10 @@ Set log verbosity with `RUST_LOG=debug`.
   and shows the saved and the new fingerprint. Check the new one against the
   server's log, or ask its admin, before choosing "Trust new certificate and
   connect". The very first connection is only as trustworthy as the network
-  it runs over; compare the fingerprint with the admin if that matters to you.
-  For that reason T7 doesn't send a saved admin token on a first connection,
-  or right after you trust a new certificate. Log in again from ⋯ → Admin
-  login once the fingerprint checks out.
-- Clients from before TLS (protocol 4 and older) can't connect. The server
-  tells them to update.
+  it runs over; compare the fingerprint with the admin if that matters to you,
+  and before you enter a claim token.
+- Clients from before T7 0.5 (protocol 5 and older) can't connect. The
+  server tells them to update.
 
 ## Architecture
 
