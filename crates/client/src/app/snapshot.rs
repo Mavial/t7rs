@@ -23,7 +23,7 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
         temporary: false,
         has_password: false,
         default: false,
-        creator: None,
+        owner: None,
         moderators: Vec::new(),
         kind: ChannelKind::Voice,
         overrides: Vec::new(),

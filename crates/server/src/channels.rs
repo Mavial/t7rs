@@ -129,7 +129,7 @@ impl Channels {
                 temporary: false,
                 has_password: password.is_some(),
                 default: false,
-                creator: None,
+                owner: None,
                 moderators: c.moderators.clone(),
                 kind: c.kind,
                 overrides: Vec::new(),
@@ -256,7 +256,7 @@ impl Channels {
             temporary,
             has_password: password.is_some(),
             default: false,
-            creator: temporary.then_some(creator),
+            owner: temporary.then_some(creator),
             moderators: Vec::new(),
             kind,
             overrides: Vec::new(),
@@ -610,7 +610,7 @@ mod tests {
     fn temporary_channels_stay_temporary_and_vanish_when_empty() {
         let mut ch = three();
         let temp = ch.create(None, &settings("Raid"), true, ChannelKind::Voice, 7).unwrap();
-        assert_eq!(ch.get(temp).unwrap().creator, Some(7));
+        assert_eq!(ch.get(temp).unwrap().owner, Some(7));
         assert_eq!(
             ch.create(Some(temp), &settings("Perm"), false, ChannelKind::Voice, 7),
             Err(ChannelError::PermanentUnderTemporary)

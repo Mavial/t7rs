@@ -85,8 +85,9 @@ pub struct ChannelInfo {
     pub has_password: bool,
     /// Where new clients land.
     pub default: bool,
-    /// Who made a temporary channel: they moderate it, and may edit and delete it.
-    pub creator: Option<ClientId>,
+    /// Who owns a temporary channel: they moderate it, and may edit and
+    /// delete it. Its creator, until they leave it.
+    pub owner: Option<ClientId>,
     /// They hold the Moderator role in this channel and every channel below it.
     pub moderators: Vec<Identity>,
     pub kind: ChannelKind,

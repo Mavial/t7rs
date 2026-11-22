@@ -173,7 +173,7 @@ mod tests {
             temporary: false,
             has_password: false,
             default: false,
-            creator: None,
+            owner: None,
             moderators: Vec::new(),
             kind: ChannelKind::Voice,
             overrides: Vec::new(),

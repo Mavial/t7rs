@@ -466,7 +466,7 @@ impl Roles {
         let (mut perms, rank) = if self.owner == Some(who.identity) {
             (Perms::ALL, Rank::OWNER)
         } else {
-            let owns_room = path.iter().any(|c| c.temporary && c.creator == Some(who.client));
+            let owns_room = path.iter().any(|c| c.temporary && c.owner == Some(who.client));
             let mut held = vec![RoleId::EVERYONE];
             held.extend_from_slice(self.assigned(who.identity));
             if owns_room || moderates {
@@ -611,12 +611,12 @@ mod tests {
             temporary: false,
             has_password: false,
             default: id == LOBBY,
-            creator: None,
+            owner: None,
             moderators: moderators.to_vec(),
             kind: ChannelKind::Voice,
             overrides: Vec::new(),
         };
-        let raid = ChannelInfo { temporary: true, creator: Some(9), ..ch(RAID, None, &[]) };
+        let raid = ChannelInfo { temporary: true, owner: Some(9), ..ch(RAID, None, &[]) };
         let channels = [
             ch(LOBBY, None, &[]),
             ch(GAMING, None, &[M]),
@@ -729,12 +729,12 @@ mod tests {
     #[test]
     fn room_owners_moderate_and_manage_their_room() {
         let (roles, t) = (roles(), tree());
-        let creator = Subject { client: 9, identity: NOBODY };
-        let room = roles.resolve(creator, Some(RAID), &t);
+        let room_owner = Subject { client: 9, identity: NOBODY };
+        let room = roles.resolve(room_owner, Some(RAID), &t);
         assert!(room.perms.has(Perm::Kick) && room.perms.has(Perm::ManageChannels));
         assert!(!room.perms.has(Perm::Ban));
         assert_eq!(room.rank, roles.height(RoleId::MODERATOR));
-        assert!(!roles.resolve(creator, Some(LOBBY), &t).perms.has(Perm::Kick), "elsewhere");
+        assert!(!roles.resolve(room_owner, Some(LOBBY), &t).perms.has(Perm::Kick), "elsewhere");
         let other = Subject { client: 8, identity: NOBODY };
         assert!(!roles.resolve(other, Some(RAID), &t).perms.has(Perm::Kick), "another connection");
     }
