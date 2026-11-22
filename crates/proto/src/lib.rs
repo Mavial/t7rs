@@ -1,0 +1,244 @@
+//! Wire protocol shared by the T7 server and client.
+//!
+//! Every message travels over TCP as a frame: a little-endian `u32` payload
+//! length followed by a [postcard]-encoded message. Postcard is a compact
+//! varint-based binary format, so typical control messages are only a few
+//! bytes on the wire and (de)serialisation is extremely cheap.
+
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+pub mod model;
+
+/// Bumped whenever the wire format changes incompatibly.
+pub const PROTOCOL_VERSION: u16 = 1;
+/// Default TCP port of a T7 server.
+pub const DEFAULT_PORT: u16 = 9987;
+/// Upper bound for a single frame. Protects both sides from memory abuse.
+pub const MAX_FRAME_LEN: usize = 256 * 1024;
+
+pub const MAX_NICKNAME_LEN: usize = 32;
+pub const MAX_TEXT_LEN: usize = 2000;
+
+/// How often the client sends a ping, and how long the server waits for
+/// any traffic before considering the connection dead.
+pub const PING_INTERVAL_SECS: u64 = 5;
+pub const IDLE_TIMEOUT_SECS: u64 = 30;
+
+pub type ClientId = u32;
+pub type ChannelId = u32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct ClientStatus {
+    /// Microphone muted by the user.
+    pub muted: bool,
+    /// Speakers/headphones muted by the user.
+    pub deafened: bool,
+    pub away: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerInfo {
+    pub name: String,
+    pub welcome: String,
+    pub max_clients: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelInfo {
+    pub id: ChannelId,
+    pub parent: Option<ChannelId>,
+    pub name: String,
+    pub topic: String,
+    /// `None` means unlimited.
+    pub max_clients: Option<u32>,
+    /// Sort key among siblings (lower first).
+    pub order: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientInfo {
+    pub id: ClientId,
+    pub nickname: String,
+    pub channel: ChannelId,
+    pub status: ClientStatus,
+}
+
+/// Where a text message goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TextTarget {
+    /// Everyone on the server.
+    Server,
+    /// Everyone in the sender's current channel.
+    Channel,
+    /// A single client (private message).
+    Client(ClientId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LeaveReason {
+    Disconnected,
+    TimedOut,
+    Kicked,
+}
+
+/// Client → server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum C2S {
+    /// Must be the first message on a new connection.
+    Hello {
+        protocol: u16,
+        nickname: String,
+        password: Option<String>,
+    },
+    JoinChannel { channel: ChannelId },
+    SendText { target: TextTarget, text: String },
+    SetStatus(ClientStatus),
+    Ping { nonce: u64 },
+    Goodbye,
+}
+
+/// Server → client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum S2C {
+    /// Successful handshake: full snapshot of the server state.
+    Welcome {
+        your_id: ClientId,
+        server: ServerInfo,
+        channels: Vec<ChannelInfo>,
+        clients: Vec<ClientInfo>,
+    },
+    /// Handshake refused; the server closes the connection afterwards.
+    Rejected { reason: String },
+    ClientJoined(ClientInfo),
+    ClientLeft { id: ClientId, reason: LeaveReason },
+    ClientMoved { id: ClientId, channel: ChannelId },
+    ClientStatus { id: ClientId, status: ClientStatus },
+    Text {
+        from: ClientId,
+        /// `Channel` text carries the channel it was sent in, so clients can
+        /// keep history straight even if they move channels quickly.
+        target: TextTarget,
+        channel: ChannelId,
+        text: String,
+    },
+    /// A non-fatal error caused by the last request (e.g. channel full).
+    Error { message: String },
+    Pong { nonce: u64 },
+}
+
+#[derive(Debug)]
+pub enum FrameError {
+    Io(std::io::Error),
+    TooLarge(usize),
+    Decode(postcard::Error),
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::Io(e) => write!(f, "io error: {e}"),
+            FrameError::TooLarge(n) => write!(f, "frame too large ({n} bytes)"),
+            FrameError::Decode(e) => write!(f, "malformed message: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for FrameError {}
+
+impl From<std::io::Error> for FrameError {
+    fn from(e: std::io::Error) -> Self {
+        FrameError::Io(e)
+    }
+}
+
+/// Encodes a message into a complete frame (length prefix + payload).
+///
+/// The result can be shared (e.g. via `Arc<[u8]>`) and written to many
+/// sockets, so a broadcast is serialised exactly once.
+pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
+    let mut buf = vec![0u8; 4];
+    let mut buf = postcard::to_extend(msg, std::mem::take(&mut buf))
+        .expect("serialising into a Vec cannot fail");
+    let len = (buf.len() - 4) as u32;
+    buf[..4].copy_from_slice(&len.to_le_bytes());
+    buf
+}
+
+/// Reads one frame and decodes it. `scratch` is reused between calls to
+/// avoid an allocation per message.
+pub async fn read_frame<R, T>(reader: &mut R, scratch: &mut Vec<u8>) -> Result<T, FrameError>
+where
+    R: AsyncRead + Unpin,
+    T: for<'de> Deserialize<'de>,
+{
+    let mut len = [0u8; 4];
+    reader.read_exact(&mut len).await?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > MAX_FRAME_LEN {
+        return Err(FrameError::TooLarge(len));
+    }
+    scratch.resize(len, 0);
+    reader.read_exact(scratch).await?;
+    postcard::from_bytes(scratch).map_err(FrameError::Decode)
+}
+
+pub async fn write_frame<W, T>(writer: &mut W, msg: &T) -> Result<(), FrameError>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    writer.write_all(&encode_frame(msg)).await?;
+    Ok(())
+}
+
+/// Normalises and validates a nickname. Returns the cleaned name.
+pub fn validate_nickname(raw: &str) -> Result<String, &'static str> {
+    let name: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
+    if name.is_empty() {
+        return Err("nickname must not be empty");
+    }
+    if name.chars().count() > MAX_NICKNAME_LEN {
+        return Err("nickname is too long");
+    }
+    Ok(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn frame_roundtrip() {
+        let msg = C2S::Hello {
+            protocol: PROTOCOL_VERSION,
+            nickname: "alice".into(),
+            password: None,
+        };
+        let frame = encode_frame(&msg);
+        assert_eq!(
+            u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize,
+            frame.len() - 4
+        );
+        let mut cursor = std::io::Cursor::new(frame);
+        let mut scratch = Vec::new();
+        let decoded: C2S = read_frame(&mut cursor, &mut scratch).await.unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_frames() {
+        let mut data = ((MAX_FRAME_LEN + 1) as u32).to_le_bytes().to_vec();
+        data.extend_from_slice(&[0; 8]);
+        let mut cursor = std::io::Cursor::new(data);
+        let res: Result<C2S, _> = read_frame(&mut cursor, &mut Vec::new()).await;
+        assert!(matches!(res, Err(FrameError::TooLarge(_))));
+    }
+
+    #[test]
+    fn nickname_validation() {
+        assert_eq!(validate_nickname("  bob \n").unwrap(), "bob");
+        assert!(validate_nickname("   ").is_err());
+        assert!(validate_nickname(&"x".repeat(MAX_NICKNAME_LEN + 1)).is_err());
+    }
+}
