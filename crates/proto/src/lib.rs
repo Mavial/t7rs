@@ -137,6 +137,16 @@ pub struct ClientInfo {
     pub role: Option<String>,
     /// The same on every connection with the same key; two connections may share one.
     pub identity: Identity,
+    pub speech: Speech,
+}
+
+/// Whether the server passes someone's voice on, and if not, why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum Speech {
+    #[default]
+    Allowed,
+    /// They may not speak in the channel they are in.
+    NotHere,
 }
 
 /// A ban on the server: the identity, and the IP address if that was banned too.
@@ -347,6 +357,11 @@ pub enum S2C {
     /// Someone went out of view, the other way around. They are still connected.
     ClientHidden {
         id: ClientId,
+    },
+    /// Whether the server passes someone's voice on changed.
+    ClientSpeech {
+        id: ClientId,
+        speech: Speech,
     },
 }
 

@@ -17,7 +17,7 @@ use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     BanId, BanInfo, C2S, ChannelId, ChannelInfo, ChannelKind, ChannelSettings, ClientId, ClientInfo, ClientStatus,
     Identity, LeaveReason, MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
-    PasswordChange, S2C, ServerInfo, TextTarget, encode_frame, validate_nickname,
+    PasswordChange, S2C, ServerInfo, Speech, TextTarget, encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -200,7 +200,11 @@ impl Server {
             }
             ToServer::Audio { seq, payload } => {
                 let status = sender.info.status;
-                if status.muted || status.deafened || !sender.voice_bucket.take() {
+                if sender.info.speech != Speech::Allowed
+                    || status.muted
+                    || status.deafened
+                    || !sender.voice_bucket.take()
+                {
                     return;
                 }
                 let channel = sender.info.channel;
@@ -268,7 +272,8 @@ impl Server {
         let role = self.roles.roles().title(identity);
         let permissions = self.permissions_of(Subject { client: id, identity });
         let channel = self.landing_channel(&permissions, None);
-        let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), role, identity };
+        let status = ClientStatus::default();
+        let info = ClientInfo { id, nickname, channel, status, role, identity, speech: speech(&permissions, channel) };
         let editor = permissions.edits_permissions();
 
         let seen = self.clients.values().filter(|c| permissions.sees(c.info.channel));
@@ -569,9 +574,13 @@ impl Server {
     }
 
     /// Tells everyone what changed about where `subject` is, as far as they
-    /// see it: that it moved, came into view, or went out of it.
+    /// see it: that it moved, came into view, or went out of it, and whether
+    /// its voice is passed on there.
     fn sync_about(&mut self, subject: ClientId) {
-        let info = self.clients[&subject].info.clone();
+        let client = self.clients.get_mut(&subject).expect("exists");
+        let now = speech(&client.permissions, client.info.channel);
+        let was = std::mem::replace(&mut client.info.speech, now);
+        let info = client.info.clone();
         let mut told = [Vec::new(), Vec::new(), Vec::new()];
         for c in self.clients.values_mut() {
             let sees = c.info.id == subject || c.permissions.sees(info.channel);
@@ -587,10 +596,15 @@ impl Server {
         let channel = info.channel;
         let news =
             [S2C::ClientMoved { id: subject, channel }, S2C::ClientShown(info), S2C::ClientHidden { id: subject }];
-        for (msg, to) in news.iter().zip(told) {
+        for (msg, to) in news.iter().zip(&told) {
             if !to.is_empty() {
                 self.broadcast(msg, |c| to.contains(&c.info.id));
             }
+        }
+        if now != was {
+            // Those it just came into view of heard with it.
+            let msg = S2C::ClientSpeech { id: subject, speech: now };
+            self.broadcast(&msg, |c| c.known.contains_key(&subject) && !told[1].contains(&c.info.id));
         }
     }
 
@@ -1060,6 +1074,12 @@ impl Server {
             deliver(&mut self.dead, client, frame.clone());
         }
     }
+}
+
+/// Whether the server passes on the voice of someone who may do
+/// `permissions`, where they are in `channel`.
+fn speech(permissions: &Permissions, channel: ChannelId) -> Speech {
+    if permissions.may_in(channel, Perm::Speak) { Speech::Allowed } else { Speech::NotHere }
 }
 
 /// Enqueues a frame to a client. One whose queue is full is too slow to keep

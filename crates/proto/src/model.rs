@@ -75,6 +75,11 @@ impl ServerView {
                     c.role.clone_from(role);
                 }
             }
+            S2C::ClientSpeech { id, speech } => {
+                if let Some(c) = self.clients.get_mut(id) {
+                    c.speech = *speech;
+                }
+            }
             S2C::Permissions(permissions) => self.set_permissions(permissions.clone()),
             S2C::Roles(roles) => self.roles = Some(roles.clone()),
             S2C::Channels(list) => {
@@ -226,6 +231,7 @@ mod tests {
             status: ClientStatus::default(),
             role: None,
             identity: Identity([1; 32]),
+            speech: crate::Speech::Allowed,
         };
         let channels = [1, 3].map(|c| (c, Perms::NONE)).into_iter().chain([(2, Perms::of(&[Perm::Kick]))]).collect();
         let permissions = Permissions { server: Perms::NONE, channels };

@@ -1513,3 +1513,36 @@ async fn a_full_server_opens_no_room() {
     let after = ana.drain().await;
     assert!(after.iter().all(|m| !matches!(m, S2C::ClientMoved { .. } | S2C::Channels(_))), "{after:?}");
 }
+
+#[tokio::test]
+async fn voice_is_dropped_from_those_who_may_not_speak() {
+    let (addr, mut owner, _, channels) = start_owned("speak", HOME).await;
+    let [lobby, hangout] = ["Lobby", "Hangout"].map(|name| id_of(&channels, name));
+    let (_talker, wt) = TestClient::connect(addr, "talker", None).await;
+    let (mut quiet, wq) = TestClient::connect(addr, "quiet", None).await;
+    let (mut ear, we) = TestClient::connect(addr, "ear", None).await;
+    let quiet_id = welcomed_id(&wq);
+    let (mut vt, mut vq, mut ve) =
+        (Voice::open(addr, &wt).await, Voice::open(addr, &wq).await, Voice::open(addr, &we).await);
+    vq.send(voice::ToServer::Audio { seq: 1, payload: &[1] }).await;
+    assert_eq!(ve.recv_owned().await, Some(Got::Audio(vq.id, 1, vec![1])), "everyone may speak at first");
+
+    // The Lobby keeps Everyone from speaking, but not the Moderator role, which the talker holds.
+    owner.change_roles(assign("talker", RoleId::MODERATOR, true)).await;
+    owner.send(set(lobby, RoleId::MODERATOR, &[Perm::Speak], &[])).await;
+    owner.send(set(lobby, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
+    let silenced = S2C::ClientSpeech { id: quiet_id, speech: Speech::NotHere };
+    for c in [&mut ear, &mut quiet] {
+        c.until(|m| *m == silenced).await;
+    }
+    vq.send(voice::ToServer::Audio { seq: 2, payload: &[2] }).await;
+    assert_eq!(ve.recv_owned().await, None, "Speak-denied voice was forwarded");
+    vt.send(voice::ToServer::Audio { seq: 1, payload: &[3] }).await;
+    assert_eq!(ve.recv_owned().await, Some(Got::Audio(vt.id, 1, vec![3])));
+    let S2C::Welcome { clients, .. } = TestClient::connect(addr, "late", None).await.1 else { unreachable!() };
+    assert_eq!(clients.iter().find(|c| c.id == quiet_id).unwrap().speech, Speech::NotHere);
+
+    // Elsewhere they may speak again.
+    quiet.send(C2S::JoinChannel { channel: hangout, password: None }).await;
+    ear.until(|m| *m == S2C::ClientSpeech { id: quiet_id, speech: Speech::Allowed }).await;
+}

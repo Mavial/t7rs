@@ -11,7 +11,7 @@ use t7_proto::tls::Fingerprint;
 use t7_proto::{
     BanInfo, C2S, ChannelId, ChannelInfo, ChannelKind, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason,
     MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN, MAX_CHANNEL_TOPIC_LEN, MAX_REASON_LEN, MAX_ROLE_NAME_LEN, PasswordChange,
-    S2C, TextTarget,
+    S2C, Speech, TextTarget,
 };
 
 use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
@@ -559,6 +559,11 @@ impl App {
         }
     }
 
+    /// Whether the server passes our voice on.
+    fn my_speech(&self) -> Speech {
+        self.view.as_ref().and_then(ServerView::me).map_or(Speech::Allowed, |me| me.speech)
+    }
+
     fn sound(&self, sound: Sound) {
         let a = &self.settings.audio;
         if !a.sounds {
@@ -911,6 +916,13 @@ impl App {
                 }
             }
             S2C::ClientStatus { .. } | S2C::Permissions(_) | S2C::Roles(_) => self.apply(&msg),
+            S2C::ClientSpeech { id, speech } => {
+                let mine = self.view.as_ref().is_some_and(|v| v.my_id == id);
+                self.apply(&msg);
+                if mine && speech == Speech::NotHere {
+                    self.push(1, LineKind::System, "You can't speak in this channel");
+                }
+            }
             S2C::Channels(_) => {
                 self.apply(&msg);
                 self.sync_channel_tab_title();
@@ -1099,6 +1111,8 @@ impl App {
                     let s = self.settings.status;
                     let (txt, col) = if !matches!(self.conn, Conn::Connected { .. }) {
                         ("Offline", theme::TEXT_FAINT)
+                    } else if self.my_speech() == Speech::NotHere {
+                        ("Can't speak here", theme::AMBER)
                     } else if s.away {
                         ("Away", theme::AMBER)
                     } else if s.deafened {
@@ -1123,6 +1137,7 @@ impl App {
                     let (r, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
                     ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_STRONG));
                     let mut s = self.settings.status;
+                    let speech = self.my_speech();
                     let changed = toggle(ui, &mut s.away, Icon::Moon, Icon::Moon, theme::AMBER, "Away")
                         | toggle(
                             ui,
@@ -1132,14 +1147,22 @@ impl App {
                             theme::RED,
                             "Turn sound off (Ctrl+Shift+D)",
                         )
-                        | toggle(
-                            ui,
-                            &mut s.muted,
-                            Icon::Mic,
-                            Icon::MicOff,
-                            theme::RED,
-                            "Mute microphone (Ctrl+Shift+M)",
-                        );
+                        | match speech {
+                            Speech::Allowed => toggle(
+                                ui,
+                                &mut s.muted,
+                                Icon::Mic,
+                                Icon::MicOff,
+                                theme::RED,
+                                "Mute microphone (Ctrl+Shift+M)",
+                            ),
+                            // The server drops our voice: there is nothing to unmute here.
+                            Speech::NotHere => {
+                                let tip = "You can't speak in this channel";
+                                mic_held(ui, Icon::MicOff, theme::TEXT_FAINT, tip);
+                                false
+                            }
+                        };
                     if changed {
                         self.set_status(s);
                     }
@@ -1532,21 +1555,32 @@ impl App {
                                 );
                             }
                             let mut x = rect.right() - TREE_RIGHT_PAD - 7.0;
-                            for (on, icon, col) in [
-                                (c.status.away, Icon::Moon, theme::AMBER),
-                                (c.status.deafened, Icon::HeadphonesOff, theme::RED),
-                                (c.status.muted, Icon::MicOff, theme::RED),
-                            ] {
-                                if on {
-                                    let r =
-                                        egui::Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(14.0, 14.0));
-                                    icons::paint(p, r, icon, col);
-                                    x -= 18.0;
+                            // One microphone: muted by themselves, or kept from speaking here.
+                            let (mic, why) = match (c.status.muted, c.speech) {
+                                (true, _) => (Some((Icon::MicOff, theme::RED)), None),
+                                (false, Speech::NotHere) => {
+                                    (Some((Icon::MicOff, theme::TEXT_FAINT)), Some("Can't speak here"))
                                 }
+                                (false, Speech::Allowed) => (None, None),
+                            };
+                            let status = [
+                                c.status.away.then_some((Icon::Moon, theme::AMBER)),
+                                c.status.deafened.then_some((Icon::HeadphonesOff, theme::RED)),
+                                mic,
+                            ];
+                            for (icon, col) in status.into_iter().flatten() {
+                                let r = egui::Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(14.0, 14.0));
+                                icons::paint(p, r, icon, col);
+                                x -= 18.0;
                             }
 
-                            let titles: Vec<&str> =
-                                c.role.as_deref().into_iter().chain(owns_room.then_some("Owns this room")).collect();
+                            let titles: Vec<&str> = c
+                                .role
+                                .as_deref()
+                                .into_iter()
+                                .chain(owns_room.then_some("Owns this room"))
+                                .chain(why)
+                                .collect();
                             let resp = if titles.is_empty() { resp } else { resp.on_hover_text(titles.join("\n")) };
                             if is_me {
                                 if resp.drag_started() {
@@ -1864,8 +1898,10 @@ impl App {
     /// Keeps the audio engine and its shared state in line with the app state.
     fn drive_audio(&mut self, ctx: &egui::Context) {
         let s = self.settings.status;
+        // The mic stays shut while the server wouldn't pass our voice on.
+        let silenced = self.my_speech() != Speech::Allowed;
         let v = &mut self.voice;
-        v.shared.set_status(s.muted, s.deafened);
+        v.shared.set_status(s.muted || silenced, s.deafened);
         let connected = matches!(self.conn, Conn::Connected { .. });
         // A last sound (like "disconnected") finishes before the devices close.
         let finishing = v.engine.is_some() && v.playback.effects_active();
@@ -1898,6 +1934,7 @@ impl App {
     }
 
     fn audio_dialog(&mut self, ctx: &egui::Context) {
+        let speech = self.my_speech();
         let Some(dlg) = &mut self.audio_dialog else { return };
         let mut a: AudioSettings = self.settings.audio.clone();
         let mut restart = false;
@@ -1928,6 +1965,9 @@ impl App {
                 row(ui, "Speakers", |ui| restart |= device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs));
 
                 section(ui, "Transmit");
+                if speech == Speech::NotHere {
+                    hint(ui, "You can't speak in this channel, so nothing is sent.");
+                }
                 row(ui, "Mode", |ui| {
                     theme::segmented(
                         ui,
@@ -3019,6 +3059,15 @@ fn tab_button(ui: &mut egui::Ui, label: &str, active: bool, unread: u32) -> egui
 }
 
 /// An icon toggle button, tinted with `on_color` while on (muted, deafened...).
+/// The microphone button while the server drops our voice: it shows why,
+/// and does nothing.
+fn mic_held(ui: &mut egui::Ui, icon: Icon, color: Color32, tip: &str) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), theme::SURFACE);
+    icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
+    resp.on_hover_text(tip);
+}
+
 fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color: Color32, tip: &str) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     let (fill, color, icon) = match (*on, resp.hovered()) {

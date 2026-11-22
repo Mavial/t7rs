@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use t7_proto::perms::{Member, Override, Perm, Permissions, Perms, RoleId, Roles};
-use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo};
+use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo, Speech};
 
 use super::*;
 
@@ -31,7 +31,8 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
 }
 
 fn client(id: u32, name: &str, channel: u32, status: ClientStatus) -> ClientInfo {
-    ClientInfo { id, nickname: name.into(), channel, status, role: None, identity: Identity([id as u8; 32]) }
+    let identity = Identity([id as u8; 32]);
+    ClientInfo { id, nickname: name.into(), channel, status, role: None, identity, speech: Speech::Allowed }
 }
 
 fn view() -> ServerView {
@@ -286,6 +287,25 @@ const SCENES: &[Scene] = &[
         let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
         form.kind = ChannelKind::Lobby;
         form.name = "Squads".into();
+        app
+    }),
+    ("26-cant-speak", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        // Games keeps everyone without a role from speaking: Santi too, here.
+        for id in [1, 5] {
+            app.apply(&S2C::ClientSpeech { id, speech: Speech::NotHere });
+        }
+        app
+    }),
+    ("27-voice-settings-cant-speak", (1100, 820), |ctx| {
+        let mut app = connected(ctx);
+        app.apply(&S2C::ClientSpeech { id: 1, speech: Speech::NotHere });
+        app.audio_dialog = Some(AudioDialog {
+            packs: Vec::new(),
+            inputs: vec!["Microphone (USB)".into()],
+            outputs: vec!["Headphones".into()],
+            binding: false,
+        });
         app
     }),
     ("24-moderator-edit", (1100, 720), |ctx| {
