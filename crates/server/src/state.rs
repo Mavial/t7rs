@@ -69,7 +69,7 @@ struct Client {
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
     last_sent_permissions: Permissions,
-    known: HashMap<ClientId, ChannelId>,
+    last_sent_locations: HashMap<ClientId, ChannelId>,
 }
 
 impl Client {
@@ -273,10 +273,10 @@ impl Server {
         let editor = permissions.edits_permissions();
 
         let seen = self.clients.values().filter(|c| permissions.sees(c.info.channel));
-        let mut known: HashMap<ClientId, ChannelId> = seen.map(|c| (c.info.id, c.info.channel)).collect();
-        known.insert(id, channel);
+        let mut locations: HashMap<ClientId, ChannelId> = seen.map(|c| (c.info.id, c.info.channel)).collect();
+        locations.insert(id, channel);
         let mut clients: Vec<ClientInfo> =
-            self.clients.values().filter(|c| known.contains_key(&c.info.id)).map(|c| c.info.clone()).collect();
+            self.clients.values().filter(|c| locations.contains_key(&c.info.id)).map(|c| c.info.clone()).collect();
         clients.push(info.clone());
         let mut voice_key = [0u8; 32];
         if let Err(e) = getrandom::fill(&mut voice_key) {
@@ -297,9 +297,9 @@ impl Server {
 
         tracing::info!(%addr, id, nickname = %info.nickname, "client joined");
         for c in self.clients.values_mut().filter(|c| c.last_sent_permissions.sees(channel)) {
-            c.known.insert(id, channel);
+            c.last_sent_locations.insert(id, channel);
         }
-        self.broadcast(&S2C::ClientJoined(info.clone()), |c| c.known.contains_key(&id));
+        self.broadcast(&S2C::ClientJoined(info.clone()), |c| c.last_sent_locations.contains_key(&id));
         self.clients.insert(
             id,
             Client {
@@ -311,7 +311,7 @@ impl Server {
                 voice_addr: None,
                 voice_bucket: TokenBucket::voice(),
                 last_sent_permissions: permissions,
-                known,
+                last_sent_locations: locations,
             },
         );
         if renamed {
@@ -358,18 +358,7 @@ impl Server {
 
     fn message(&mut self, id: ClientId, msg: C2S) {
         let Some(client) = self.clients.get(&id) else { return };
-        let named = match &msg {
-            C2S::JoinChannel { channel, .. }
-            | C2S::EditChannel { id: channel, .. }
-            | C2S::DeleteChannel { id: channel }
-            | C2S::SetDefaultChannel { id: channel }
-            | C2S::SetModerator { channel, .. }
-            | C2S::SetOverride { channel, .. } => [Some(*channel), None],
-            C2S::CreateChannel { parent, .. } => [*parent, None],
-            C2S::MoveChannel { id: channel, parent, .. } => [Some(*channel), *parent],
-            _ => [None, None],
-        };
-        if named.into_iter().flatten().any(|c| !client.last_sent_permissions.sees(c)) {
+        if channels_named(&msg).any(|c| !client.last_sent_permissions.sees(c)) {
             return self.error(id, "channel does not exist");
         }
         match msg {
@@ -380,7 +369,7 @@ impl Server {
                 let client = self.clients.get_mut(&id).expect("checked above");
                 if client.info.status != status {
                     client.info.status = status;
-                    self.broadcast(&S2C::ClientStatus { id, status }, |c| c.known.contains_key(&id));
+                    self.broadcast(&S2C::ClientStatus { id, status }, |c| c.last_sent_locations.contains_key(&id));
                 }
             }
             C2S::Ping { nonce } => self.send(id, &S2C::Pong { nonce }),
@@ -551,7 +540,11 @@ impl Server {
         let mut told = [Vec::new(), Vec::new(), Vec::new()];
         for c in self.clients.values_mut() {
             let sees = c.info.id == subject || c.last_sent_permissions.sees(info.channel);
-            let was = if sees { c.known.insert(subject, info.channel) } else { c.known.remove(&subject) };
+            let was = if sees {
+                c.last_sent_locations.insert(subject, info.channel)
+            } else {
+                c.last_sent_locations.remove(&subject)
+            };
             let news = match (was, sees) {
                 (Some(at), true) if at != info.channel => 0,
                 (None, true) => 1,
@@ -620,18 +613,22 @@ impl Server {
             self.send(id, &S2C::Permissions(self.clients[&id].last_sent_permissions.clone()));
         }
         self.send_channel_lists(&lists);
-        for &id in evicted.iter().chain(ids.iter().filter(|id| !evicted.contains(id))) {
-            self.sync_about(id);
-        }
+        self.sync_about_evicted_first(&evicted, &ids);
         if !editors.is_empty() {
             self.broadcast(&S2C::Roles(self.roles.roles().clone()), |c| editors.contains(&c.info.id));
         }
         for id in retitled {
             let role = self.clients[&id].info.role.clone();
-            self.broadcast(&S2C::ClientRole { id, role }, |c| c.known.contains_key(&id));
+            self.broadcast(&S2C::ClientRole { id, role }, |c| c.last_sent_locations.contains_key(&id));
         }
         if !evicted.is_empty() {
             self.remove_abandoned_channels();
+        }
+    }
+
+    fn sync_about_evicted_first(&mut self, evicted: &[ClientId], everyone: &[ClientId]) {
+        for &id in evicted.iter().chain(everyone.iter().filter(|id| !evicted.contains(id))) {
+            self.sync_about(id);
         }
     }
 
@@ -776,7 +773,7 @@ impl Server {
     fn eject(&mut self, target: ClientId, by: ClientId, from_server: bool, reason: String) {
         tracing::info!(target, by, from_server, reason, "client kicked");
         let notice = S2C::ClientKicked { id: target, by, from_server, reason };
-        self.broadcast(&notice, |c| c.known.contains_key(&target));
+        self.broadcast(&notice, |c| c.last_sent_locations.contains_key(&target));
         if from_server {
             // Its writer sends the notice before it closes the connection.
             self.remove(target, LeaveReason::Kicked);
@@ -941,7 +938,7 @@ impl Server {
         }
         let msg = S2C::Text { from: id, target, channel, text: text.to_owned() };
         match target {
-            TextTarget::Server => self.broadcast(&msg, |c| c.known.contains_key(&id)),
+            TextTarget::Server => self.broadcast(&msg, |c| c.last_sent_locations.contains_key(&id)),
             TextTarget::Channel => self.broadcast(&msg, |c| c.info.channel == channel),
             TextTarget::Client(to) => {
                 if let Some(why) = self.unreachable(id, to) {
@@ -954,7 +951,7 @@ impl Server {
     }
 
     fn knows(&self, id: ClientId, other: ClientId) -> bool {
-        self.clients.get(&id).is_some_and(|c| c.known.contains_key(&other))
+        self.clients.get(&id).is_some_and(|c| c.last_sent_locations.contains_key(&other))
     }
 
     fn unreachable(&self, id: ClientId, target: ClientId) -> Option<String> {
@@ -971,9 +968,9 @@ impl Server {
         if let Some(client) = self.clients.remove(&id) {
             tracing::info!(addr = %client.addr, id, nickname = %client.info.nickname, ?reason, "client left");
             // Dropping `client.outbox` ends its writer task, which closes the socket.
-            self.broadcast(&S2C::ClientLeft { id, reason }, |c| c.known.contains_key(&id));
+            self.broadcast(&S2C::ClientLeft { id, reason }, |c| c.last_sent_locations.contains_key(&id));
             for c in self.clients.values_mut() {
-                c.known.remove(&id);
+                c.last_sent_locations.remove(&id);
             }
             self.remove_abandoned_channels();
         }
@@ -1005,6 +1002,21 @@ fn deliver(dead: &mut Vec<ClientId>, client: &Client, frame: Frame) {
     if client.outbox.try_send(frame).is_err() && !dead.contains(&client.info.id) {
         dead.push(client.info.id);
     }
+}
+
+fn channels_named(msg: &C2S) -> impl Iterator<Item = ChannelId> {
+    let named = match msg {
+        C2S::JoinChannel { channel, .. }
+        | C2S::EditChannel { id: channel, .. }
+        | C2S::DeleteChannel { id: channel }
+        | C2S::SetDefaultChannel { id: channel }
+        | C2S::SetModerator { channel, .. }
+        | C2S::SetOverride { channel, .. } => [Some(*channel), None],
+        C2S::CreateChannel { parent, .. } => [*parent, None],
+        C2S::MoveChannel { id: channel, parent, .. } => [Some(*channel), *parent],
+        _ => [None, None],
+    };
+    named.into_iter().flatten()
 }
 
 fn highest_rank_touched(roles: &Roles, change: &RoleChange) -> Rank {
