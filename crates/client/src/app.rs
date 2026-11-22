@@ -6,7 +6,7 @@ use egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, text::LayoutJob, vec2,
 };
 use t7_proto::model::ServerView;
-use t7_proto::perms::{self, Action};
+use t7_proto::perms::Perm;
 use t7_proto::tls::Fingerprint;
 use t7_proto::{
     BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason, MAX_CHANNEL_DEPTH,
@@ -41,13 +41,9 @@ const DEFAULT_SERVER: Option<&str> = option_env!("T7_DEFAULT_SERVER");
 enum Conn {
     Disconnected,
     /// `password` is kept to retry after trusting a changed certificate.
-    /// `known_cert`: the certificate was pinned by an earlier connection. A pin
-    /// made on first use, or just trusted in place of a changed one, vouches
-    /// only for whoever answered, so a saved admin token is not sent on it.
     Connecting {
         address: String,
         password: String,
-        known_cert: bool,
     },
     Connected,
 }
@@ -100,7 +96,7 @@ enum TreeAction {
     Move(ChannelId, DropTarget),
     MakeDefault(ChannelId),
     Delete(ChannelId),
-    AdminLogin,
+    ClaimOwnership,
     SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
     Kick { target: ClientId, from_server: bool },
     Ban(ClientId),
@@ -110,7 +106,7 @@ enum TreeAction {
 /// Payload while dragging yourself onto another channel.
 struct DragSelf;
 
-/// Payload while an admin drags a channel to rearrange the tree.
+/// Payload while dragging a channel to rearrange the tree.
 struct DragChannel(ChannelId);
 
 /// Voice is considered blocked when no UDP pong arrived for this long.
@@ -191,7 +187,7 @@ enum ChannelDialog {
     Form(ChannelForm),
     Password { channel: ChannelId, name: String, password: String, focused: bool },
     Delete { channel: ChannelId, name: String, occupants: usize },
-    AdminLogin { token: String, focused: bool },
+    ClaimOwnership { token: String, focused: bool },
 }
 
 /// Creating (`editing: None`) or editing a channel.
@@ -261,10 +257,6 @@ pub struct App {
     /// Who kicked us off the server and why, for when the connection closes.
     kicked: Option<String>,
     cert_change: Option<CertChange>,
-    /// Address of the connected server, for per-server admin tokens.
-    server_address: String,
-    /// Token sent but not yet confirmed; saved once the server accepts it.
-    pending_admin_token: Option<String>,
     /// Ask the window manager to flash the taskbar entry.
     attention: bool,
     updater: crate::update::Updater,
@@ -312,8 +304,6 @@ impl App {
             moderation: None,
             kicked: None,
             cert_change: None,
-            server_address: String::new(),
-            pending_admin_token: None,
             attention: false,
             updater: crate::update::Updater::start(ctx.clone()),
             quit: false,
@@ -356,7 +346,7 @@ impl App {
         let login_password = Some(password.clone()).filter(|p| !p.is_empty());
         let key = self.settings.identity_key.get_or_insert_with(settings::new_identity_key).clone();
         self.session = self.net.connect(address.clone(), nickname, login_password, pinned, key);
-        self.conn = Conn::Connecting { address, password, known_cert: pinned.is_some() };
+        self.conn = Conn::Connecting { address, password };
         self.view = None;
         self.ping = None;
         self.last_error = None;
@@ -376,7 +366,7 @@ impl App {
         if view.my_channel() == Some(channel) {
             return;
         }
-        if ch.has_password && !view.allowed(Action::SkipChannelPassword) {
+        if ch.has_password && !view.may_in(channel, Perm::Bypass) {
             let name = ch.name.clone();
             self.channel_dialog =
                 Some(ChannelDialog::Password { channel, name, password: String::new(), focused: false });
@@ -385,13 +375,10 @@ impl App {
         }
     }
 
-    fn allowed(&self, action: Action<'_>) -> bool {
-        self.view.as_ref().is_some_and(|v| v.allowed(action))
-    }
-
     fn open_create_channel(&mut self, parent: Option<ChannelId>) {
         let parent_temporary =
             parent.and_then(|p| self.view.as_ref()?.channels.get(&p).map(|c| c.temporary)).unwrap_or(false);
+        let permanent = self.view.as_ref().is_some_and(|v| manages(v, parent));
         self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
             editing: None,
             parent,
@@ -402,7 +389,7 @@ impl App {
             had_password: false,
             protected: false,
             password: String::new(),
-            temporary: !self.allowed(Action::CreatePermanentChannel) || parent_temporary,
+            temporary: !permanent || parent_temporary,
             focused: false,
         }));
     }
@@ -448,11 +435,6 @@ impl App {
         let Some(index) = siblings.iter().position(|c| c.id == channel) else { return };
         let Some(position) = index.checked_add_signed(delta as isize).filter(|&p| p < siblings.len()) else { return };
         self.net.send(C2S::MoveChannel { id: channel, parent: ch.parent, position: position as u32 });
-    }
-
-    fn authenticate(&mut self, token: String) {
-        self.pending_admin_token = Some(token.clone());
-        self.net.send(C2S::Authenticate { token });
     }
 
     fn set_status(&mut self, status: ClientStatus) {
@@ -695,12 +677,11 @@ impl App {
 
     fn on_message(&mut self, msg: S2C) {
         match msg {
-            S2C::Welcome { your_id, server, channels, clients, .. } => {
-                let (address, known_cert) = match &self.conn {
-                    Conn::Connecting { address, known_cert, .. } => (address.clone(), *known_cert),
-                    _ => (String::new(), false),
+            S2C::Welcome { your_id, server, channels, clients, permissions, .. } => {
+                let address = match &self.conn {
+                    Conn::Connecting { address, .. } => address.clone(),
+                    _ => String::new(),
                 };
-                self.server_address.clone_from(&address);
                 let recent = Recent { address, server_name: server.name.clone() };
                 self.settings.recent.retain(|r| r.address != recent.address);
                 self.settings.recent.insert(0, recent);
@@ -711,7 +692,7 @@ impl App {
                 for c in &clients {
                     self.apply_user_volume(c.id, &c.nickname);
                 }
-                self.view = Some(ServerView::new(your_id, server, channels, clients));
+                self.view = Some(ServerView::new(your_id, server, channels, clients, permissions));
                 self.conn = Conn::Connected;
                 self.voice.connected_at = Some(Instant::now());
                 self.voice.seen = None;
@@ -729,23 +710,6 @@ impl App {
                 self.focus_input = true;
                 if self.settings.status != ClientStatus::default() {
                     self.net.send(C2S::SetStatus(self.settings.status));
-                }
-                if let Some(token) = self.settings.admin_tokens.get(&self.server_address).cloned() {
-                    if known_cert {
-                        self.authenticate(token);
-                    } else {
-                        let pin = self.settings.server_certs.get(&net::canonical_address(&self.server_address));
-                        let fingerprint = pin.map_or_default(|f| format!(" ({f})"));
-                        self.push(
-                            0,
-                            LineKind::System,
-                            format!(
-                                "Admin login skipped: this is the first secure connection to this server. If its \
-                                 certificate fingerprint{fingerprint} is right, log in again with Admin login in \
-                                 the menu next to CHANNELS."
-                            ),
-                        );
-                    }
                 }
             }
             S2C::ClientJoined(info) => {
@@ -806,22 +770,22 @@ impl App {
                     self.sound(Sound::UserLeft);
                 }
             }
-            S2C::ClientStatus { .. } => self.apply(&msg),
+            S2C::ClientStatus { .. } | S2C::Permissions(_) | S2C::Roles(_) => self.apply(&msg),
             S2C::Channels(_) => {
                 self.apply(&msg);
                 self.sync_channel_tab_title();
             }
-            S2C::ClientAdmin { id, admin } => {
-                self.apply(&msg);
+            S2C::ClientRole { id, ref role } => {
                 let Some(view) = &self.view else { return };
-                let name = view.nickname(id).unwrap_or("Someone").to_owned();
-                if id == view.my_id {
-                    if let Some(token) = self.pending_admin_token.take() {
-                        self.settings.admin_tokens.insert(self.server_address.clone(), token);
-                    }
-                    self.push(0, LineKind::System, "You are a server admin now");
-                } else if admin {
-                    self.push(0, LineKind::System, format!("{name} is a server admin now"));
+                let line = match (id == view.my_id, role) {
+                    (true, Some(role)) => format!("Your role is {role} now"),
+                    (true, None) => "You no longer have a role".to_owned(),
+                    (false, Some(role)) => format!("{} is {role} now", view.nickname(id).unwrap_or("Someone")),
+                    (false, None) => String::new(),
+                };
+                self.apply(&msg);
+                if !line.is_empty() {
+                    self.push(0, LineKind::System, line);
                 }
             }
             S2C::Text { from, target, channel, text } => {
@@ -847,10 +811,6 @@ impl App {
             }
             S2C::Poked { from, message } => self.on_poked(from, message),
             S2C::Error { message } => {
-                // A saved token that no longer works (e.g. the server's was reset) is forgotten.
-                if message == "wrong admin token" && self.pending_admin_token.take().is_some() {
-                    self.settings.admin_tokens.remove(&self.server_address);
-                }
                 let tab = self.active_tab;
                 self.push(tab, LineKind::Error, message);
             }
@@ -1062,7 +1022,6 @@ impl App {
                 let mut private = None;
                 let mut poke = None;
                 let mut action: Option<TreeAction> = None;
-                let admin = view.me().is_some_and(|c| c.admin);
 
                 ui.horizontal(|ui| {
                     // Lined up with the channel icons below.
@@ -1081,18 +1040,23 @@ impl App {
                             color,
                         );
                         egui::Popup::menu(&resp).show(|ui| {
-                            let permanent = view.allowed(Action::CreatePermanentChannel);
-                            let label = if permanent { "Create channel…" } else { "Create temporary channel…" };
-                            if ui.button(label).clicked() {
+                            let label = if manages(view, None) {
+                                Some("Create channel…")
+                            } else {
+                                view.may(Perm::CreateTemporary).then_some("Create temporary channel…")
+                            };
+                            if let Some(label) = label
+                                && ui.button(label).clicked()
+                            {
                                 action = Some(TreeAction::Create(None));
                             }
-                            if view.allowed(Action::ManageBans) && ui.button("Bans…").clicked() {
+                            if view.may(Perm::Ban) && ui.button("Bans…").clicked() {
                                 action = Some(TreeAction::Bans);
                             }
-                            if admin {
-                                ui.add_enabled(false, egui::Button::new("You're a server admin"));
-                            } else if ui.button("Admin login…").clicked() {
-                                action = Some(TreeAction::AdminLogin);
+                            if view.is_owner() {
+                                ui.add_enabled(false, egui::Button::new("You own this server"));
+                            } else if ui.button("Claim ownership…").clicked() {
+                                action = Some(TreeAction::ClaimOwnership);
                             }
                         });
                     });
@@ -1105,10 +1069,11 @@ impl App {
                     let dragging_self = egui::DragAndDrop::has_payload_of_type::<DragSelf>(ui.ctx());
                     let dragging_channel = egui::DragAndDrop::payload::<DragChannel>(ui.ctx()).map(|d| d.0);
                     let pointer = ui.input(|i| i.pointer.interact_pos());
-                    let may_rearrange = view.allowed(Action::RearrangeChannels);
-
                     for &(depth, ch_id) in view.tree() {
                         let ch = &view.channels[&ch_id];
+                        let manages_it = manages(view, Some(ch_id));
+                        // Moving it renumbers its siblings.
+                        let may_rearrange = manages_it && manages(view, ch.parent);
                         let clients = view.clients_in(ch_id);
                         let indent = depth as f32 * 18.0;
                         let is_mine = mine == Some(ch_id);
@@ -1119,7 +1084,10 @@ impl App {
                         let channel_drop = match (dragging_channel, pointer) {
                             (Some(dragged), Some(pos)) if resp.contains_pointer() => {
                                 let zone = Zone::at((pos.y - rect.top()) / rect.height());
-                                Some((zone, channel_drop::drop_target(&view.channels, dragged, ch_id, zone)))
+                                match channel_drop::drop_target(&view.channels, dragged, ch_id, zone) {
+                                    Outcome::Move(to) if !manages(view, to.parent) => None,
+                                    outcome => Some((zone, outcome)),
+                                }
                             }
                             _ => None,
                         };
@@ -1254,30 +1222,33 @@ impl App {
                                 ui.close();
                             }
                             ui.separator();
-                            if depth + 1 < MAX_CHANNEL_DEPTH && ui.button("Create sub-channel…").clicked() {
+                            let may_create = view.may_in(ch_id, Perm::CreateTemporary) || manages_it;
+                            if depth + 1 < MAX_CHANNEL_DEPTH && may_create && ui.button("Create sub-channel…").clicked()
+                            {
                                 action = Some(TreeAction::Create(Some(ch_id)));
                                 ui.close();
                             }
-                            if view.allowed(Action::EditChannel(ch_id)) && ui.button("Edit channel…").clicked() {
+                            if manages_it && ui.button("Edit channel…").clicked() {
                                 action = Some(TreeAction::Edit(ch_id));
                                 ui.close();
                             }
-                            if view.allowed(Action::RearrangeChannels) {
+                            if may_rearrange {
                                 if ui.button("Move up").clicked() {
                                     action = Some(TreeAction::Shift(ch_id, -1));
                                 }
                                 if ui.button("Move down").clicked() {
                                     action = Some(TreeAction::Shift(ch_id, 1));
                                 }
-                                if !ch.default && !ch.temporary && ui.button("Make default channel").clicked() {
-                                    action = Some(TreeAction::MakeDefault(ch_id));
-                                    ui.close();
-                                }
                             }
-                            if view.allowed(Action::DeleteChannel(ch_id))
+                            if view.may(Perm::ManageChannels)
                                 && !ch.default
-                                && ui.button("Delete channel…").clicked()
+                                && !ch.temporary
+                                && ui.button("Make default channel").clicked()
                             {
+                                action = Some(TreeAction::MakeDefault(ch_id));
+                                ui.close();
+                            }
+                            if manages_it && !ch.default && ui.button("Delete channel…").clicked() {
                                 action = Some(TreeAction::Delete(ch_id));
                                 ui.close();
                             }
@@ -1311,9 +1282,9 @@ impl App {
                                 color,
                             );
                             let mut name_end = name_rect.right();
-                            let badge = if c.admin {
+                            let badge = if c.role.is_some() {
                                 Some((Icon::Shield, theme::ACCENT_TEXT))
-                            } else if perms::moderated_from(c.identity, ch_id, &view.channels).is_some() {
+                            } else if view.moderates(c.identity, ch_id) {
                                 Some((Icon::Star, theme::TEXT_DIM))
                             } else {
                                 None
@@ -1361,6 +1332,10 @@ impl App {
                                 }
                             }
 
+                            let resp = match &c.role {
+                                Some(role) => resp.on_hover_text(role),
+                                None => resp,
+                            };
                             if is_me {
                                 if resp.drag_started() {
                                     resp.dnd_set_drag_payload(DragSelf);
@@ -1382,13 +1357,12 @@ impl App {
                                         poke = Some(c.id);
                                         ui.close();
                                     }
-                                    let kicks = [(false, "Kick from channel…"), (true, "Kick from server…")].map(
-                                        |(from_server, label)| {
-                                            (from_server, label, view.allowed(Action::Kick { target: c, from_server }))
-                                        },
-                                    );
-                                    let ban = view.allowed(Action::Ban(c));
-                                    let set_moderator = view.allowed(Action::SetModerator);
+                                    let kicks = [
+                                        (false, "Kick from channel…", !ch.default && view.may_in(ch_id, Perm::Kick)),
+                                        (true, "Kick from server…", view.may(Perm::Kick)),
+                                    ];
+                                    let ban = view.may(Perm::Ban);
+                                    let set_moderator = view.may_in(ch_id, Perm::ManagePermissions);
                                     if kicks.iter().any(|k| k.2) || ban || set_moderator {
                                         ui.separator();
                                     }
@@ -1461,8 +1435,9 @@ impl App {
                     }
                     Some(TreeAction::MakeDefault(ch)) => self.net.send(C2S::SetDefaultChannel { id: ch }),
                     Some(TreeAction::Delete(ch)) => self.open_delete_channel(ch),
-                    Some(TreeAction::AdminLogin) => {
-                        self.channel_dialog = Some(ChannelDialog::AdminLogin { token: String::new(), focused: false });
+                    Some(TreeAction::ClaimOwnership) => {
+                        self.channel_dialog =
+                            Some(ChannelDialog::ClaimOwnership { token: String::new(), focused: false });
                     }
                     Some(TreeAction::SetModerator { channel, identity, moderator }) => {
                         self.net.send(C2S::SetModerator { channel, identity, moderator });
@@ -2100,10 +2075,6 @@ impl App {
             self.settings.server_certs.insert(net::canonical_address(&change.address), change.presented);
             let nickname = self.settings.nickname.clone();
             self.connect(change.address, nickname, change.password);
-            // Only the user's check vouches for the new pin, as on a first use.
-            if let Conn::Connecting { known_cert, .. } = &mut self.conn {
-                *known_cert = false;
-            }
         } else if cancel || modal.should_close() {
             self.cert_change = None;
         }
@@ -2123,15 +2094,20 @@ impl App {
         }
         let Some(dialog) = &mut self.channel_dialog else { return };
         let view = self.view.as_ref();
-        let may_create_permanent = view.is_some_and(|v| v.allowed(Action::CreatePermanentChannel));
-        // Admins see who moderates the channel they edit: by nickname when online.
+        let parent = match dialog {
+            ChannelDialog::Form(f) => f.parent,
+            _ => None,
+        };
+        let may_create_permanent = view.is_some_and(|v| manages(v, parent));
+        // Who moderates the channel being edited, by nickname when online, for
+        // those who may change that.
         let editing = match dialog {
             ChannelDialog::Form(f) => f.editing,
             _ => None,
         };
         let moderators: Option<Vec<(Identity, Option<String>)>> = view
-            .filter(|v| v.allowed(Action::SetModerator))
             .zip(editing)
+            .filter(|(v, id)| v.may_in(*id, Perm::ManagePermissions))
             .and_then(|(v, id)| v.channels.get(&id).map(|ch| (v, ch)))
             .map(|(v, ch)| {
                 let online = |m: &Identity| v.clients.values().find(|c| c.identity == *m).map(|c| c.nickname.clone());
@@ -2151,7 +2127,6 @@ impl App {
             .unwrap_or_else(|| "the default channel".into());
 
         let mut send: Option<C2S> = None;
-        let mut login: Option<String> = None;
         let mut close = false;
         let modal = theme::modal("channel-dialog").show(ctx, |ui| {
             ui.set_width(380.0);
@@ -2275,22 +2250,22 @@ impl App {
                         }
                     });
                 }
-                ChannelDialog::AdminLogin { token, focused } => {
+                ChannelDialog::ClaimOwnership { token, focused } => {
                     dialog_header(
                         ui,
-                        "Admin login",
-                        "Admins can manage every channel, choose moderators, and kick and ban people. The token \
-                         is in the server's log and in admin_token.txt next to its config.",
+                        "Claim ownership",
+                        "The owner can do everything and hands out roles. The server shows a claim token in its \
+                         log until someone claims it; it works once.",
                     );
-                    let field = ui.add(text_input(token).password(true).hint_text("Admin token"));
+                    let field = ui.add(text_input(token).password(true).hint_text("Claim token"));
                     if !*focused {
                         field.request_focus();
                         *focused = true;
                     }
                     let ready = !token.trim().is_empty();
                     dialog_footer(ui, |ui| {
-                        if ui.add_enabled(ready, Btn::primary("Log in")).clicked() || (ready && enter) {
-                            login = Some(token.trim().to_owned());
+                        if ui.add_enabled(ready, Btn::primary("Claim")).clicked() || (ready && enter) {
+                            send = Some(C2S::ClaimOwnership { token: token.trim().to_owned() });
                         }
                         if ui.add(Btn::secondary("Cancel")).clicked() {
                             close = true;
@@ -2306,13 +2281,18 @@ impl App {
             self.net.send(msg);
             close = true;
         }
-        if let Some(token) = login {
-            self.authenticate(token);
-            close = true;
-        }
         if close || modal.should_close() {
             self.channel_dialog = None;
         }
+    }
+}
+
+/// Whether the server lets this client manage channels in `place`: a channel
+/// and those below it, or the top level with `None`.
+fn manages(view: &ServerView, place: Option<ChannelId>) -> bool {
+    match place {
+        Some(p) => view.may_in(p, Perm::ManageChannels),
+        None => view.may(Perm::ManageChannels),
     }
 }
 

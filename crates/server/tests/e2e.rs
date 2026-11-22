@@ -1,10 +1,11 @@
 //! Spins up a real server on localhost and drives it with raw protocol clients.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use t7_proto::identity::IdentityKey;
+use t7_proto::perms::{Perm, Perms};
 use t7_proto::*;
 use t7_server::config::{Config, DEFAULT_CONFIG};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
@@ -343,94 +344,12 @@ impl TestClient {
     }
 }
 
-/// The default config with a known admin token.
-fn with_admin_token(token: &str) -> String {
-    DEFAULT_CONFIG.replace(r#"admin_token = """#, &format!(r#"admin_token = "{token}""#))
-}
-
 fn settings(name: &str) -> ChannelSettings {
     ChannelSettings { name: name.into(), topic: String::new(), max_clients: None, password: PasswordChange::Keep }
 }
 
 fn id_of(list: &[ChannelInfo], name: &str) -> ChannelId {
     list.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no channel {name}")).id
-}
-
-#[tokio::test]
-async fn channels_are_managed_with_permissions() {
-    let cfg = with_admin_token("sekrit");
-    let addr = start(&cfg).await;
-    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
-    let (mut admin, wa) = TestClient::connect(addr, "admin", None).await;
-    let (S2C::Welcome { your_id: user_id, channels, .. }, S2C::Welcome { your_id: admin_id, .. }) = (&wu, &wa) else {
-        panic!("not welcomed");
-    };
-    let (user_id, admin_id) = (*user_id, *admin_id);
-    let lobby = id_of(channels, "Lobby");
-    user.recv().await; // admin joined
-
-    // Anyone can make a temporary channel and is moved into it.
-    user.send(C2S::CreateChannel { parent: None, settings: settings("Raid"), temporary: true }).await;
-    let list = user.channels().await;
-    let raid = id_of(&list, "Raid");
-    assert!(list.iter().find(|c| c.id == raid).unwrap().temporary);
-    assert_eq!(user.recv().await, S2C::ClientMoved { id: user_id, channel: raid });
-
-    // ...but not a permanent one, and not edit channels they didn't make.
-    user.send(C2S::CreateChannel { parent: None, settings: settings("Mine"), temporary: false }).await;
-    assert!(
-        matches!(user.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { ref message } if message.contains("only admins"))
-    );
-    user.send(C2S::DeleteChannel { id: lobby }).await;
-    assert!(matches!(user.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { .. }));
-
-    // The creator may edit their temporary channel, adding a password.
-    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Raid Night") };
-    user.send(C2S::EditChannel { id: raid, settings: locked }).await;
-    let list = user.channels().await;
-    assert!(list.iter().any(|c| c.name == "Raid Night" && c.has_password));
-
-    // A wrong token is refused; the right one makes you admin, and everyone hears about it.
-    admin.send(C2S::Authenticate { token: "guess".into() }).await;
-    assert!(
-        matches!(admin.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { ref message } if message.contains("wrong admin token"))
-    );
-    admin.send(C2S::Authenticate { token: "sekrit".into() }).await;
-    assert_eq!(
-        user.until(|m| matches!(m, S2C::ClientAdmin { .. })).await,
-        S2C::ClientAdmin { id: admin_id, admin: true }
-    );
-
-    // Admins skip channel passwords; others need them.
-    admin.send(C2S::JoinChannel { channel: raid, password: None }).await;
-    assert_eq!(
-        admin.until(|m| matches!(m, S2C::ClientMoved { .. })).await,
-        S2C::ClientMoved { id: admin_id, channel: raid }
-    );
-
-    // Admins make permanent channels, rearrange them and pick the default.
-    admin.send(C2S::CreateChannel { parent: None, settings: settings("Music"), temporary: false }).await;
-    let music = id_of(&admin.channels().await, "Music");
-    admin.send(C2S::MoveChannel { id: music, parent: None, position: 0 }).await;
-    let list = admin.channels().await;
-    assert_eq!(list.iter().find(|c| c.id == music).unwrap().order, 0);
-    admin.send(C2S::SetDefaultChannel { id: music }).await;
-    assert!(admin.channels().await.iter().any(|c| c.id == music && c.default));
-
-    // Deleting a channel moves the people inside to the default channel.
-    user.send(C2S::JoinChannel { channel: lobby, password: None }).await;
-    user.until(|m| matches!(m, S2C::ClientMoved { id, .. } if *id == user_id)).await;
-    admin.send(C2S::DeleteChannel { id: lobby }).await;
-    assert_eq!(
-        user.until(|m| matches!(m, S2C::ClientMoved { .. })).await,
-        S2C::ClientMoved { id: user_id, channel: music }
-    );
-    assert!(user.channels().await.iter().all(|c| c.id != lobby));
-
-    // The temporary channel vanished when the admin (its last occupant) left it.
-    admin.send(C2S::JoinChannel { channel: music, password: None }).await;
-    let list = admin.channels().await;
-    assert!(list.iter().all(|c| c.id != raid), "empty temporary channel should be gone");
 }
 
 /// An empty directory of its own for a test's server files.
@@ -441,50 +360,29 @@ fn data_dir(test: &str) -> PathBuf {
     dir
 }
 
-#[tokio::test]
-async fn channel_edits_and_the_certificate_survive_a_restart() {
-    let dir = data_dir("restart");
-    let cfg: Config = toml::from_str(&with_admin_token("t")).unwrap();
-    let cfg_text = with_admin_token("t");
-    let (addr, task) = start_in(&cfg_text, Some(dir.clone())).await;
-    let first = fingerprint(addr).await;
-    let cert = std::fs::read(dir.join("tls_cert.der")).expect("certificate saved");
-    assert_eq!(tls::Fingerprint::of(&cert), first);
-    let (mut admin, _) = TestClient::connect(addr, "admin", None).await;
-    admin.send(C2S::Authenticate { token: "t".into() }).await;
-    admin.send(C2S::CreateChannel { parent: None, settings: settings("Saved"), temporary: false }).await;
-    admin.channels().await;
-    task.abort();
-    drop(admin);
-
-    let (addr, task) = start_in(&cfg_text, Some(dir.clone())).await;
-    assert_eq!(fingerprint(addr).await, first, "a restart must keep the certificate");
-    let (_, welcome) = TestClient::connect(addr, "later", None).await;
-    let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed") };
-    assert!(channels.iter().any(|c| c.name == "Saved"), "channel lost on restart");
-    assert_eq!(channels.len(), Channels::count(&cfg) + 1);
-    task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
+/// The claim token the server keeping its files in `dir` printed.
+fn claim_token(dir: &Path) -> String {
+    let text = std::fs::read_to_string(dir.join("roles.toml")).expect("roles.toml");
+    let file: toml::Table = toml::from_str(&text).unwrap();
+    file.get("claim_token").and_then(|t| t.as_str()).unwrap_or_else(|| panic!("no claim token: {text}")).to_owned()
 }
 
-/// Channel count of a config, for comparisons.
-struct Channels;
-impl Channels {
-    fn count(cfg: &Config) -> usize {
-        fn walk(list: &[t7_server::config::ChannelConfig]) -> usize {
-            list.iter().map(|c| 1 + walk(&c.children)).sum()
-        }
-        walk(&cfg.channels)
-    }
-}
-
-/// Connects and logs in as admin.
-async fn admin_login(addr: SocketAddr, from: Ipv4Addr) -> (TestClient, ClientId, Vec<ChannelInfo>) {
-    let (mut admin, welcome) = TestClient::connect_from(addr, from, "admin", &key("admin")).await;
+/// Connects as "admin" from `from` and claims the server keeping its files in `dir`.
+async fn claim(addr: SocketAddr, dir: &Path, from: Ipv4Addr) -> (TestClient, ClientId, Vec<ChannelInfo>) {
+    let (mut owner, welcome) = TestClient::connect_from(addr, from, "admin", &key("admin")).await;
     let S2C::Welcome { your_id, channels, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
-    admin.send(C2S::Authenticate { token: "t".into() }).await;
-    admin.until(|m| matches!(m, S2C::ClientAdmin { .. })).await;
-    (admin, your_id, channels)
+    owner.send(C2S::ClaimOwnership { token: claim_token(dir) }).await;
+    owner.until(|m| *m == S2C::ClientRole { id: your_id, role: Some("Owner".into()) }).await;
+    (owner, your_id, channels)
+}
+
+/// A server of the default config keeping its files in a directory for
+/// `test`, and its owner "admin", connected from `from`.
+async fn start_owned(test: &str, from: Ipv4Addr) -> (SocketAddr, TestClient, ClientId, Vec<ChannelInfo>) {
+    let dir = data_dir(test);
+    let (addr, _) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (owner, id, channels) = claim(addr, &dir, from).await;
+    (addr, owner, id, channels)
 }
 
 fn welcomed_id(welcome: &S2C) -> ClientId {
@@ -505,6 +403,205 @@ async fn error(c: &mut TestClient) -> String {
     match c.until(|m| matches!(m, S2C::Error { .. })).await {
         S2C::Error { message } => message,
         _ => unreachable!(),
+    }
+}
+
+/// What a welcomed client may do in `channel`.
+fn may_in(welcome: &S2C, channel: ChannelId) -> Perms {
+    let S2C::Welcome { permissions, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
+    permissions.channels.iter().find(|(c, _)| *c == channel).unwrap_or_else(|| panic!("no channel {channel}")).1
+}
+
+#[tokio::test]
+async fn the_first_to_claim_owns_the_server() {
+    let dir = data_dir("claim");
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (mut alice, wa) = TestClient::connect(addr, "alice", None).await;
+    let (mut bob, wb) = TestClient::connect(addr, "bob", None).await;
+    // Saved before the server took connections.
+    let token = claim_token(&dir);
+    let alice_id = welcomed_id(&wa);
+    let S2C::Welcome { permissions, .. } = &wb else { unreachable!() };
+    assert!(!permissions.server.has(Perm::ManageRoles));
+    alice.recv().await; // bob joined
+
+    bob.send(C2S::ClaimOwnership { token: "guess".into() }).await;
+    assert!(error(&mut bob).await.contains("wrong"));
+
+    // Alice may do everything now and gets the roles, and everyone sees she owns the server.
+    alice.send(C2S::ClaimOwnership { token: token.clone() }).await;
+    let S2C::Permissions(mine) = alice.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
+    assert_eq!(mine.server, Perms::ALL);
+    let S2C::Roles(roles) = alice.until(|m| matches!(m, S2C::Roles(_))).await else { unreachable!() };
+    assert_eq!(roles.owner, Some(key("alice").identity()));
+    assert_eq!(roles.members[&key("alice").identity()].nickname, "alice");
+    let owner = S2C::ClientRole { id: alice_id, role: Some("Owner".into()) };
+    assert_eq!(bob.until(|m| matches!(m, S2C::ClientRole { .. })).await, owner);
+
+    // The token is used up, for good.
+    bob.send(C2S::ClaimOwnership { token: token.clone() }).await;
+    assert!(error(&mut bob).await.contains("already used"));
+    let saved = std::fs::read_to_string(dir.join("roles.toml")).unwrap();
+    assert!(!saved.contains("claim_token"), "{saved}");
+    task.abort();
+    drop((alice, bob));
+
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (_, welcome) = TestClient::connect(addr, "alice", None).await;
+    let S2C::Welcome { your_id, clients, permissions, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
+    assert_eq!(clients.iter().find(|c| c.id == your_id).unwrap().role.as_deref(), Some("Owner"));
+    assert_eq!(permissions.server, Perms::ALL);
+    let (mut bob, _) = TestClient::connect(addr, "bob", None).await;
+    bob.send(C2S::ClaimOwnership { token }).await;
+    assert!(error(&mut bob).await.contains("already used"));
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn clients_from_before_roles_are_told_to_update() {
+    let addr = start(DEFAULT_CONFIG).await;
+    // Protocol 5 said Hello the same way, so it gets the reason.
+    let (_, reply) = TestClient::connect_as(addr, "old", None, 5).await;
+    assert!(rejected(&reply).contains("please update your T7"), "{reply:?}");
+}
+
+#[tokio::test]
+async fn installs_from_before_roles_keep_their_moderators() {
+    let dir = data_dir("migrate");
+    // What 0.4 left: an admin token, in its file and in the config, and a moderated channel.
+    std::fs::write(dir.join("admin_token.txt"), "old-token").unwrap();
+    let moderator = key("mod").identity().to_hex();
+    let channels = format!(
+        "[[channels]]\nname = \"Lobby\"\ndefault = true\n\n[[channels]]\nname = \"Gaming\"\nmoderators = \
+         [\"{moderator}\"]\n\n  [[channels.children]]\n  name = \"Squad\"\n\n[[channels]]\nname = \"AFK\"\n"
+    );
+    std::fs::write(dir.join("channels.toml"), channels).unwrap();
+    let cfg = format!("admin_token = \"old-token\"\n{DEFAULT_CONFIG}");
+    let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
+    let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
+    assert!(!dir.join("admin_token.txt").exists(), "the admin token is gone");
+    assert!(!claim_token(&dir).is_empty(), "a claim token replaces it");
+
+    // The moderator moderates Gaming and below, as before.
+    let S2C::Welcome { channels, .. } = &wm else { unreachable!() };
+    let [gaming, squad, afk] = ["Gaming", "Squad", "AFK"].map(|name| id_of(channels, name));
+    assert_eq!(channels.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
+    for (channel, kicks) in [(gaming, true), (squad, true), (afk, false)] {
+        assert_eq!(may_in(&wm, channel).has(Perm::Kick), kicks, "{channel}");
+    }
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    user.send(C2S::JoinChannel { channel: squad, password: None }).await;
+    moder.until(|m| *m == S2C::ClientMoved { id: user_id, channel: squad }).await;
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    assert!(
+        matches!(user.until(|m| matches!(m, S2C::ClientKicked { .. })).await, S2C::ClientKicked { id, .. } if id == user_id)
+    );
+
+    // The old token claims nothing.
+    moder.send(C2S::ClaimOwnership { token: "old-token".into() }).await;
+    assert!(error(&mut moder).await.contains("wrong"));
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn channels_are_managed_with_permissions() {
+    let dir = data_dir("manage");
+    let (addr, _) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    let S2C::Welcome { channels, .. } = &wu else { unreachable!() };
+    let lobby = id_of(channels, "Lobby");
+
+    // Anyone can make a temporary channel and is moved into it.
+    user.send(C2S::CreateChannel { parent: None, settings: settings("Raid"), temporary: true }).await;
+    let list = user.channels().await;
+    let raid = id_of(&list, "Raid");
+    assert!(list.iter().find(|c| c.id == raid).unwrap().temporary);
+    assert_eq!(
+        user.until(|m| matches!(m, S2C::ClientMoved { .. })).await,
+        S2C::ClientMoved { id: user_id, channel: raid }
+    );
+
+    // ...but not a permanent one, and not edit channels they didn't make.
+    user.send(C2S::CreateChannel { parent: None, settings: settings("Mine"), temporary: false }).await;
+    assert!(error(&mut user).await.contains("can't create permanent channels"));
+    user.send(C2S::DeleteChannel { id: lobby }).await;
+    assert!(error(&mut user).await.contains("can't delete"));
+
+    // The creator may edit their temporary channel, adding a password.
+    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Raid Night") };
+    user.send(C2S::EditChannel { id: raid, settings: locked }).await;
+    let list = user.channels().await;
+    assert!(list.iter().any(|c| c.name == "Raid Night" && c.has_password));
+
+    // The owner skips channel passwords; others need them.
+    let (mut admin, admin_id, _) = claim(addr, &dir, HOME).await;
+    admin.send(C2S::JoinChannel { channel: raid, password: None }).await;
+    assert_eq!(
+        admin.until(|m| matches!(m, S2C::ClientMoved { .. })).await,
+        S2C::ClientMoved { id: admin_id, channel: raid }
+    );
+
+    // The owner makes permanent channels, rearranges them and picks the default.
+    admin.send(C2S::CreateChannel { parent: None, settings: settings("Music"), temporary: false }).await;
+    let music = id_of(&admin.channels().await, "Music");
+    admin.send(C2S::MoveChannel { id: music, parent: None, position: 0 }).await;
+    let list = admin.channels().await;
+    assert_eq!(list.iter().find(|c| c.id == music).unwrap().order, 0);
+    admin.send(C2S::SetDefaultChannel { id: music }).await;
+    assert!(admin.channels().await.iter().any(|c| c.id == music && c.default));
+
+    // Deleting a channel moves the people inside to the default channel.
+    user.send(C2S::JoinChannel { channel: lobby, password: None }).await;
+    user.until(|m| matches!(m, S2C::ClientMoved { id, .. } if *id == user_id)).await;
+    admin.send(C2S::DeleteChannel { id: lobby }).await;
+    assert_eq!(
+        user.until(|m| matches!(m, S2C::ClientMoved { .. })).await,
+        S2C::ClientMoved { id: user_id, channel: music }
+    );
+    assert!(user.channels().await.iter().all(|c| c.id != lobby));
+
+    // The temporary channel vanished when the owner (its last occupant) left it.
+    admin.send(C2S::JoinChannel { channel: music, password: None }).await;
+    let list = admin.channels().await;
+    assert!(list.iter().all(|c| c.id != raid), "empty temporary channel should be gone");
+}
+
+#[tokio::test]
+async fn channel_edits_and_the_certificate_survive_a_restart() {
+    let dir = data_dir("restart");
+    let cfg: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let first = fingerprint(addr).await;
+    let cert = std::fs::read(dir.join("tls_cert.der")).expect("certificate saved");
+    assert_eq!(tls::Fingerprint::of(&cert), first);
+    let (mut admin, _, _) = claim(addr, &dir, HOME).await;
+    admin.send(C2S::CreateChannel { parent: None, settings: settings("Saved"), temporary: false }).await;
+    admin.channels().await;
+    task.abort();
+    drop(admin);
+
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    assert_eq!(fingerprint(addr).await, first, "a restart must keep the certificate");
+    let (_, welcome) = TestClient::connect(addr, "later", None).await;
+    let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed") };
+    assert!(channels.iter().any(|c| c.name == "Saved"), "channel lost on restart");
+    assert_eq!(channels.len(), Channels::count(&cfg) + 1);
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Channel count of a config, for comparisons.
+struct Channels;
+impl Channels {
+    fn count(cfg: &Config) -> usize {
+        fn walk(list: &[t7_server::config::ChannelConfig]) -> usize {
+            list.iter().map(|c| 1 + walk(&c.children)).sum()
+        }
+        walk(&cfg.channels)
     }
 }
 
@@ -535,8 +632,7 @@ async fn identities_are_proven_on_each_connection() {
 
 #[tokio::test]
 async fn moderators_kick_from_their_channels_only() {
-    let addr = start(&with_admin_token("t")).await;
-    let (mut admin, admin_id, channels) = admin_login(addr, HOME).await;
+    let (addr, mut admin, admin_id, channels) = start_owned("mod-kicks", HOME).await;
     let (gaming, squad, lobby) = (id_of(&channels, "Gaming"), id_of(&channels, "Squad 1"), id_of(&channels, "Lobby"));
     let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
     let (mut user, wu) = TestClient::connect(addr, "user", None).await;
@@ -548,13 +644,13 @@ async fn moderators_kick_from_their_channels_only() {
     user.send(C2S::JoinChannel { channel: squad, password: None }).await;
     moder.until(|m| *m == S2C::ClientMoved { id: user_id, channel: squad }).await;
 
-    // Nobody else may kick, and a moderator may not kick off the server.
+    // Nobody else may kick, and a moderator may not kick off the server, nor the owner.
     user.send(C2S::Kick { target: mod_id, from_server: false, reason: String::new() }).await;
     assert!(error(&mut user).await.contains("can't kick"));
     moder.send(C2S::Kick { target: user_id, from_server: true, reason: "bye".into() }).await;
-    assert!(error(&mut moder).await.contains("only admins"));
+    assert!(error(&mut moder).await.contains("can't kick"));
     moder.send(C2S::Kick { target: admin_id, from_server: false, reason: String::new() }).await;
-    assert!(error(&mut moder).await.contains("can't kick"), "an admin");
+    assert!(error(&mut moder).await.contains("can't kick"), "the owner");
 
     // A channel kick: everyone hears who and why, and the user lands in the default channel.
     moder.send(C2S::Kick { target: user_id, from_server: false, reason: "  off topic ".into() }).await;
@@ -564,10 +660,10 @@ async fn moderators_kick_from_their_channels_only() {
     assert_eq!(user.recv().await, S2C::ClientMoved { id: user_id, channel: lobby });
 
     // In the default channel there is nowhere to kick them to.
-    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
-    assert!(error(&mut moder).await.contains("can't kick"));
+    admin.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    assert!(error(&mut admin).await.contains("nowhere to kick"));
 
-    // An admin's server kick: the notice arrives before the connection closes.
+    // An owner's server kick: the notice arrives before the connection closes.
     admin.send(C2S::Kick { target: user_id, from_server: true, reason: "x".repeat(MAX_REASON_LEN + 1) }).await;
     assert!(error(&mut admin).await.contains("at most"));
     admin.send(C2S::Kick { target: user_id, from_server: true, reason: "enough".into() }).await;
@@ -580,8 +676,7 @@ async fn moderators_kick_from_their_channels_only() {
 
 #[tokio::test]
 async fn kicked_people_land_where_a_joining_client_would() {
-    let addr = start(&with_admin_token("t")).await;
-    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    let (addr, mut admin, _, channels) = start_owned("kick-landing", HOME).await;
     let [lobby, hangout, gaming, squad] = ["Lobby", "Hangout", "Gaming", "Squad 1"].map(|name| id_of(&channels, name));
     let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
     let (mut user, wu) = TestClient::connect(addr, "user", None).await;
@@ -613,9 +708,8 @@ async fn kicked_people_land_where_a_joining_client_would() {
 
 #[tokio::test]
 async fn bans_keep_identities_and_addresses_out() {
-    let addr = start(&with_admin_token("t")).await;
-    // The admin comes from another address than the people it bans.
-    let (mut admin, admin_id, _) = admin_login(addr, ADMIN_IP).await;
+    // The owner comes from another address than the people it bans.
+    let (addr, mut admin, admin_id, _) = start_owned("bans", ADMIN_IP).await;
     let (mut mallory, wm) = TestClient::connect(addr, "mallory", None).await;
     let mallory_id = welcomed_id(&wm);
 
@@ -645,7 +739,7 @@ async fn bans_keep_identities_and_addresses_out() {
     let ends = ["59 minutes", "1 hour"].map(|left| format!("You are banned from this server. The ban ends in {left}."));
     assert!(ends.iter().any(|e| e == rejected(&reply)), "{reply:?}");
 
-    // Banning the address the admin is on would lock the admin out too.
+    // Banning the address the owner is on would lock the owner out too.
     // Held open: a dropped connection could leave before the ban arrives.
     let (_flatmate, wb) = TestClient::connect_from(addr, ADMIN_IP, "flatmate", &key("flatmate")).await;
     admin
@@ -670,18 +764,17 @@ async fn bans_keep_identities_and_addresses_out() {
     let (_, reply) = TestClient::connect_from(addr, eve_ip, "eve", &key("eve")).await;
     welcomed_id(&reply);
 
-    // Only admins see or lift bans.
+    // Only those who may ban see or lift bans.
     let (mut user, _) = TestClient::connect(addr, "user", None).await;
     user.send(C2S::ListBans).await;
-    assert!(error(&mut user).await.contains("only admins"));
+    assert!(error(&mut user).await.contains("can't see the ban list"));
     user.send(C2S::Unban { id: mallory_ban.id }).await;
-    assert!(error(&mut user).await.contains("only admins"));
+    assert!(error(&mut user).await.contains("can't lift bans"));
 }
 
 #[tokio::test]
 async fn ip_bans_eject_everyone_at_that_address() {
-    let addr = start(&with_admin_token("t")).await;
-    let (mut admin, admin_id, _) = admin_login(addr, ADMIN_IP).await;
+    let (addr, mut admin, admin_id, _) = start_owned("ip-bans", ADMIN_IP).await;
     let (mut eve, we) = TestClient::connect_from(addr, ELSEWHERE, "eve", &key("eve")).await;
     let (mut sock, ws) = TestClient::connect_from(addr, ELSEWHERE, "sock", &key("sock")).await;
     let (mut bystander, _) = TestClient::connect_from(addr, HOME, "bystander", &key("bystander")).await;
@@ -700,19 +793,18 @@ async fn ip_bans_eject_everyone_at_that_address() {
 }
 
 #[tokio::test]
-async fn only_admins_rearrange_channels() {
-    let addr = start(&with_admin_token("t")).await;
-    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+async fn moderators_dont_rearrange_channels() {
+    let (addr, mut admin, _, channels) = start_owned("rearrange", HOME).await;
     let afk = id_of(&channels, "AFK");
-    // Even a moderator of the channel may not.
+    // Not even of the channel itself.
     let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
     admin.send(C2S::SetModerator { channel: afk, identity: key("mod").identity(), moderator: true }).await;
     let mut before = moder.channels().await;
 
     moder.send(C2S::MoveChannel { id: afk, parent: None, position: 0 }).await;
-    assert!(error(&mut moder).await.contains("only admins"));
+    assert!(error(&mut moder).await.contains("can't move this channel"));
     moder.send(C2S::SetDefaultChannel { id: afk }).await;
-    assert!(error(&mut moder).await.contains("only admins"));
+    assert!(error(&mut moder).await.contains("can't change the default channel"));
 
     let (_, welcome) = TestClient::connect(addr, "later", None).await;
     let S2C::Welcome { channels: mut after, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
@@ -723,8 +815,7 @@ async fn only_admins_rearrange_channels() {
 
 #[tokio::test]
 async fn temporary_bans_end() {
-    let addr = start(&with_admin_token("t")).await;
-    let (mut admin, _, _) = admin_login(addr, ADMIN_IP).await;
+    let (addr, mut admin, _, _) = start_owned("temp-bans", ADMIN_IP).await;
     let (mut mallory, wm) = TestClient::connect(addr, "mallory", None).await;
     // Bans count whole seconds, so this one lasts between one and two.
     admin
@@ -753,15 +844,14 @@ async fn temporary_bans_end() {
 #[tokio::test]
 async fn moderators_and_bans_survive_a_restart() {
     let dir = data_dir("moderation");
-    let cfg = with_admin_token("t");
-    let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
-    // Off the banned address, to log in again after the restart.
-    let (mut admin, _, channels) = admin_login(addr, ADMIN_IP).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    // Off the banned address, to connect again after the restart.
+    let (mut admin, _, channels) = claim(addr, &dir, ADMIN_IP).await;
     let gaming = id_of(&channels, "Gaming");
-    // Only admins choose moderators.
+    // Not everyone chooses moderators.
     let (mut user, _) = TestClient::connect(addr, "user", None).await;
     user.send(C2S::SetModerator { channel: gaming, identity: key("user").identity(), moderator: true }).await;
-    assert!(error(&mut user).await.contains("only admins"));
+    assert!(error(&mut user).await.contains("can't choose who moderates"));
     admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: true }).await;
     let list = admin.channels().await;
     assert_eq!(list.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
@@ -775,10 +865,11 @@ async fn moderators_and_bans_survive_a_restart() {
     task.abort();
     drop(admin);
 
-    let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
     let (_, reply) = TestClient::connect(addr, "mallory", None).await;
     assert!(rejected(&reply).contains("spam"), "the ban was lost: {reply:?}");
-    let (mut admin, _, channels) = admin_login(addr, ADMIN_IP).await;
+    let (mut admin, welcome) = TestClient::connect_from(addr, ADMIN_IP, "admin", &key("admin")).await;
+    let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
     assert_eq!(channels.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
     admin.send(C2S::ListBans).await;
     let S2C::Bans(list) = admin.until(|m| matches!(m, S2C::Bans(_))).await else { unreachable!() };

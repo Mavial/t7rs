@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
+use t7_proto::perms::{Member, Permissions, Perms, Roles};
 use t7_proto::{ChannelInfo, ClientInfo, ClientStatus, Identity, ServerInfo};
 
 use super::*;
@@ -28,7 +29,7 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
 }
 
 fn client(id: u32, name: &str, channel: u32, status: ClientStatus) -> ClientInfo {
-    ClientInfo { id, nickname: name.into(), channel, status, admin: false, identity: Identity([id as u8; 32]) }
+    ClientInfo { id, nickname: name.into(), channel, status, role: None, identity: Identity([id as u8; 32]) }
 }
 
 fn view() -> ServerView {
@@ -48,10 +49,12 @@ fn view() -> ServerView {
     let deaf = ClientStatus { muted: true, deafened: true, ..Default::default() };
     let away = ClientStatus { away: true, ..Default::default() };
     let mut me = client(1, "Santi", 2, ClientStatus::default());
-    me.admin = true;
+    me.role = Some("Owner".into());
+    let mut marta = client(2, "Marta", 2, ClientStatus::default());
+    marta.role = Some("Admin".into());
     let clients = vec![
         me,
-        client(2, "Marta", 2, ClientStatus::default()),
+        marta,
         client(3, "Kenji", 2, muted),
         client(4, "Ola", 3, deaf),
         client(5, "Priya", 3, ClientStatus::default()),
@@ -60,7 +63,17 @@ fn view() -> ServerView {
         client(8, "Ines", 1, ClientStatus::default()),
     ];
     let info = ServerInfo { name: "Friday Night".into(), welcome: String::new(), max_clients: 32 };
-    ServerView::new(1, info, vec![lobby, games, ranked, duo, afk, music], clients)
+    let channels = vec![lobby, games, ranked, duo, afk, music];
+    let everywhere = channels.iter().map(|c| (c.id, Perms::ALL)).collect();
+    let mut view =
+        ServerView::new(1, info, channels, clients, Permissions { server: Perms::ALL, channels: everywhere });
+    let mut roles = Roles { owner: Some(Identity([1; 32])), ..Roles::default() };
+    for (id, nickname) in [(1, "Santi"), (2, "Marta")] {
+        let held = if id == 1 { Vec::new() } else { vec![t7_proto::perms::RoleId::ADMIN] };
+        roles.members.insert(Identity([id; 32]), Member { nickname: nickname.into(), roles: held });
+    }
+    view.roles = Some(roles);
+    view
 }
 
 fn line(time: &str, kind: LineKind, text: &str) -> Line {
@@ -196,14 +209,14 @@ const SCENES: &[Scene] = &[
         });
         app
     }),
-    ("15-admin-login", (1100, 720), |ctx| {
+    ("15-claim-ownership", (1100, 720), |ctx| {
         let mut app = connected(ctx);
-        app.channel_dialog = Some(ChannelDialog::AdminLogin { token: String::new(), focused: false });
+        app.channel_dialog = Some(ChannelDialog::ClaimOwnership { token: String::new(), focused: false });
         app
     }),
     ("16-connecting", (1100, 720), |ctx| {
         let mut app = disconnected(ctx);
-        app.conn = Conn::Connecting { address: "friday.example.com".into(), password: String::new(), known_cert: true };
+        app.conn = Conn::Connecting { address: "friday.example.com".into(), password: String::new() };
         app
     }),
 ];

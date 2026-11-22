@@ -11,7 +11,7 @@ use serde::de::{self, Deserializer};
 use serde::ser::{SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
 
-use crate::{ChannelId, ChannelInfo, ClientId, ClientInfo, Identity};
+use crate::{ChannelId, ChannelInfo, ClientId, Identity};
 
 /// One yes/no permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -384,80 +384,6 @@ impl Roles {
 pub struct Permissions {
     pub server: Perms,
     pub channels: Vec<(ChannelId, Perms)>,
-}
-
-// Replaced by `Roles::resolve` once the server and client move to it.
-
-/// Something one person may or may not do.
-#[derive(Debug, Clone, Copy)]
-pub enum Action<'a> {
-    /// Temporary channels are open to everyone.
-    CreatePermanentChannel,
-    EditChannel(ChannelId),
-    DeleteChannel(ChannelId),
-    /// Move channels and pick the default one.
-    RearrangeChannels,
-    /// Join a password-protected channel without its password.
-    SkipChannelPassword,
-    /// Out of their channel (to where a new client would land), or off the server.
-    Kick {
-        target: &'a ClientInfo,
-        from_server: bool,
-    },
-    Ban(&'a ClientInfo),
-    /// See the ban list and lift bans.
-    ManageBans,
-    SetModerator,
-}
-
-impl ChannelTree for std::collections::HashMap<ChannelId, ChannelInfo> {
-    fn channel(&self, id: ChannelId) -> Option<&ChannelInfo> {
-        self.get(&id)
-    }
-    fn overrides(&self, _: ChannelId) -> &[(RoleId, Override)] {
-        &[]
-    }
-}
-
-pub fn allowed(actor: &ClientInfo, action: Action<'_>, tree: &impl ChannelTree) -> bool {
-    match action {
-        Action::Kick { target, .. } | Action::Ban(target) if same_person(actor, target) => false,
-        // There is nowhere to kick them to.
-        Action::Kick { target, from_server: false } if tree.channel(target.channel).is_none_or(|c| c.default) => false,
-        _ if actor.admin => true,
-        Action::EditChannel(id) => created(actor, id, tree) || moderated_from(actor.identity, id, tree).is_some(),
-        Action::DeleteChannel(id) => created(actor, id, tree),
-        Action::Kick { target, from_server: false } => {
-            let Some(mine) = moderated_from(actor.identity, target.channel, tree) else { return false };
-            let theirs = moderated_from(target.identity, target.channel, tree);
-            // A moderator outranks only moderators of channels below their own.
-            !target.admin && theirs.is_none_or(|theirs| theirs > mine)
-        }
-        _ => false,
-    }
-}
-
-/// The depth (top level 1) of the highest channel at or above `channel` that
-/// `identity` moderates, or `None` if they don't moderate it.
-pub fn moderated_from(identity: Identity, channel: ChannelId, tree: &impl ChannelTree) -> Option<usize> {
-    let mut path = Vec::new();
-    let mut at = tree.channel(channel);
-    while let Some(c) = at {
-        path.push(c);
-        at = c.parent.and_then(|p| tree.channel(p));
-    }
-    // `path` runs from `channel` up to the top level.
-    path.iter().rev().position(|c| c.moderators.contains(&identity)).map(|i| i + 1)
-}
-
-/// The creator of a temporary channel keeps managing it.
-fn created(actor: &ClientInfo, channel: ChannelId, tree: &impl ChannelTree) -> bool {
-    tree.channel(channel).is_some_and(|c| c.temporary && c.creator == Some(actor.id))
-}
-
-/// One person may be connected twice with the same identity.
-fn same_person(a: &ClientInfo, b: &ClientInfo) -> bool {
-    a.id == b.id || a.identity == b.identity
 }
 
 #[cfg(test)]

@@ -12,8 +12,9 @@ pub struct Config {
     /// Empty string = no password.
     pub password: String,
     pub max_clients: u32,
-    /// Empty = generate one on first start and keep it in `admin_token.txt`.
-    pub admin_token: String,
+    /// Gave admin rights before roles replaced it. Ignored, so configs from
+    /// then still load.
+    pub admin_token: Option<serde::de::IgnoredAny>,
     /// Seeds `channels.toml` on first start; after that, that file is used.
     pub channels: Vec<ChannelConfig>,
 }
@@ -32,7 +33,7 @@ pub struct ChannelConfig {
     /// New clients land in this channel. The first channel is used if none is marked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
-    /// Identities (hex) that moderate this channel and the ones below it.
+    /// Identities (hex) that hold the Moderator role in this channel and the ones below it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub moderators: Vec<t7_proto::Identity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -47,7 +48,7 @@ impl Default for Config {
             bind: format!("0.0.0.0:{DEFAULT_PORT}"),
             password: String::new(),
             max_clients: 128,
-            admin_token: String::new(),
+            admin_token: None,
             channels: Vec::new(),
         }
     }
@@ -61,14 +62,13 @@ bind = "0.0.0.0:9988"
 # Leave empty for a public server.
 password = ""
 max_clients = 128
-# Lets people manage all channels (in T7: the ⋯ menu next to CHANNELS).
-# Leave empty to generate one on first start; it is printed in the log and
-# kept in admin_token.txt next to this file.
-admin_token = ""
+# On first start the log shows a claim token. In T7, the menu next to
+# CHANNELS, then Claim ownership, makes whoever enters it first the owner.
+# Roles and who holds them are kept in roles.toml next to this file.
 
 # The channels a new server starts with. On first start they are copied to
 # channels.toml next to this file, which then holds the live channel tree as
-# admins edit it in T7. Delete channels.toml to start over from these.
+# it is edited in T7. Delete channels.toml to start over from these.
 # Channels nest via `children`; `default = true` marks where people land.
 
 [[channels]]

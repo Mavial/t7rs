@@ -3,7 +3,7 @@
 //!     cargo run --example voicebot -- ADDR tone   [SECONDS]   # speak a quiet two-note tone
 //!     cargo run --example voicebot -- ADDR listen [SECONDS]   # report voice frames heard
 //!     cargo run --example voicebot -- ADDR poke NICK [MESSAGE]  # poke someone
-//!     cargo run --example voicebot -- ADDR admin TOKEN [SECONDS]  # become admin and stay
+//!     cargo run --example voicebot -- ADDR claim TOKEN [SECONDS]  # claim ownership and stay
 //!     cargo run --example voicebot -- ADDR temp NAME PASSWORD [SECONDS]  # make a temporary channel and stay
 //!
 //! Joins the default channel. `listen` prints, per speaker, how many frames
@@ -44,7 +44,7 @@ async fn main() {
     let nickname = match mode.as_str() {
         "tone" => "ToneBot",
         "poke" => "PokeBot",
-        "admin" => "AdminBot",
+        "claim" => "OwnerBot",
         "temp" => "RaidLead",
         _ => "ListenBot",
     }
@@ -58,10 +58,10 @@ async fn main() {
         }
         other => panic!("not welcomed: {other:?}"),
     };
-    if mode == "admin" || mode == "temp" {
+    if mode == "claim" || mode == "temp" {
         let first = rest.first().cloned().unwrap_or_default();
-        let msg = if mode == "admin" {
-            C2S::Authenticate { token: first }
+        let msg = if mode == "claim" {
+            C2S::ClaimOwnership { token: first }
         } else {
             let password = rest.get(1).cloned().unwrap_or_default();
             let settings = ChannelSettings {

@@ -156,6 +156,10 @@ impl Channels {
         self.map.get(&id).map(|c| &c.info)
     }
 
+    pub fn ids(&self) -> impl Iterator<Item = ChannelId> + '_ {
+        self.map.keys().copied()
+    }
+
     /// All channel ids, parents before children, siblings in order.
     pub fn ids_in_order(&self) -> Vec<ChannelId> {
         let mut out = Vec::with_capacity(self.map.len());
