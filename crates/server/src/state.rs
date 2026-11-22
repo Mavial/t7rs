@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use t7_proto::perms::{Perm, Permissions, Rank, RoleChange, RoleId, Standing, Subject};
+use t7_proto::perms::{Override, Perm, Permissions, Rank, RoleChange, RoleId, Standing, Subject};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     BanId, BanInfo, C2S, ChannelId, ChannelInfo, ChannelKind, ChannelSettings, ClientId, ClientInfo, ClientStatus,
@@ -358,7 +358,8 @@ impl Server {
             | C2S::EditChannel { id: channel, .. }
             | C2S::DeleteChannel { id: channel }
             | C2S::SetDefaultChannel { id: channel }
-            | C2S::SetModerator { channel, .. } => [Some(*channel), None],
+            | C2S::SetModerator { channel, .. }
+            | C2S::SetOverride { channel, .. } => [Some(*channel), None],
             C2S::CreateChannel { parent, .. } => [*parent, None],
             C2S::MoveChannel { id: channel, parent, .. } => [Some(*channel), *parent],
             _ => [None, None],
@@ -429,6 +430,31 @@ impl Server {
             C2S::ListBans => self.list_bans(id),
             C2S::Unban { id: ban } => self.unban(id, ban),
             C2S::ChangeRoles(change) => self.change_roles(id, change),
+            C2S::SetOverride { channel, role, allow, deny } => {
+                self.set_override(id, channel, Override::new(role, allow, deny));
+            }
+        }
+    }
+
+    /// Changes what `channel` sets for a role below `id`'s own, if it may
+    /// manage the channel's permissions.
+    fn set_override(&mut self, id: ClientId, channel: ChannelId, set: Override) {
+        let mine = self.standing(id, Some(channel));
+        if !mine.perms.has(Perm::ManagePermissions) {
+            return self.error(id, "you can't change this channel's permissions");
+        }
+        let roles = self.roles.roles();
+        if set.role != RoleId::EVERYONE && roles.role(set.role).is_none() {
+            return self.error(id, "that role does not exist");
+        }
+        if mine.rank <= roles.height(set.role) {
+            return self.error(id, "you can only set permissions for roles below your own");
+        }
+        let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
+        match self.channels.set_override(channel, set) {
+            Ok(true) => self.channels_changed(permanent),
+            Ok(false) => {}
+            Err(e) => self.error(id, &e.message()),
         }
     }
 

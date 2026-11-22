@@ -254,6 +254,14 @@ pub enum C2S {
     },
     /// Answered, like every change to the roles, with [`S2C::Roles`].
     ChangeRoles(perms::RoleChange),
+    /// Replaces what `channel` allows and denies the role, for a role below
+    /// your own where you may manage permissions. Setting nothing removes it.
+    SetOverride {
+        channel: ChannelId,
+        role: perms::RoleId,
+        allow: perms::Perms,
+        deny: perms::Perms,
+    },
 }
 
 /// Server → client.
