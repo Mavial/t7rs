@@ -188,6 +188,9 @@ Set log verbosity with `RUST_LOG=debug`.
   server's log, or ask its admin, before choosing "Trust new certificate and
   connect". The very first connection is only as trustworthy as the network
   it runs over; compare the fingerprint with the admin if that matters to you.
+  For that reason T7 doesn't send a saved admin token on a first connection,
+  or right after you trust a new certificate. Log in again from ⋯ → Admin
+  login once the fingerprint checks out.
 - Clients from before TLS (protocol 4 and older) can't connect. The server
   tells them to update.
 
