@@ -232,6 +232,9 @@ pub struct Rank(u32);
 
 impl Rank {
     pub const EVERYONE: Rank = Rank(0);
+    /// A room's owner, in it: above Everyone, below every role, so that
+    /// moderators keep their say over people in rooms of their own.
+    pub const ROOM_OWNER: Rank = Rank(1);
     pub const OWNER: Rank = Rank(u32::MAX);
 }
 
@@ -420,7 +423,8 @@ impl Roles {
     /// one moved there.
     pub fn height_at(&self, position: usize) -> Rank {
         let len = self.ranked.len();
-        Rank((len - position.min(len.saturating_sub(1))) as u32)
+        // Even, leaving room for room owners just above Everyone.
+        Rank(2 * (len - position.min(len.saturating_sub(1))) as u32)
     }
 
     /// Their highest standing on the server, wherever they are.
@@ -455,8 +459,8 @@ impl Roles {
     ///
     /// The owner may do everything. Anyone else has what their roles grant,
     /// Everyone's included. In a channel, and every channel below it, its
-    /// moderators and the owner of a temporary channel also hold the Moderator
-    /// role. Then each permission a channel sets for one of their roles
+    /// moderators also hold the Moderator role, and so does the owner of a
+    /// temporary channel, though ranked just above Everyone. Then each permission a channel sets for one of their roles
     /// overrides what the roles grant; the closest channel that sets it wins,
     /// and there an allow beats a deny. In a channel, its moderators and
     /// whoever may manage it may rename it.
@@ -469,14 +473,19 @@ impl Roles {
             let owns_room = path.iter().any(|c| c.temporary && c.owner == Some(who.client));
             let mut held = vec![RoleId::EVERYONE];
             held.extend_from_slice(self.assigned(who.identity));
-            if owns_room || moderates {
+            if moderates {
                 held.push(RoleId::MODERATOR);
+            }
+            let mut rank = held.iter().map(|r| self.height(*r)).max().unwrap_or(Rank::EVERYONE);
+            if owns_room {
+                held.push(RoleId::MODERATOR);
+                rank = rank.max(Rank::ROOM_OWNER);
             }
             let mut perms = self.grant(&held, &path);
             if owns_room {
                 perms |= ROOM_OWNER_PERMS;
             }
-            (perms, held.iter().map(|r| self.height(*r)).max().unwrap_or(Rank::EVERYONE))
+            (perms, rank)
         };
         if !path.is_empty() && (moderates || perms.has(Perm::ManageChannels)) {
             perms.set(Perm::Rename, true);
@@ -733,7 +742,13 @@ mod tests {
         let room = roles.resolve(room_owner, Some(RAID), &t);
         assert!(room.perms.has(Perm::Kick) && room.perms.has(Perm::ManageChannels));
         assert!(!room.perms.has(Perm::Ban));
-        assert_eq!(room.rank, roles.height(RoleId::MODERATOR));
+        // Above people without a role there, below anyone with one.
+        assert!(room.rank > Rank::EVERYONE && room.rank < roles.height(RoleId::MODERATOR));
+        let mut lowest = roles.clone();
+        lowest.ranked.push(Role { id: RoleId(7), name: "DJ".into(), perms: Perms::NONE });
+        assert!(room.rank < lowest.height(RoleId(7)));
+        let moderator = Subject { client: 9, identity: MODERATOR };
+        assert_eq!(roles.resolve(moderator, Some(RAID), &t).rank, roles.height(RoleId::MODERATOR), "a role counts");
         assert!(!roles.resolve(room_owner, Some(LOBBY), &t).perms.has(Perm::Kick), "elsewhere");
         let other = Subject { client: 8, identity: NOBODY };
         assert!(!roles.resolve(other, Some(RAID), &t).perms.has(Perm::Kick), "another connection");

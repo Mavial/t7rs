@@ -1656,6 +1656,13 @@ async fn people_move_only_those_below_them_into_channels_they_can_see() {
     assert_eq!(error(&mut mover).await, "Lobby has a password");
     moder.send(C2S::MoveMember { target: user_id, channel: lobby }).await;
     user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: lobby }).await;
+
+    // Owning a room puts nobody beyond a moderator's reach in it.
+    let den = C2S::CreateChannel { parent: None, settings: settings("Den"), temporary: true, kind: ChannelKind::Voice };
+    user.send(den).await;
+    moder.until(|m| matches!(m, S2C::ClientMoved { id, channel } if *id == user_id && *channel != lobby)).await;
+    moder.send(C2S::MoveMember { target: user_id, channel: afk }).await;
+    user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: afk }).await;
     task.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
