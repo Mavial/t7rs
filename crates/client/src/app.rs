@@ -6,7 +6,7 @@ use egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, text::LayoutJob, vec2,
 };
 use t7_proto::model::ServerView;
-use t7_proto::perms::{Override, Perm, Perms, Rank, RoleChange, RoleId, Roles, Setting};
+use t7_proto::perms::{Override, Perm, Perms, Rank, RoleChange, RoleId, Roles, Scope, Setting};
 use t7_proto::tls::Fingerprint;
 use t7_proto::{
     BanInfo, C2S, ChannelId, ChannelInfo, ChannelKind, ChannelSettings, ClientId, ClientStatus, Identity, LeaveReason,
@@ -34,9 +34,9 @@ mod tests {
     fn saving_sends_only_the_roles_whose_settings_changed() {
         let view = Perms::of(&[Perm::View]);
         let saved = [
-            Override::new(RoleId::EVERYONE, Perms::NONE, view),
-            Override::new(RoleId::MODERATOR, view, Perms::NONE),
-            Override::new(RoleId::ADMIN, view, Perms::NONE),
+            Override::denying(RoleId::EVERYONE, view),
+            Override::allowing(RoleId::MODERATOR, view),
+            Override::allowing(RoleId::ADMIN, view),
         ];
         let mut form = ChannelForm {
             editing: Some(4),
@@ -56,10 +56,10 @@ mod tests {
             role: RoleId::EVERYONE,
         };
         assert_eq!(form.override_changes(4, &saved), []);
-        let dj = Override::new(RoleId(7), Perms::of(&[Perm::Speak]), Perms::NONE);
+        let dj = Override::allowing(RoleId(7), Perms::of(&[Perm::Speak]));
         form.overrides = vec![saved[0], saved[2], dj];
         let set = |o: Override| C2S::SetOverride { channel: 4, role: o.role, allow: o.allow(), deny: o.deny() };
-        let cleared = Override::new(RoleId::MODERATOR, Perms::NONE, Perms::NONE);
+        let cleared = Override::inheriting(RoleId::MODERATOR);
         assert_eq!(form.override_changes(4, &saved), [set(cleared), set(dj)]);
     }
 }
@@ -197,7 +197,7 @@ struct ServerSettings {
     /// The ban list; `None` until the server sends it.
     bans: Option<Vec<BanInfo>>,
     picked: Pick,
-    name: String,
+    name_draft: String,
     new_role: String,
 }
 
@@ -270,7 +270,7 @@ enum FormTab {
 impl ChannelForm {
     fn override_changes(&self, channel: ChannelId, saved: &[Override]) -> Vec<C2S> {
         let of = |list: &[Override], role| {
-            list.iter().find(|o| o.role == role).copied().unwrap_or(Override::new(role, Perms::NONE, Perms::NONE))
+            list.iter().find(|o| o.role == role).copied().unwrap_or(Override::inheriting(role))
         };
         let roles: std::collections::BTreeSet<RoleId> = self.overrides.iter().chain(saved).map(|o| o.role).collect();
         let changed = roles.into_iter().map(|role| of(&self.overrides, role)).filter(|o| *o != of(saved, o.role));
@@ -450,7 +450,7 @@ impl App {
     fn open_create_channel(&mut self, parent: Option<ChannelId>) {
         let parent_temporary =
             parent.and_then(|p| self.view.as_ref()?.channels.get(&p).map(|c| c.temporary)).unwrap_or(false);
-        let permanent = self.view.as_ref().is_some_and(|v| manages(v, parent));
+        let permanent = self.view.as_ref().is_some_and(|v| manages(v, Scope::within(parent)));
         self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
             editing: None,
             parent,
@@ -473,7 +473,7 @@ impl App {
     fn open_edit_channel(&mut self, channel: ChannelId) {
         let Some(view) = &self.view else { return };
         let Some(ch) = view.channels.get(&channel) else { return };
-        let tab = if manages(view, Some(channel)) { FormTab::Channel } else { FormTab::Permissions };
+        let tab = if manages(view, Scope::Channel(channel)) { FormTab::Channel } else { FormTab::Permissions };
         self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
             editing: Some(channel),
             parent: ch.parent,
@@ -602,7 +602,7 @@ impl App {
         }
         let picked = Pick::Role(RoleId::MODERATOR);
         self.server_settings =
-            Some(ServerSettings { tab, bans: None, picked, name: String::new(), new_role: String::new() });
+            Some(ServerSettings { tab, bans: None, picked, name_draft: String::new(), new_role: String::new() });
     }
 
     fn open_poke(&mut self, target: ClientId) {
@@ -1165,7 +1165,7 @@ impl App {
                             color,
                         );
                         egui::Popup::menu(&resp).show(|ui| {
-                            let label = if manages(view, None) {
+                            let label = if manages(view, Scope::Server) {
                                 Some("Create channel…")
                             } else {
                                 view.may(Perm::CreateTemporary).then_some("Create temporary channel…")
@@ -1213,8 +1213,8 @@ impl App {
                         if category && row > 0 {
                             ui.add_space(6.0);
                         }
-                        let manages_it = manages(view, Some(ch_id));
-                        let may_rearrange = manages_it && manages(view, ch.parent);
+                        let manages_it = manages(view, Scope::Channel(ch_id));
+                        let may_rearrange = manages_it && may_renumber_children(view, ch.parent);
                         let clients = view.clients_in(ch_id);
                         let indent = depth as f32 * 18.0;
                         let inside = |channel| channel == ch_id || (in_fold && view.within(channel, ch_id));
@@ -1227,7 +1227,7 @@ impl App {
                             (Some(dragged), Some(pos)) if resp.contains_pointer() => {
                                 let zone = Zone::at((pos.y - rect.top()) / rect.height());
                                 match channel_drop::drop_target(&view.channels, dragged, ch_id, zone) {
-                                    Outcome::Move(to) if !manages(view, to.parent) => None,
+                                    Outcome::Move(to) if !may_renumber_children(view, to.parent) => None,
                                     outcome => Some((zone, outcome)),
                                 }
                             }
@@ -2316,12 +2316,12 @@ impl App {
             ChannelDialog::Form(f) => f.parent,
             _ => None,
         };
-        let may_create_permanent = view.is_some_and(|v| manages(v, parent));
+        let may_create_permanent = view.is_some_and(|v| manages(v, Scope::within(parent)));
         let editing = match dialog {
             ChannelDialog::Form(f) => f.editing,
             _ => None,
         };
-        let may_edit = editing.is_none_or(|id| view.is_some_and(|v| manages(v, Some(id))));
+        let may_edit = editing.is_none_or(|id| view.is_some_and(|v| manages(v, Scope::Channel(id))));
         let saved_overrides = view.zip(editing).and_then(|(v, id)| v.channels.get(&id)).map(|c| c.overrides.clone());
         let moderators: Option<Vec<(Identity, Option<String>)>> = view
             .zip(editing)
@@ -2554,7 +2554,7 @@ fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, for
     let here = ChannelInfo { overrides: form.overrides.clone(), ..saved.clone() };
     let inherited = roles.inherited(form.role, &here, view);
     let before = form.overrides.iter().find(|o| o.role == form.role).copied();
-    let mut set = before.unwrap_or(Override::new(form.role, Perms::NONE, Perms::NONE));
+    let mut set = before.unwrap_or(Override::inheriting(form.role));
     ui.add_enabled_ui(editable, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for perm in Perms::CHANNEL.iter() {
@@ -2640,10 +2640,14 @@ fn moderator_list(ui: &mut egui::Ui, list: &[(Identity, Option<String>)], unmode
     }
 }
 
-fn manages(view: &ServerView, place: Option<ChannelId>) -> bool {
-    match place {
-        Some(p) => view.may_in(p, Perm::ManageChannels),
-        None => view.may(Perm::ManageChannels),
+fn may_renumber_children(view: &ServerView, parent: Option<ChannelId>) -> bool {
+    manages(view, Scope::within(parent))
+}
+
+fn manages(view: &ServerView, scope: Scope) -> bool {
+    match scope {
+        Scope::Channel(id) => view.may_in(id, Perm::ManageChannels),
+        Scope::Server => view.may(Perm::ManageChannels),
     }
 }
 
@@ -3010,8 +3014,10 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
                 if below(role.id) {
                     resp.dnd_set_drag_payload(DragRole(role.id));
                 }
-                let fits = mine > roles.height_at(position);
-                if let Some(dragged) = dragging.filter(|d| *d != role.id && fits && resp.contains_pointer()) {
+                let below_mine_at_position = mine > roles.height_at(position);
+                if let Some(dragged) =
+                    dragging.filter(|d| *d != role.id && below_mine_at_position && resp.contains_pointer())
+                {
                     let y = if roles.height(dragged) > roles.height(role.id) {
                         resp.rect.bottom()
                     } else {
@@ -3068,11 +3074,11 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
                     field_label(ui, "Name");
                     let name_id = egui::Id::unique(("role-name", id));
                     if !ui.memory(|m| m.has_focus(name_id)) {
-                        s.name.clone_from(&role.name);
+                        s.name_draft.clone_from(&role.name);
                     }
-                    let field =
-                        ui.add_enabled(editable, text_input(&mut s.name).id(name_id).char_limit(MAX_ROLE_NAME_LEN));
-                    let name = s.name.trim();
+                    let field = ui
+                        .add_enabled(editable, text_input(&mut s.name_draft).id(name_id).char_limit(MAX_ROLE_NAME_LEN));
+                    let name = s.name_draft.trim();
                     if field.lost_focus() && !name.is_empty() && name != role.name {
                         change(send, RoleChange::Rename { id, name: name.to_owned() });
                     }

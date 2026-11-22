@@ -47,7 +47,7 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
             .map_err(|e| std::io::Error::other(format!("cannot read {}: {e}", file.display())))?,
         _ => Bans::default(),
     };
-    let roles = roles(cfg, data_dir)?;
+    let roles = load_or_init_roles(cfg, data_dir)?;
     let (cert, key) = tls_certificate(data_dir)?;
     tracing::info!("TLS certificate fingerprint (SHA-256): {}", tls::Fingerprint::of(&cert));
     let acceptor = tls::acceptor(cert, key).map_err(|e| {
@@ -81,7 +81,7 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
     }
 }
 
-fn roles(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<RoleStore> {
+fn load_or_init_roles(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<RoleStore> {
     if cfg.admin_token.is_some() {
         tracing::warn!("the config's admin_token is no longer used and can be deleted; claim ownership instead");
     }
@@ -145,6 +145,13 @@ fn tls_certificate(data_dir: Option<&Path>) -> std::io::Result<(Vec<u8>, Vec<u8>
         tracing::info!("wrote a new TLS certificate to {}", cert_file.display());
     }
     Ok((cert, key))
+}
+
+/// Write-then-rename, so a crash never truncates the file.
+fn write_atomic(path: &Path, write: impl FnOnce(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let tmp = path.with_extension("toml.tmp");
+    write(&tmp)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Writes a file only its owner may read, where the OS has such permissions.

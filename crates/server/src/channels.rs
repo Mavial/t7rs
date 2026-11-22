@@ -147,14 +147,12 @@ impl Channels {
         Self::from_config(&file.channels).map_err(std::io::Error::other)
     }
 
-    /// Writes the permanent channels; write-then-rename, so a crash never truncates the file.
+    /// Writes the permanent channels.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let header = "# The live channel tree, kept up to date by the server as admins edit\n\
                       # channels in T7. Edit it only while the server is stopped.\n\n";
         let body = toml::to_string(&ChannelsFile { channels: self.to_config() }).map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, format!("{header}{body}"))?;
-        std::fs::rename(&tmp, path)
+        crate::write_atomic(path, |tmp| std::fs::write(tmp, format!("{header}{body}")))
     }
 
     /// Permanent channels in the saved format, siblings in display order.
@@ -368,7 +366,7 @@ impl Channels {
     }
 
     pub fn set_override(&mut self, id: ChannelId, set: Override) -> Result<bool, ChannelError> {
-        let set = Override::new(set.role, set.allow() & Perms::CHANNEL, set.deny() & Perms::CHANNEL);
+        let set = Override::allowing(set.role, set.allow() & Perms::CHANNEL).and_denying(set.deny() & Perms::CHANNEL);
         if set.deny().has(Perm::View) && self.path(self.default).contains(&id) {
             return Err(ChannelError::HidesDefault);
         }
@@ -661,7 +659,7 @@ mod tests {
     const VIEW: Perms = Perms::of(&[Perm::View]);
 
     fn deny_view(role: RoleId) -> Override {
-        Override::new(role, Perms::NONE, VIEW)
+        Override::denying(role, VIEW)
     }
 
     fn category(name: &str) -> ChannelConfig {
@@ -702,12 +700,12 @@ mod tests {
     #[test]
     fn overrides_are_kept_with_their_channel() {
         let mut ch = three();
-        let moderators = Override::new(RoleId::MODERATOR, VIEW, Perms::of(&[Perm::Speak]));
+        let moderators = Override::allowing(RoleId::MODERATOR, VIEW).and_denying(Perms::of(&[Perm::Speak]));
         assert_eq!(ch.set_override(2, moderators), Ok(true));
         assert_eq!(ch.set_override(2, deny_view(RoleId::EVERYONE)), Ok(true));
         assert_eq!(ch.set_override(2, moderators), Ok(false), "unchanged");
         assert_eq!(ch.get(2).unwrap().overrides, [deny_view(RoleId::EVERYONE), moderators]);
-        let ban = Override::new(RoleId::ADMIN, Perms::of(&[Perm::Ban, Perm::ManageRoles]), Perms::NONE);
+        let ban = Override::allowing(RoleId::ADMIN, Perms::of(&[Perm::Ban, Perm::ManageRoles]));
         assert_eq!(ch.set_override(3, ban), Ok(false));
         assert_eq!(ch.set_override(99, moderators), Err(ChannelError::NotFound));
 
@@ -724,7 +722,7 @@ deny = [\"view\"]"
         let back = Channels::from_config(&toml::from_str::<ChannelsFile>(&text).unwrap().channels).unwrap();
         assert_eq!(back.get(2).unwrap().overrides, ch.get(2).unwrap().overrides);
 
-        assert_eq!(ch.set_override(2, Override::new(RoleId::MODERATOR, Perms::NONE, Perms::NONE)), Ok(true));
+        assert_eq!(ch.set_override(2, Override::inheriting(RoleId::MODERATOR)), Ok(true));
         assert_eq!(ch.get(2).unwrap().overrides, [deny_view(RoleId::EVERYONE)]);
         let dj = RoleId(7);
         ch.set_override(3, deny_view(dj)).unwrap();
@@ -737,7 +735,7 @@ deny = [\"view\"]"
     fn everyone_keeps_seeing_the_default_channel() {
         let mut ch = three();
         assert_eq!(ch.set_override(1, deny_view(RoleId::MODERATOR)), Err(ChannelError::HidesDefault));
-        ch.set_override(1, Override::new(RoleId::EVERYONE, Perms::NONE, Perms::of(&[Perm::Speak]))).unwrap();
+        ch.set_override(1, Override::denying(RoleId::EVERYONE, Perms::of(&[Perm::Speak]))).unwrap();
         ch.set_override(2, deny_view(RoleId::EVERYONE)).unwrap();
         assert_eq!(ch.move_to(1, Some(2), 0), Err(ChannelError::HidesDefault));
         assert_eq!(ch.set_default(3), Err(ChannelError::HidesDefault), "below a hidden channel");

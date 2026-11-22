@@ -416,7 +416,7 @@ async fn the_first_to_claim_owns_the_server() {
     let alice_id = welcomed_id(&wa);
     let S2C::Welcome { permissions, .. } = &wb else { unreachable!() };
     assert!(!permissions.server.has(Perm::ManageRoles));
-    alice.recv().await;
+    alice.until(|m| matches!(m, S2C::ClientJoined(c) if c.nickname == "bob")).await;
 
     bob.send(C2S::ClaimOwnership { token: "guess".into() }).await;
     assert!(error(&mut bob).await.contains("wrong"));
@@ -882,8 +882,7 @@ async fn moderators_and_bans_survive_a_restart() {
     admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: false }).await;
     assert!(admin.channels().await.iter().all(|c| c.moderators.is_empty()));
     // The server saves after it broadcasts; a round trip waits for that.
-    admin.send(C2S::Ping { nonce: 1 }).await;
-    admin.until(|m| matches!(m, S2C::Pong { .. })).await;
+    admin.sync().await;
     let saved = std::fs::read_to_string(dir.join("channels.toml")).unwrap();
     assert!(!saved.contains("moderators"), "{saved}");
     task.abort();
@@ -891,9 +890,13 @@ async fn moderators_and_bans_survive_a_restart() {
 }
 
 impl TestClient {
-    async fn change_roles(&mut self, change: RoleChange) -> Roles {
+    async fn sync(&mut self) {
         self.send(C2S::Ping { nonce: 0 }).await;
         self.until(|m| matches!(m, S2C::Pong { .. })).await;
+    }
+
+    async fn change_roles(&mut self, change: RoleChange) -> Roles {
+        self.sync().await;
         self.send(C2S::ChangeRoles(change)).await;
         match self.until(|m| matches!(m, S2C::Roles(_) | S2C::Error { .. })).await {
             S2C::Roles(roles) => roles,
@@ -1256,7 +1259,7 @@ async fn overrides_take_effect_at_once_and_survive_a_restart() {
     }
 
     owner.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::View])).await;
-    let hidden = perms::Override::new(RoleId::EVERYONE, Perms::NONE, Perms::of(&[Perm::View]));
+    let hidden = perms::Override::denying(RoleId::EVERYONE, Perms::of(&[Perm::View]));
     assert_eq!(owner.overrides(hangout).await, [hidden]);
     assert!(user.channels().await.iter().all(|c| c.id != hangout));
     assert_eq!(user.recv().await, S2C::ClientMoved { id: user_id, channel: lobby });
@@ -1292,7 +1295,7 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     boss.send(set(hangout, RoleId(99), &[], &[Perm::Speak])).await;
     assert!(error(&mut boss).await.contains("does not exist"));
     boss.send(set(hangout, RoleId::MODERATOR, &[Perm::ManagePermissions], &[])).await;
-    let granted = perms::Override::new(RoleId::MODERATOR, Perms::of(&[Perm::ManagePermissions]), Perms::NONE);
+    let granted = perms::Override::allowing(RoleId::MODERATOR, Perms::of(&[Perm::ManagePermissions]));
     assert_eq!(owner.overrides(hangout).await, [granted]);
 
     let S2C::Permissions(p) = moder.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
@@ -1303,6 +1306,6 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     moder.send(set(lobby, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
     assert!(error(&mut moder).await.contains("can't change this channel's permissions"));
     moder.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
-    let muted = perms::Override::new(RoleId::EVERYONE, Perms::NONE, Perms::of(&[Perm::Speak]));
+    let muted = perms::Override::denying(RoleId::EVERYONE, Perms::of(&[Perm::Speak]));
     assert_eq!(owner.overrides(hangout).await, [muted, granted]);
 }
