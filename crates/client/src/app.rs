@@ -3,8 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Id, Layout, Margin, RichText, Sense, Stroke, text::LayoutJob,
-    vec2,
+    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, text::LayoutJob, vec2,
 };
 use t7_proto::model::ServerView;
 use t7_proto::perms::{self, Action};
@@ -18,11 +17,22 @@ use crate::audio::{self, AudioSettings, PttKey, TxMode, VoiceSink};
 use crate::channel_drop::{self, DropTarget, Outcome, Zone};
 use crate::icons::{self, Icon};
 use crate::net::{self, Ended, Net, NetEvent, SessionId};
+use crate::ptt;
 use crate::settings::{self, Recent, Settings};
 use crate::sounds::{self, Pack, Resolved, Sound};
-use crate::{ptt, theme};
+use crate::theme::{self, Btn};
+
+#[cfg(test)]
+mod snapshot;
 
 const MAX_LINES: usize = 1000;
+/// Width of the recent-server cards and the button above them.
+const RECENT_W: f32 = 320.0;
+/// Channel tree: where a row's icon is centered and its name starts, from
+/// the row's left edge plus its indent, and the gap kept on the right.
+const TREE_ICON_X: f32 = 13.0;
+const TREE_TEXT_X: f32 = 28.0;
+const TREE_RIGHT_PAD: f32 = 8.0;
 const MAX_RECENT: usize = 8;
 /// Server prefilled for first-time users. Set at build time, e.g.
 /// `T7_DEFAULT_SERVER=example.com cargo build --release -p t7-client`.
@@ -158,8 +168,8 @@ enum Moderation {
 }
 
 /// The ban lengths to pick from: (label, seconds; `None` for good).
-const BAN_LENGTHS: [(&str, Option<u64>); 4] =
-    [("1 hour", Some(3600)), ("1 day", Some(86_400)), ("1 week", Some(7 * 86_400)), ("Permanent", None)];
+const BAN_LENGTHS: [(Option<u64>, &str); 4] =
+    [(Some(3600), "1 hour"), (Some(86_400), "1 day"), (Some(7 * 86_400), "1 week"), (None, "Permanent")];
 
 /// A server came back with a different certificate than the pinned one.
 struct CertChange {
@@ -504,7 +514,7 @@ impl App {
     fn open_ban(&mut self, target: ClientId) {
         let Some(name) = self.view.as_ref().and_then(|v| v.nickname(target)) else { return };
         let name = name.to_owned();
-        let length = BAN_LENGTHS[1].1;
+        let length = BAN_LENGTHS[1].0;
         self.moderation =
             Some(Moderation::Ban { target, name, reason: String::new(), length, include_ip: true, focused: false });
     }
@@ -881,41 +891,39 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let frame = egui::Frame::new()
             .fill(theme::BG)
-            .inner_margin(Margin::symmetric(14, 10))
+            .inner_margin(Margin::symmetric(12, 8))
             .stroke(Stroke::new(1.0, theme::BORDER));
         egui::Panel::top("top").frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
-                logo(ui, 26.0);
-                ui.add_space(4.0);
+                logo(ui, 24.0);
+                ui.add_space(2.0);
                 let name = self.view.as_ref().map_or("T7", |v| v.info.name.as_str());
-                ui.label(RichText::new(name).size(16.0).strong().color(theme::TEXT));
+                ui.label(RichText::new(name).size(15.0).strong().color(theme::TEXT));
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     match self.conn {
                         Conn::Connected => {
-                            if ui.button("Disconnect").clicked() {
+                            if ui.add(Btn::secondary("Disconnect")).clicked() {
                                 self.disconnect();
                             }
                         }
                         Conn::Connecting { .. } => {
-                            if ui.button("Cancel").clicked() {
+                            if ui.add(Btn::secondary("Cancel")).clicked() {
                                 self.disconnect();
                             }
                         }
                         Conn::Disconnected => {
-                            if ui.add(theme::primary_button("Connect")).on_hover_text("Ctrl+S").clicked() {
+                            if ui.add(Btn::primary("Connect")).on_hover_text("Ctrl+S").clicked() {
                                 self.open_connect_form();
                             }
                         }
                     }
-                    ui.add_space(6.0);
                     self.status_pill(ui);
                     match self.updater.status() {
                         crate::update::Status::Ready(version) => {
-                            ui.add_space(6.0);
                             let label = format!("Restart to update to {version}");
                             if ui
-                                .add(theme::primary_button(&label))
+                                .add(Btn::primary(&label))
                                 .on_hover_text("The update is downloaded and verified")
                                 .clicked()
                             {
@@ -923,7 +931,6 @@ impl App {
                             }
                         }
                         crate::update::Status::Downloading(version) => {
-                            ui.add_space(6.0);
                             ui.label(
                                 RichText::new(format!("Downloading {version}…")).size(12.5).color(theme::TEXT_FAINT),
                             );
@@ -949,20 +956,23 @@ impl App {
             Conn::Connecting { address, .. } => (theme::AMBER, format!("Connecting to {address}…")),
             Conn::Disconnected => (theme::TEXT_FAINT, "Not connected".to_owned()),
         };
-        let pill = egui::Frame::new()
-            .fill(theme::SURFACE)
-            .corner_radius(CornerRadius::same(255))
-            .inner_margin(Margin::symmetric(10, 4))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-                    ui.painter().circle_filled(r.center(), 4.0, color);
-                    ui.label(RichText::new(text).size(12.5).color(theme::TEXT_DIM));
-                });
-            });
+        // Painted to the exact height of the buttons beside it.
+        let galley = ui.painter().layout_no_wrap(text, FontId::proportional(12.5), theme::TEXT_DIM);
+        let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 34.0, theme::CONTROL_H), Sense::hover());
+        let p = ui.painter();
+        p.rect(
+            rect,
+            CornerRadius::same(255),
+            theme::SURFACE,
+            Stroke::new(1.0, theme::BORDER),
+            egui::StrokeKind::Inside,
+        );
+        let dot = egui::pos2(rect.left() + 15.0, rect.center().y);
+        p.circle_filled(dot, 6.0, color.gamma_multiply(0.2));
+        p.circle_filled(dot, 3.5, color);
+        p.galley(egui::pos2(rect.left() + 26.0, rect.center().y - galley.size().y / 2.0), galley, theme::TEXT_DIM);
         if self.voice.blocked() {
-            pill.response.on_hover_text(
+            resp.on_hover_text(
                 "Voice packets aren't getting through. The server's UDP port (same number as \
                  the TCP port, 9988 by default) is probably blocked by a firewall.",
             );
@@ -982,9 +992,10 @@ impl App {
                     .and_then(|v| v.me())
                     .map_or_else(|| self.settings.nickname.clone(), |c| c.nickname.clone());
                 avatar(ui, &nick, 30.0, self.voice.shared.transmitting());
+                ui.add_space(2.0);
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(RichText::new(&nick).strong().color(theme::TEXT));
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(RichText::new(&nick).size(13.5).strong().color(theme::TEXT));
                     let s = self.settings.status;
                     let (txt, col) = if !matches!(self.conn, Conn::Connected) {
                         ("Offline", theme::TEXT_FAINT)
@@ -1001,13 +1012,16 @@ impl App {
                 });
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     if icon_button(ui, Icon::Sliders, "Voice settings").clicked() {
                         let (inputs, outputs) = audio::device_names();
                         let custom = sounds_dir().map(|d| ("Custom folder".to_owned(), d));
                         let packs = custom.into_iter().chain(sounds::installed_packs()).collect();
                         self.audio_dialog = Some(AudioDialog { packs, inputs, outputs, binding: false });
                     }
-                    ui.add_space(4.0);
+                    // A hairline between the settings and the status toggles.
+                    let (r, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
+                    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_STRONG));
                     let mut s = self.settings.status;
                     let changed = toggle(ui, &mut s.away, Icon::Moon, Icon::Moon, theme::AMBER, "Away")
                         | toggle(
@@ -1051,9 +1065,11 @@ impl App {
                 let admin = view.me().is_some_and(|c| c.admin);
 
                 ui.horizontal(|ui| {
+                    // Lined up with the channel icons below.
+                    ui.add_space(6.0);
                     ui.label(RichText::new("CHANNELS").size(11.0).color(theme::TEXT_FAINT).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 20.0), Sense::click());
+                        let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), Sense::click());
                         let color = if resp.hovered() { theme::TEXT } else { theme::TEXT_FAINT };
                         if resp.hovered() {
                             ui.painter().rect_filled(rect, CornerRadius::same(5), theme::SURFACE_HOVER);
@@ -1081,10 +1097,10 @@ impl App {
                         });
                     });
                 });
-                ui.add_space(4.0);
+                ui.add_space(2.0);
 
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     let mine = view.my_channel();
                     let dragging_self = egui::DragAndDrop::has_payload_of_type::<DragSelf>(ui.ctx());
                     let dragging_channel = egui::DragAndDrop::payload::<DragChannel>(ui.ctx()).map(|d| d.0);
@@ -1094,12 +1110,12 @@ impl App {
                     for &(depth, ch_id) in view.tree() {
                         let ch = &view.channels[&ch_id];
                         let clients = view.clients_in(ch_id);
-                        let indent = 4.0 + depth as f32 * 16.0;
+                        let indent = depth as f32 * 18.0;
                         let is_mine = mine == Some(ch_id);
                         let full = ch.max_clients.is_some_and(|m| clients.len() as u32 >= m);
 
                         let sense = if may_rearrange { Sense::click_and_drag() } else { Sense::click() };
-                        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), sense);
+                        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), sense);
                         let channel_drop = match (dragging_channel, pointer) {
                             (Some(dragged), Some(pos)) if resp.contains_pointer() => {
                                 let zone = Zone::at((pos.y - rect.top()) / rect.height());
@@ -1127,6 +1143,12 @@ impl App {
                                 Stroke::new(1.0, theme::ACCENT),
                                 egui::StrokeKind::Inside,
                             );
+                        } else if is_mine {
+                            let bar = egui::Rect::from_center_size(
+                                egui::pos2(rect.left() + 1.5, rect.center().y),
+                                vec2(3.0, 14.0),
+                            );
+                            p.rect_filled(bar, CornerRadius::same(2), theme::ACCENT);
                         }
                         if let Some((zone @ (Zone::Before | Zone::After), Outcome::Move(_))) = channel_drop {
                             // Indented to the level the channel lands on.
@@ -1139,19 +1161,21 @@ impl App {
                             );
                         }
                         let icon_color = if is_mine { theme::ACCENT_TEXT } else { theme::TEXT_FAINT };
-                        let x = rect.left() + indent + 6.0;
                         icons::paint(
                             p,
-                            egui::Rect::from_center_size(egui::pos2(x + 7.0, rect.center().y), vec2(15.0, 15.0)),
+                            egui::Rect::from_center_size(
+                                egui::pos2(rect.left() + indent + TREE_ICON_X, rect.center().y),
+                                vec2(15.0, 15.0),
+                            ),
                             Icon::Speaker,
                             icon_color,
                         );
                         let name_color = if is_mine { theme::TEXT } else { theme::TEXT_DIM };
                         let name_rect = p.text(
-                            egui::pos2(x + 22.0, rect.center().y),
+                            egui::pos2(rect.left() + indent + TREE_TEXT_X, rect.center().y),
                             Align2::LEFT_CENTER,
                             &ch.name,
-                            FontId::proportional(14.0),
+                            FontId::proportional(13.5),
                             name_color,
                         );
                         let mut after = name_rect.right() + 6.0;
@@ -1181,7 +1205,7 @@ impl App {
                         if !count.is_empty() {
                             let c = if full { theme::AMBER } else { theme::TEXT_FAINT };
                             p.text(
-                                rect.right_center() - vec2(8.0, 0.0),
+                                rect.right_center() - vec2(TREE_RIGHT_PAD, 0.0),
                                 Align2::RIGHT_CENTER,
                                 count,
                                 FontId::proportional(11.5),
@@ -1262,7 +1286,7 @@ impl App {
                         for c in clients {
                             let is_me = c.id == view.my_id;
                             let sense = if is_me { Sense::click_and_drag() } else { Sense::click() };
-                            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), sense);
+                            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), sense);
                             if resp.hovered() {
                                 ui.painter().rect_filled(
                                     rect,
@@ -1271,15 +1295,16 @@ impl App {
                                 );
                             }
                             let p = ui.painter();
-                            let ax = rect.left() + indent + 34.0;
+                            // The avatar starts where the channel's name does.
+                            let ax = rect.left() + indent + TREE_TEXT_X + 9.0;
                             let center = egui::pos2(ax, rect.center().y);
-                            paint_avatar(p, center, 10.0, &c.nickname);
+                            paint_avatar(p, center, 9.0, &c.nickname);
                             if speaking.contains(&c.id) || (is_me && me_talking) {
-                                p.circle_stroke(center, 12.5, Stroke::new(2.0, theme::GREEN));
+                                p.circle_stroke(center, 11.5, Stroke::new(2.0, theme::GREEN));
                             }
                             let color = if c.status.away { theme::TEXT_FAINT } else { theme::TEXT };
                             let name_rect = p.text(
-                                egui::pos2(ax + 18.0, rect.center().y),
+                                egui::pos2(ax + 17.0, rect.center().y),
                                 Align2::LEFT_CENTER,
                                 &c.nickname,
                                 FontId::proportional(13.5),
@@ -1322,7 +1347,7 @@ impl App {
                                     theme::TEXT_FAINT,
                                 );
                             }
-                            let mut x = rect.right() - 16.0;
+                            let mut x = rect.right() - TREE_RIGHT_PAD - 7.0;
                             for (on, icon, col) in [
                                 (c.status.away, Icon::Moon, theme::AMBER),
                                 (c.status.deafened, Icon::HeadphonesOff, theme::RED),
@@ -1332,7 +1357,7 @@ impl App {
                                     let r =
                                         egui::Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(14.0, 14.0));
                                     icons::paint(p, r, icon, col);
-                                    x -= 20.0;
+                                    x -= 18.0;
                                 }
                             }
 
@@ -1397,13 +1422,12 @@ impl App {
                                     ui.label(RichText::new("Volume").size(12.0).color(theme::TEXT_DIM));
                                     let mut v = volume;
                                     ui.horizontal(|ui| {
-                                        let slider = egui::Slider::new(&mut v, 0.0..=2.0)
-                                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                                            .custom_parser(|s| {
-                                                s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)
-                                            });
-                                        ui.add(slider);
-                                        if ui.add_enabled(v != 1.0, egui::Button::new("Reset").small()).clicked() {
+                                        let size = vec2(200.0, theme::CONTROL_H);
+                                        let layout = Layout::left_to_right(Align::Center);
+                                        ui.allocate_ui_with_layout(size, layout, |ui| {
+                                            slider(ui, &mut v, 0.0..=2.0, Unit::Percent);
+                                        });
+                                        if ui.add_enabled(v != 1.0, Btn::secondary("Reset").small()).clicked() {
                                             v = 1.0;
                                         }
                                     });
@@ -1466,7 +1490,7 @@ impl App {
             // Tabs
             let mut close = None;
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
+                ui.spacing_mut().item_spacing.x = 4.0;
                 for i in 0..self.tabs.len() {
                     let tab = &self.tabs[i];
                     let label = match tab.kind {
@@ -1474,17 +1498,7 @@ impl App {
                         TabKind::Channel => format!("# {}", tab.title),
                         TabKind::Private(_) => format!("@ {}", tab.title),
                     };
-                    let active = i == self.active_tab;
-                    let mut text = RichText::new(label).size(13.5);
-                    text = if active { text.color(theme::TEXT) } else { text.color(theme::TEXT_DIM) };
-                    let btn = egui::Button::new(text)
-                        .fill(if active { theme::SURFACE } else { Color32::TRANSPARENT })
-                        .stroke(Stroke::NONE)
-                        .corner_radius(theme::RADIUS);
-                    let resp = ui.add(btn);
-                    if tab.unread > 0 {
-                        badge(ui, resp.rect, tab.unread);
-                    }
+                    let resp = tab_button(ui, &label, i == self.active_tab, tab.unread);
                     if resp.clicked() {
                         self.active_tab = i;
                         self.focus_input = true;
@@ -1507,8 +1521,9 @@ impl App {
             }
             self.tabs[self.active_tab].unread = 0;
 
-            ui.add_space(4.0);
+            ui.add_space(2.0);
             ui.separator();
+            ui.add_space(2.0);
 
             // Composer pinned to the bottom, messages fill the rest.
             let kind = self.tabs[self.active_tab].kind;
@@ -1518,20 +1533,23 @@ impl App {
                 TabKind::Private(_) => format!("Message @{}", self.tabs[self.active_tab].title),
             };
             egui::Panel::bottom("composer")
-                .frame(egui::Frame::new().inner_margin(Margin { top: 8, ..Default::default() }))
+                .show_separator_line(false)
+                .frame(egui::Frame::new().inner_margin(Margin { top: 10, ..Default::default() }))
                 .show(ui, |ui| {
                     egui::Frame::new()
                         .fill(theme::SURFACE)
-                        .corner_radius(CornerRadius::same(10))
+                        .corner_radius(CornerRadius::same(8))
                         .stroke(Stroke::new(1.0, theme::BORDER))
-                        .inner_margin(Margin::symmetric(12, 8))
+                        .inner_margin(Margin::symmetric(12, 3))
                         .show(ui, |ui| {
                             let edit = egui::TextEdit::singleline(&mut self.input)
                                 .hint_text(RichText::new(hint).color(theme::TEXT_FAINT))
                                 .frame(egui::Frame::NONE)
                                 .desired_width(f32::INFINITY)
+                                .min_size(vec2(0.0, 32.0))
+                                .align(Align2::LEFT_CENTER)
                                 .char_limit(t7_proto::MAX_TEXT_LEN)
-                                .font(FontId::proportional(14.5));
+                                .font(FontId::proportional(14.0));
                             let resp = ui.add(edit);
                             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                 self.send_chat();
@@ -1559,7 +1577,7 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.22).max(20.0));
             logo(ui, 64.0);
-            ui.add_space(14.0);
+            ui.add_space(16.0);
             if let Conn::Connecting { address, .. } = &self.conn {
                 ui.label(RichText::new("Connecting…").size(22.0).strong().color(theme::TEXT));
                 ui.add_space(6.0);
@@ -1568,21 +1586,21 @@ impl App {
                 ui.add(egui::Spinner::new().size(22.0).color(theme::ACCENT_TEXT));
             } else {
                 ui.label(RichText::new("Not connected").size(22.0).strong().color(theme::TEXT));
-                ui.add_space(6.0);
+                ui.add_space(4.0);
                 ui.label(RichText::new("Connect to a T7 server to start talking.").color(theme::TEXT_DIM));
                 if let Some(err) = &self.last_error {
                     ui.add_space(10.0);
                     ui.label(RichText::new(err).color(theme::RED));
                 }
-                ui.add_space(16.0);
-                if ui.add(theme::primary_button("Connect to server").min_size(vec2(180.0, 36.0))).clicked() {
+                ui.add_space(18.0);
+                if ui.add(Btn::primary("Connect to server").min_width(RECENT_W)).clicked() {
                     self.open_connect_form();
                 }
 
                 if !self.settings.recent.is_empty() {
-                    ui.add_space(28.0);
+                    ui.add_space(30.0);
                     ui.label(RichText::new("RECENT").size(11.0).strong().color(theme::TEXT_FAINT));
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                     for r in &self.settings.recent {
                         if recent_card(ui, r).clicked() {
                             connect_to = Some(r.address.clone());
@@ -1601,15 +1619,9 @@ impl App {
         let Some(form) = &mut self.form else { return };
         let mut submit = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(Id::unique("connect")).show(ctx, |ui| {
+        let modal = theme::modal("connect").show(ctx, |ui| {
             ui.set_width(360.0);
-            ui.label(RichText::new("Connect to server").size(19.0).strong().color(theme::TEXT));
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new("Enter an address like example.com or 1.2.3.4:9988").size(12.5).color(theme::TEXT_DIM),
-            );
-            ui.add_space(14.0);
-
+            dialog_header(ui, "Connect to server", "Enter an address like example.com or 1.2.3.4:9988");
             let address = field(ui, "Server address", &mut form.address, false);
             let nickname = field(ui, "Nickname", &mut form.nickname, false);
             if !form.focus_requested {
@@ -1622,17 +1634,14 @@ impl App {
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 submit = true;
             }
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let ready = !form.address.trim().is_empty() && !form.nickname.trim().is_empty();
-                    if ui.add_enabled(ready, theme::primary_button("Connect")).clicked() {
-                        submit = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
+            dialog_footer(ui, |ui| {
+                let ready = !form.address.trim().is_empty() && !form.nickname.trim().is_empty();
+                if ui.add_enabled(ready, Btn::primary("Connect")).clicked() {
+                    submit = true;
+                }
+                if ui.add(Btn::secondary("Cancel")).clicked() {
+                    cancel = true;
+                }
             });
         });
         if modal.should_close() {
@@ -1701,135 +1710,128 @@ impl App {
         let level = self.voice.shared.level_db();
         let open = self.voice.shared.transmitting();
 
-        let modal = egui::Modal::new(Id::unique("voice-settings")).show(ctx, |ui| {
-            ui.set_width(400.0);
-            ui.spacing_mut().slider_width = 220.0;
-            ui.label(RichText::new("Voice settings").size(19.0).strong().color(theme::TEXT));
+        let modal = theme::modal("voice-settings").show(ctx, |ui| {
+            ui.set_width(420.0);
+            dialog_header(ui, "Voice settings", "Changes apply right away.");
 
             // Keeps the title and the Done button on screen when the window is shorter than the
-            // dialog; 170 points covers both plus the modal's margins.
-            let body_height = (ui.ctx().content_rect().height() - 170.0).max(120.0);
+            // dialog; 150 points covers both plus the modal's margins.
+            let body_height = (ui.ctx().content_rect().height() - 150.0).max(120.0);
             egui::ScrollArea::vertical().max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
-                section(ui, "Microphone");
-                restart |= device_combo(ui, "mic", &mut a.input_device, &dlg.inputs);
-                section(ui, "Speakers");
-                restart |= device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs);
+                ui.spacing_mut().interact_size.x = SLIDER_VALUE_W;
+                section(ui, "Devices");
+                row(ui, "Microphone", |ui| restart |= device_combo(ui, "mic", &mut a.input_device, &dlg.inputs));
+                row(ui, "Speakers", |ui| restart |= device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs));
 
                 section(ui, "Transmit");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut a.mode, TxMode::VoiceActivation, "Voice activation");
-                    ui.selectable_value(&mut a.mode, TxMode::PushToTalk, "Push to talk");
+                row(ui, "Mode", |ui| {
+                    theme::segmented(
+                        ui,
+                        &mut a.mode,
+                        &[(TxMode::VoiceActivation, "Voice activation"), (TxMode::PushToTalk, "Push to talk")],
+                    );
                 });
-                ui.add_space(6.0);
                 match a.mode {
                     TxMode::VoiceActivation => {
-                        level_meter(ui, level, a.threshold_db, open);
-                        ui.add(
-                            egui::Slider::new(&mut a.threshold_db, METER_MIN_DB..=METER_MAX_DB)
-                                .text("activation level")
-                                .suffix(" dB")
-                                .fixed_decimals(0),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Talk normally: the bar should cross the line, and stay left of it when you're quiet.",
-                            )
-                            .size(11.5)
-                            .color(theme::TEXT_FAINT),
+                        row(ui, "Input level", |ui| level_meter(ui, level, a.threshold_db, open));
+                        row(ui, "Activate at", |ui| {
+                            slider(ui, &mut a.threshold_db, METER_MIN_DB..=METER_MAX_DB, Unit::Db);
+                        });
+                        hint(
+                            ui,
+                            "Talk normally: the bar should cross the line, and stay left of it when you're quiet.",
                         );
                     }
                     TxMode::PushToTalk => {
-                        ui.horizontal(|ui| {
+                        row(ui, "Key", |ui| {
                             let text = match (dlg.binding, a.ptt_key) {
                                 (true, _) => "Press a key or mouse button…".to_owned(),
                                 (false, Some(k)) => ptt::label(k.vk),
                                 (false, None) => "Click to set a key".to_owned(),
                             };
-                            if ui.add(egui::Button::new(text).min_size(vec2(220.0, 30.0))).clicked() {
+                            if ui.add(Btn::secondary(&text).min_width(200.0)).clicked() {
                                 dlg.binding = true;
                             }
                             if open {
-                                ui.label(RichText::new("Transmitting").color(theme::GREEN));
+                                ui.label(RichText::new("Transmitting").size(12.5).color(theme::GREEN));
                             }
                         });
-                        let note = if cfg!(windows) {
-                            "Works while other apps, like games, are focused."
-                        } else {
-                            "Works while T7 is focused."
-                        };
-                        ui.label(RichText::new(note).size(11.5).color(theme::TEXT_FAINT));
+                        hint(
+                            ui,
+                            if cfg!(windows) {
+                                "Works while other apps, like games, are focused."
+                            } else {
+                                "Works while T7 is focused."
+                            },
+                        );
                     }
                 }
 
                 section(ui, "Sound cleanup");
-                ui.checkbox(&mut a.cleanup.noise_suppression, "Noise suppression")
+                theme::switch(ui, &mut a.cleanup.noise_suppression, "Noise suppression")
                     .on_hover_text("Removes fans, hum, traffic and other background noise");
-                ui.checkbox(&mut a.cleanup.echo_cancellation, "Echo cancellation")
+                theme::switch(ui, &mut a.cleanup.echo_cancellation, "Echo cancellation")
                     .on_hover_text("Stops others from hearing themselves when you use speakers instead of headphones");
-                ui.checkbox(&mut a.cleanup.auto_gain, "Automatic volume")
+                theme::switch(ui, &mut a.cleanup.auto_gain, "Automatic volume")
                     .on_hover_text("Brings a quiet microphone up to a normal level");
 
+                section(ui, "Volume");
+                row(ui, "Microphone", |ui| {
+                    slider(ui, &mut a.input_gain_db, -20.0..=20.0, Unit::Db);
+                });
+                row(ui, "Speakers", |ui| slider(ui, &mut a.output_volume, 0.0..=2.0, Unit::Percent));
+
                 section(ui, "Notifications");
-                ui.checkbox(&mut a.sounds, "Notification sounds")
+                theme::switch(ui, &mut a.sounds, "Notification sounds")
                     .on_hover_text("Chimes for connecting, people joining and leaving, pokes and private messages");
-                ui.add_enabled(
-                    a.sounds,
-                    egui::Slider::new(&mut a.sounds_volume, 0.0..=1.0)
-                        .text("sound volume")
-                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                        .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
-                );
-                ui.horizontal(|ui| {
-                    let shown = match &a.sound_pack {
-                        None => "Built-in".to_owned(),
-                        Some(dir) => dlg
-                            .packs
-                            .iter()
-                            .find(|(_, d)| d == dir)
-                            .map_or_else(|| dir.display().to_string(), |(label, _)| label.clone()),
-                    };
-                    egui::ComboBox::from_id_salt("sound-pack").width(250.0).selected_text(shown).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut a.sound_pack, None, "Built-in");
-                        for (label, dir) in &dlg.packs {
-                            ui.selectable_value(&mut a.sound_pack, Some(dir.clone()), label);
+                ui.add_enabled_ui(a.sounds, |ui| {
+                    row(ui, "Volume", |ui| slider(ui, &mut a.sounds_volume, 0.0..=1.0, Unit::Percent));
+                    row(ui, "Sound pack", |ui| {
+                        let shown = match &a.sound_pack {
+                            None => "Built-in".to_owned(),
+                            Some(dir) => dlg
+                                .packs
+                                .iter()
+                                .find(|(_, d)| d == dir)
+                                .map_or_else(|| dir.display().to_string(), |(label, _)| label.clone()),
+                        };
+                        let width = ui.available_width() - 64.0;
+                        egui::ComboBox::from_id_salt("sound-pack").width(width).selected_text(shown).show_ui(
+                            ui,
+                            |ui| {
+                                ui.selectable_value(&mut a.sound_pack, None, "Built-in");
+                                for (label, dir) in &dlg.packs {
+                                    ui.selectable_value(&mut a.sound_pack, Some(dir.clone()), label);
+                                }
+                            },
+                        );
+                        if ui.add(Btn::secondary("Test").min_width(56.0)).clicked() {
+                            test_sound = true;
                         }
                     });
-                    if ui.small_button("Test").clicked() {
-                        test_sound = true;
+                    if a.sound_pack.is_some() && a.sound_pack == sounds_dir() {
+                        let names: Vec<&str> = Sound::ALL.iter().map(|s| s.file_name()).collect();
+                        row(ui, "", |ui| {
+                            if ui
+                                .add(Btn::secondary("Open custom folder…").small())
+                                .on_hover_text(format!(
+                                    "WAV files with these names replace the built-in sounds: {}",
+                                    names.join(", ")
+                                ))
+                                .clicked()
+                            {
+                                open_sounds_folder();
+                            }
+                        });
                     }
                 });
-                if a.sound_pack.is_some() && a.sound_pack == sounds_dir() {
-                    let names: Vec<&str> = Sound::ALL.iter().map(|s| s.file_name()).collect();
-                    if ui
-                        .small_button("Open custom folder…")
-                        .on_hover_text(format!(
-                            "WAV files with these names replace the built-in sounds: {}",
-                            names.join(", ")
-                        ))
-                        .clicked()
-                    {
-                        open_sounds_folder();
-                    }
-                }
-
-                section(ui, "Volume");
-                ui.add(
-                    egui::Slider::new(&mut a.input_gain_db, -20.0..=20.0)
-                        .text("microphone")
-                        .suffix(" dB")
-                        .fixed_decimals(0),
-                );
-                ui.add(
-                    egui::Slider::new(&mut a.output_volume, 0.0..=2.0)
-                        .text("speakers")
-                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                        .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
-                );
             });
 
-            ui.add_space(14.0);
+            ui.add_space(16.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("T7 {}", crate::update::VERSION)).size(11.5).color(theme::TEXT_FAINT));
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let version = format!("T7 {}", crate::update::VERSION);
+                ui.label(RichText::new(version).size(12.0).color(theme::TEXT_FAINT));
                 if self.updater.enabled() {
                     let state = match self.updater.status() {
                         crate::update::Status::Idle | crate::update::Status::UpToDate => "up to date".to_owned(),
@@ -1838,16 +1840,16 @@ impl App {
                         crate::update::Status::Ready(v) => format!("{v} ready, restart to update"),
                         crate::update::Status::Failed(e) => e,
                     };
-                    ui.label(RichText::new(format!("· {state}")).size(11.5).color(theme::TEXT_FAINT));
-                    if ui.small_button("Check now").clicked() {
+                    ui.label(RichText::new(format!("· {state}")).size(12.0).color(theme::TEXT_FAINT));
+                    if ui.add(Btn::ghost("Check now").small()).clicked() {
                         self.updater.check_now();
                     }
                 }
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(theme::primary_button("Done")).clicked() {
-                    close = true;
-                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(Btn::primary("Done")).clicked() {
+                        close = true;
+                    }
+                });
             });
         });
         if modal.should_close() && !dlg.binding {
@@ -1879,19 +1881,11 @@ impl App {
     fn poke_dialog(&mut self, ctx: &egui::Context) {
         let Some(form) = &mut self.poke_form else { return };
         let (mut send, mut cancel) = (false, false);
-        let modal = egui::Modal::new(Id::unique("poke")).show(ctx, |ui| {
+        let modal = theme::modal("poke").show(ctx, |ui| {
             ui.set_width(340.0);
-            ui.label(RichText::new(format!("Poke {}", form.name)).size(19.0).strong().color(theme::TEXT));
-            ui.add_space(2.0);
-            ui.label(RichText::new("They get a popup and a sound.").size(12.5).color(theme::TEXT_DIM));
-            ui.add_space(12.0);
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut form.message)
-                    .hint_text("Message (optional)")
-                    .char_limit(t7_proto::MAX_POKE_LEN)
-                    .desired_width(f32::INFINITY)
-                    .margin(Margin::symmetric(10, 7)),
-            );
+            dialog_header(ui, &format!("Poke {}", form.name), "They get a popup and a sound.");
+            let edit = ui
+                .add(text_input(&mut form.message).hint_text("Message (optional)").char_limit(t7_proto::MAX_POKE_LEN));
             if !form.focus_requested {
                 edit.request_focus();
                 form.focus_requested = true;
@@ -1899,12 +1893,11 @@ impl App {
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 send = true;
             }
-            ui.add_space(12.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(theme::primary_button("Poke")).clicked() {
+            dialog_footer(ui, |ui| {
+                if ui.add(Btn::primary("Poke")).clicked() {
                     send = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.add(Btn::secondary("Cancel")).clicked() {
                     cancel = true;
                 }
             });
@@ -1935,7 +1928,7 @@ impl App {
         let mut send: Option<C2S> = None;
         let mut unban = None;
         let mut cancel = false;
-        let modal = egui::Modal::new(Id::unique("moderation")).show(ctx, |ui| {
+        let modal = theme::modal("moderation").show(ctx, |ui| {
             ui.set_width(if matches!(dialog, Moderation::Bans(_)) { 440.0 } else { 360.0 });
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             match dialog {
@@ -1948,45 +1941,33 @@ impl App {
                             format!("They move to {default_name}, or the first open channel if it's full or locked."),
                         )
                     };
-                    ui.label(RichText::new(title).size(19.0).strong().color(theme::TEXT));
-                    ui.add_space(2.0);
-                    ui.label(RichText::new(note).size(12.5).color(theme::TEXT_DIM));
-                    ui.add_space(12.0);
+                    dialog_header(ui, &title, &note);
                     reason_field(ui, reason, focused);
-                    ui.add_space(14.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(danger_button("Kick")).clicked() || enter {
+                    dialog_footer(ui, |ui| {
+                        if ui.add(Btn::danger("Kick")).clicked() || enter {
                             let reason = reason.trim().to_owned();
                             send = Some(C2S::Kick { target: *target, from_server: *from_server, reason });
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.add(Btn::secondary("Cancel")).clicked() {
                             cancel = true;
                         }
                     });
                 }
                 Moderation::Ban { target, name, reason, length, include_ip, focused } => {
-                    ui.label(RichText::new(format!("Ban {name}")).size(19.0).strong().color(theme::TEXT));
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new("They are kicked off the server and can't connect again until the ban ends.")
-                            .size(12.5)
-                            .color(theme::TEXT_DIM),
+                    dialog_header(
+                        ui,
+                        &format!("Ban {name}"),
+                        "They are kicked off the server and can't connect again until the ban ends.",
                     );
-                    ui.add_space(12.0);
                     reason_field(ui, reason, focused);
                     section(ui, "Length");
-                    ui.horizontal(|ui| {
-                        for (label, secs) in BAN_LENGTHS {
-                            ui.selectable_value(length, secs, label);
-                        }
-                    });
-                    ui.add_space(6.0);
-                    ui.checkbox(include_ip, "Also ban IP address").on_hover_text(
+                    theme::segmented(ui, length, &BAN_LENGTHS);
+                    ui.add_space(8.0);
+                    theme::switch(ui, include_ip, "Also ban their IP address").on_hover_text(
                         "Also kicks off and keeps out everyone else at their address, under any identity",
                     );
-                    ui.add_space(14.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(danger_button("Ban")).clicked() || enter {
+                    dialog_footer(ui, |ui| {
+                        if ui.add(Btn::danger("Ban")).clicked() || enter {
                             let reason = reason.trim().to_owned();
                             send = Some(C2S::Ban {
                                 target: *target,
@@ -1995,14 +1976,13 @@ impl App {
                                 include_ip: *include_ip,
                             });
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.add(Btn::secondary("Cancel")).clicked() {
                             cancel = true;
                         }
                     });
                 }
                 Moderation::Bans(list) => {
-                    ui.label(RichText::new("Bans").size(19.0).strong().color(theme::TEXT));
-                    ui.add_space(10.0);
+                    dialog_header(ui, "Bans", "");
                     match list {
                         None => {
                             ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
@@ -2012,20 +1992,20 @@ impl App {
                         }
                         Some(list) => {
                             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 6.0;
                                 for ban in list.iter() {
                                     if ban_card(ui, ban) {
                                         unban = Some(ban.id);
                                     }
-                                    ui.add_space(6.0);
                                 }
                             });
                         }
                     }
-                    ui.add_space(12.0);
+                    ui.add_space(18.0);
                     // Top-aligned: a centered row would keep the height the
                     // scroll area took on the frame the list arrived.
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        if ui.add(theme::primary_button("Done")).clicked() {
+                        if ui.add(Btn::primary("Done")).clicked() {
                             cancel = true;
                         }
                     });
@@ -2048,25 +2028,23 @@ impl App {
         let Some(alert) = self.pokes.front() else { return };
         let more = self.pokes.len() - 1;
         let mut ok = false;
-        let modal = egui::Modal::new(Id::unique("poked")).show(ctx, |ui| {
+        let modal = theme::modal("poked").show(ctx, |ui| {
             ui.set_width(340.0);
-            ui.label(RichText::new(format!("{} poked you", alert.from)).size(19.0).strong().color(theme::TEXT));
-            ui.label(RichText::new(&alert.time).size(12.0).color(theme::TEXT_FAINT));
+            dialog_header(ui, &format!("{} poked you", alert.from), &alert.time);
             if !alert.message.is_empty() {
-                ui.add_space(10.0);
                 egui::Frame::new()
                     .fill(theme::SURFACE)
-                    .corner_radius(CornerRadius::same(theme::RADIUS))
+                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .corner_radius(CornerRadius::same(8))
                     .inner_margin(Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.label(RichText::new(&alert.message).size(14.5).color(theme::TEXT));
+                        ui.label(RichText::new(&alert.message).size(14.0).color(theme::TEXT));
                     });
             }
-            ui.add_space(14.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            dialog_footer(ui, |ui| {
                 let label = if more > 0 { format!("OK ({more} more)") } else { "OK".to_owned() };
-                if ui.add(theme::primary_button(&label)).clicked() {
+                if ui.add(Btn::primary(&label)).clicked() {
                     ok = true;
                 }
             });
@@ -2084,33 +2062,35 @@ impl App {
     fn cert_change_dialog(&mut self, ctx: &egui::Context) {
         let Some(change) = &self.cert_change else { return };
         let (mut trust, mut cancel) = (false, false);
-        let modal = egui::Modal::new(Id::unique("cert-change")).show(ctx, |ui| {
-            ui.set_width(380.0);
-            ui.label(RichText::new("Server certificate changed").size(19.0).strong().color(theme::TEXT));
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(format!(
-                    "{} shows a different certificate than last time. That is expected if its admin \
-                     replaced it. Otherwise someone may be intercepting the connection. The server \
-                     prints its fingerprint when it starts, so ask the admin which is right.",
-                    change.address
-                ))
-                .size(12.5)
-                .color(theme::TEXT_DIM),
+        let modal = theme::modal("cert-change").show(ctx, |ui| {
+            ui.set_width(400.0);
+            let note = format!(
+                "{} shows a different certificate than last time. That is expected if its admin \
+                 replaced it. Otherwise someone may be intercepting the connection. The server \
+                 prints its fingerprint when it starts, so ask the admin which is right.",
+                change.address
             );
+            dialog_header(ui, "Server certificate changed", &note);
             for (title, fingerprint, color) in
-                [("SAVED", change.pinned, theme::TEXT_DIM), ("NEW", change.presented, theme::TEXT)]
+                [("Saved", change.pinned, theme::TEXT_DIM), ("New", change.presented, theme::TEXT)]
             {
-                ui.add_space(10.0);
-                ui.label(RichText::new(title).size(11.0).strong().color(theme::TEXT_FAINT));
-                ui.label(RichText::new(two_lines(fingerprint)).font(FontId::monospace(12.0)).color(color));
+                field_label(ui, title);
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .corner_radius(CornerRadius::same(theme::RADIUS))
+                    .inner_margin(Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new(two_lines(fingerprint)).font(FontId::monospace(12.0)).color(color));
+                    });
+                ui.add_space(6.0);
             }
-            ui.add_space(14.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(danger_button("Trust new certificate and connect")).clicked() {
+            dialog_footer(ui, |ui| {
+                if ui.add(Btn::danger("Trust new certificate and connect")).clicked() {
                     trust = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.add(Btn::secondary("Cancel")).clicked() {
                     cancel = true;
                 }
             });
@@ -2173,7 +2153,7 @@ impl App {
         let mut send: Option<C2S> = None;
         let mut login: Option<String> = None;
         let mut close = false;
-        let modal = egui::Modal::new(Id::unique("channel-dialog")).show(ctx, |ui| {
+        let modal = theme::modal("channel-dialog").show(ctx, |ui| {
             ui.set_width(380.0);
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             match dialog {
@@ -2183,169 +2163,136 @@ impl App {
                         (None, Some(parent)) => format!("New channel in {parent}"),
                         (None, None) => "New channel".to_owned(),
                     };
-                    ui.label(RichText::new(title).size(19.0).strong().color(theme::TEXT));
-                    ui.add_space(12.0);
-                    ui.label(RichText::new("Name").size(12.0).color(theme::TEXT_DIM));
-                    let name = ui.add(
-                        egui::TextEdit::singleline(&mut form.name)
-                            .char_limit(MAX_CHANNEL_NAME_LEN)
-                            .desired_width(f32::INFINITY)
-                            .margin(Margin::symmetric(10, 7)),
-                    );
+                    dialog_header(ui, &title, "");
+                    field_label(ui, "Name");
+                    let name = ui.add(text_input(&mut form.name).char_limit(MAX_CHANNEL_NAME_LEN));
                     if !form.focused {
                         name.request_focus();
                         form.focused = true;
                     }
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("Topic (optional)").size(12.0).color(theme::TEXT_DIM));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.topic)
-                            .char_limit(MAX_CHANNEL_TOPIC_LEN)
-                            .desired_width(f32::INFINITY)
-                            .margin(Margin::symmetric(10, 7)),
-                    );
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut form.limited, "Limit to");
-                        ui.add_enabled(form.limited, egui::DragValue::new(&mut form.limit).range(1..=1000).suffix(" people"));
-                    });
-                    if form.had_password {
-                        ui.checkbox(&mut form.protected, "Password protected");
-                    }
+                    ui.add_space(8.0);
+                    field_label(ui, "Topic (optional)");
+                    ui.add(text_input(&mut form.topic).char_limit(MAX_CHANNEL_TOPIC_LEN));
+                    ui.add_space(8.0);
                     if !form.had_password || form.protected {
-                        let label = if form.had_password { "New password (empty keeps the current one)" } else { "Password (optional)" };
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(label).size(12.0).color(theme::TEXT_DIM));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut form.password)
-                                .password(true)
-                                .desired_width(f32::INFINITY)
-                                .margin(Margin::symmetric(10, 7)),
-                        );
+                        let label = if form.had_password {
+                            "New password (empty keeps the current one)"
+                        } else {
+                            "Password (optional)"
+                        };
+                        field_label(ui, label);
+                        ui.add(text_input(&mut form.password).password(true));
+                        ui.add_space(8.0);
+                    }
+                    if form.had_password {
+                        theme::switch(ui, &mut form.protected, "Password protected");
+                    }
+                    theme::switch(ui, &mut form.limited, "Limit how many can join");
+                    if form.limited {
+                        row(ui, "Up to", |ui| {
+                            ui.add(egui::DragValue::new(&mut form.limit).range(1..=1000).suffix(" people"));
+                        });
+                    }
+                    if form.editing.is_none() {
+                        if may_create_permanent {
+                            theme::switch(ui, &mut form.temporary, "Temporary")
+                                .on_hover_text("Removed once everyone has left");
+                        } else {
+                            hint(ui, "Temporary: removed once everyone has left. You'll move into it.");
+                        }
                     }
                     if let Some(list) = &moderators {
                         section(ui, "Moderators");
                         if list.is_empty() {
-                            ui.label(
-                                RichText::new("Nobody yet. Right-click someone in this channel to make them a moderator.")
-                                    .size(12.0)
-                                    .color(theme::TEXT_FAINT),
-                            );
+                            hint(ui, "Nobody yet. Right-click someone in this channel to make them a moderator.");
                         }
                         for (identity, nickname) in list {
                             ui.horizontal(|ui| {
-                                if let Some(name) = nickname { ui.label(RichText::new(name).color(theme::TEXT)) } else {
-                                    ui.label(RichText::new(identity.to_string()).font(FontId::monospace(12.5)).color(theme::TEXT_DIM));
-                                    ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT))
-                                };
+                                ui.set_min_height(28.0);
+                                if let Some(name) = nickname {
+                                    ui.label(RichText::new(name).color(theme::TEXT));
+                                } else {
+                                    ui.label(
+                                        RichText::new(identity.to_string())
+                                            .font(FontId::monospace(12.5))
+                                            .color(theme::TEXT_DIM),
+                                    );
+                                    ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT));
+                                }
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.small_button("Remove").clicked() {
+                                    if ui.add(Btn::secondary("Remove").small()).clicked() {
                                         unmoderate = Some(*identity);
                                     }
                                 });
                             });
                         }
                     }
-                    if form.editing.is_none() {
-                        ui.add_space(6.0);
-                        if may_create_permanent {
-                            ui.checkbox(&mut form.temporary, "Temporary: removed once everyone has left");
-                        } else {
-                            ui.label(
-                                RichText::new("Temporary: removed once everyone has left. You'll move into it.")
-                                    .size(12.0)
-                                    .color(theme::TEXT_FAINT),
-                            );
-                        }
-                    }
-                    ui.add_space(14.0);
                     let ready = !form.name.trim().is_empty();
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    dialog_footer(ui, |ui| {
                         let label = if form.editing.is_some() { "Save" } else { "Create" };
-                        if ui.add_enabled(ready, theme::primary_button(label)).clicked() || (ready && enter) {
+                        if ui.add_enabled(ready, Btn::primary(label)).clicked() || (ready && enter) {
                             let settings = form.settings();
                             send = Some(match form.editing {
                                 Some(id) => C2S::EditChannel { id, settings },
                                 None => C2S::CreateChannel { parent: form.parent, settings, temporary: form.temporary },
                             });
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.add(Btn::secondary("Cancel")).clicked() {
                             close = true;
                         }
                     });
                 }
                 ChannelDialog::Password { channel, name, password, focused } => {
-                    ui.label(RichText::new(format!("Join {name}")).size(19.0).strong().color(theme::TEXT));
-                    ui.add_space(2.0);
-                    ui.label(RichText::new("This channel has a password.").size(12.5).color(theme::TEXT_DIM));
-                    ui.add_space(12.0);
-                    let field = ui.add(
-                        egui::TextEdit::singleline(password)
-                            .password(true)
-                            .hint_text("Password")
-                            .desired_width(f32::INFINITY)
-                            .margin(Margin::symmetric(10, 7)),
-                    );
+                    dialog_header(ui, &format!("Join {name}"), "This channel has a password.");
+                    let field = ui.add(text_input(password).password(true).hint_text("Password"));
                     if !*focused {
                         field.request_focus();
                         *focused = true;
                     }
-                    ui.add_space(14.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(theme::primary_button("Join")).clicked() || enter {
+                    dialog_footer(ui, |ui| {
+                        if ui.add(Btn::primary("Join")).clicked() || enter {
                             send = Some(C2S::JoinChannel { channel: *channel, password: Some(password.clone()) });
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.add(Btn::secondary("Cancel")).clicked() {
                             close = true;
                         }
                     });
                 }
                 ChannelDialog::Delete { channel, name, occupants } => {
-                    ui.label(RichText::new(format!("Delete {name}?")).size(19.0).strong().color(theme::TEXT));
-                    ui.add_space(6.0);
                     let mut text = "Its sub-channels are deleted too.".to_owned();
                     if *occupants > 0 {
-                        let who = if *occupants == 1 { "The 1 person".to_owned() } else { format!("The {occupants} people") };
+                        let who =
+                            if *occupants == 1 { "The 1 person".to_owned() } else { format!("The {occupants} people") };
                         let _ = write!(text, " {who} inside will move to {default_name}.");
                     }
-                    ui.label(RichText::new(text).size(13.0).color(theme::TEXT_DIM));
-                    ui.add_space(14.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(danger_button("Delete")).clicked() {
+                    dialog_header(ui, &format!("Delete {name}?"), &text);
+                    dialog_footer(ui, |ui| {
+                        if ui.add(Btn::danger("Delete")).clicked() {
                             send = Some(C2S::DeleteChannel { id: *channel });
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.add(Btn::secondary("Cancel")).clicked() {
                             close = true;
                         }
                     });
                 }
                 ChannelDialog::AdminLogin { token, focused } => {
-                    ui.label(RichText::new("Admin login").size(19.0).strong().color(theme::TEXT));
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new("Admins can manage every channel, choose moderators, and kick and ban people. The token is in the server's log and in admin_token.txt next to its config.")
-                            .size(12.5)
-                            .color(theme::TEXT_DIM),
+                    dialog_header(
+                        ui,
+                        "Admin login",
+                        "Admins can manage every channel, choose moderators, and kick and ban people. The token \
+                         is in the server's log and in admin_token.txt next to its config.",
                     );
-                    ui.add_space(12.0);
-                    let field = ui.add(
-                        egui::TextEdit::singleline(token)
-                            .password(true)
-                            .hint_text("Admin token")
-                            .desired_width(f32::INFINITY)
-                            .margin(Margin::symmetric(10, 7)),
-                    );
+                    let field = ui.add(text_input(token).password(true).hint_text("Admin token"));
                     if !*focused {
                         field.request_focus();
                         *focused = true;
                     }
-                    ui.add_space(14.0);
                     let ready = !token.trim().is_empty();
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add_enabled(ready, theme::primary_button("Log in")).clicked() || (ready && enter) {
+                    dialog_footer(ui, |ui| {
+                        if ui.add_enabled(ready, Btn::primary("Log in")).clicked() || (ready && enter) {
                             login = Some(token.trim().to_owned());
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.add(Btn::secondary("Cancel")).clicked() {
                             close = true;
                         }
                     });
@@ -2504,12 +2451,12 @@ fn avatar(ui: &mut egui::Ui, name: &str, size: f32, talking: bool) {
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 34.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     let (fill, color) =
-        if resp.hovered() { (theme::SURFACE_HOVER, theme::TEXT) } else { (theme::SURFACE, theme::TEXT_DIM) };
+        if resp.hovered() { (theme::SURFACE_HOVER, theme::TEXT) } else { (Color32::TRANSPARENT, theme::TEXT_DIM) };
     ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
     icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
-    resp.on_hover_text(tip)
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
 }
 
 /// A device picker; `None` follows the system default.
@@ -2530,46 +2477,151 @@ const METER_MAX_DB: f32 = -5.0;
 
 /// Live microphone level with the activation threshold marked.
 fn level_meter(ui: &mut egui::Ui, level_db: f32, threshold_db: f32, open: bool) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
     let t = |db: f32| ((db - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB)).clamp(0.0, 1.0);
     let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(5), theme::SURFACE_ACTIVE);
+    p.rect_filled(rect, CornerRadius::same(3), theme::SURFACE_ACTIVE);
     let mut fill = rect;
     fill.set_width(rect.width() * t(level_db));
-    p.rect_filled(fill, CornerRadius::same(5), if open { theme::GREEN } else { theme::TEXT_FAINT });
+    p.rect_filled(fill, CornerRadius::same(3), if open { theme::GREEN } else { theme::TEXT_FAINT });
     let x = rect.left() + rect.width() * t(threshold_db);
     p.line_segment(
-        [egui::pos2(x, rect.top() - 3.0), egui::pos2(x, rect.bottom() + 3.0)],
+        [egui::pos2(x, rect.top() - 4.0), egui::pos2(x, rect.bottom() + 4.0)],
         Stroke::new(2.0, theme::ACCENT_TEXT),
     );
 }
 
+/// Starts a group of settings: a small caps label with room above it.
 fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(10.0);
-    ui.label(RichText::new(title).size(12.0).color(theme::TEXT_DIM));
+    ui.add_space(14.0);
+    ui.label(RichText::new(title.to_uppercase()).size(11.0).strong().color(theme::TEXT_FAINT));
+    ui.add_space(2.0);
 }
 
-fn badge(ui: &egui::Ui, anchor: egui::Rect, count: u32) {
-    let text = if count > 99 { "99+".to_owned() } else { count.to_string() };
-    let center = anchor.right_top() + vec2(2.0, 3.0);
-    let w = (text.len() as f32 * 6.0 + 8.0).max(16.0);
-    let r = egui::Rect::from_center_size(center, vec2(w, 16.0));
+/// Width of the label column in settings rows.
+const ROW_LABEL_W: f32 = 104.0;
+/// Width of the number box after a slider.
+const SLIDER_VALUE_W: f32 = 60.0;
+
+/// A settings row: the label in a fixed column so every control starts at the same x.
+fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        let color = if ui.is_enabled() { theme::TEXT_DIM } else { theme::TEXT_FAINT };
+        let (rect, _) = ui.allocate_exact_size(vec2(ROW_LABEL_W, theme::CONTROL_H), Sense::hover());
+        ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, label, FontId::proportional(13.0), color);
+        add(ui)
+    })
+    .inner
+}
+
+#[derive(Clone, Copy)]
+enum Unit {
+    Db,
+    /// Stored as a factor, shown as a percentage.
+    Percent,
+}
+
+/// A slider filling the rest of a row, its value in an editable box at the end.
+fn slider(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, unit: Unit) {
+    let width = ui.available_width() - SLIDER_VALUE_W - ui.spacing().item_spacing.x;
+    ui.scope(|ui| {
+        // egui sizes the knob from the control height; this keeps it small.
+        ui.spacing_mut().interact_size.y = 16.0;
+        ui.spacing_mut().slider_width = width;
+        ui.add(egui::Slider::new(value, range.clone()).show_value(false));
+    });
+    let speed = (range.end() - range.start()) / 200.0;
+    let drag = egui::DragValue::new(value).range(range).speed(speed);
+    let drag = match unit {
+        Unit::Db => drag.suffix(" dB").fixed_decimals(0),
+        Unit::Percent => drag
+            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+            .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
+    };
+    ui.add_sized(vec2(SLIDER_VALUE_W, theme::CONTROL_H), drag);
+}
+
+/// A faint explanatory line under a control.
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).size(11.5).color(theme::TEXT_FAINT));
+}
+
+/// A dialog's title, and a line explaining it unless `note` is empty.
+fn dialog_header(ui: &mut egui::Ui, title: &str, note: &str) {
+    ui.label(RichText::new(title).size(17.0).strong().color(theme::TEXT));
+    if !note.is_empty() {
+        ui.add_space(2.0);
+        ui.label(RichText::new(note).size(12.5).color(theme::TEXT_DIM));
+    }
+    ui.add_space(14.0);
+}
+
+/// The right-aligned button row that ends a dialog: add the main action first.
+fn dialog_footer(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(18.0);
+    ui.with_layout(Layout::right_to_left(Align::Center), add);
+}
+
+fn field_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).size(12.0).color(theme::TEXT_DIM));
+    ui.add_space(-2.0);
+}
+
+/// A single-line text field, as tall as a button.
+fn text_input(value: &mut String) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(value)
+        .desired_width(f32::INFINITY)
+        .min_size(vec2(0.0, theme::CONTROL_H))
+        .align(Align2::LEFT_CENTER)
+        .margin(Margin::symmetric(10, 0))
+}
+
+/// A chat tab, with its unread count in a pill after the title.
+fn tab_button(ui: &mut egui::Ui, label: &str, active: bool, unread: u32) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), FontId::proportional(13.0), theme::TEXT);
+    let count = (unread > 0).then(|| {
+        let text = if unread > 99 { "99+".to_owned() } else { unread.to_string() };
+        ui.painter().layout_no_wrap(text, FontId::proportional(10.5), theme::ON_ACCENT)
+    });
+    let pill_w = count.as_ref().map_or(0.0, |c| (c.size().x + 10.0).max(17.0));
+    let width = galley.size().x + 24.0 + if count.is_some() { pill_w + 6.0 } else { 0.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click());
     let p = ui.painter();
-    p.rect_filled(r, CornerRadius::same(8), theme::ACCENT);
-    p.text(r.center(), Align2::CENTER_CENTER, text, FontId::proportional(10.5), theme::ON_ACCENT);
+    let hovered = resp.hovered();
+    if active {
+        p.rect(
+            rect,
+            CornerRadius::same(theme::RADIUS),
+            theme::SURFACE_HOVER,
+            Stroke::new(1.0, theme::BORDER),
+            egui::StrokeKind::Inside,
+        );
+    } else if hovered {
+        p.rect_filled(rect, CornerRadius::same(theme::RADIUS), theme::SURFACE);
+    }
+    let color = if active || hovered { theme::TEXT } else { theme::TEXT_DIM };
+    let text_pos = egui::pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0);
+    let text_right = text_pos.x + galley.size().x;
+    p.galley_with_override_text_color(text_pos, galley, color);
+    if let Some(count) = count {
+        let pill = egui::Rect::from_min_size(egui::pos2(text_right + 6.0, rect.center().y - 8.0), vec2(pill_w, 16.0));
+        p.rect_filled(pill, CornerRadius::same(8), theme::ACCENT);
+        p.galley(pill.center() - count.size() / 2.0, count, theme::ON_ACCENT);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// An icon toggle button; red when active (muted, deafened...).
+/// An icon toggle button, tinted with `on_color` while on (muted, deafened...).
 fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color: Color32, tip: &str) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 34.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     let (fill, color, icon) = match (*on, resp.hovered()) {
-        (true, _) => (on_color.gamma_multiply(0.18), on_color, icon_on),
+        (true, hovered) => (on_color.gamma_multiply(if hovered { 0.26 } else { 0.18 }), on_color, icon_on),
         (false, true) => (theme::SURFACE_HOVER, theme::TEXT, icon),
-        (false, false) => (theme::SURFACE, theme::TEXT_DIM, icon),
+        (false, false) => (Color32::TRANSPARENT, theme::TEXT_DIM, icon),
     };
     ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
     icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
-    let clicked = resp.on_hover_text(tip).clicked();
+    let clicked = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked();
     if clicked {
         *on = !*on;
     }
@@ -2582,7 +2634,7 @@ fn ban_card(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
         chrono::DateTime::from_timestamp(secs as i64, 0)
             .map_or_default(|t| t.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
     };
-    let mut details = vec![format!("by {} on {}", ban.banned_by, local(ban.created_unix))];
+    let mut details = vec![ban.identity.to_string(), format!("by {} on {}", ban.banned_by, local(ban.created_unix))];
     details.push(match ban.expires_unix {
         Some(end) => format!("until {}", local(end)),
         None => "permanent".into(),
@@ -2593,43 +2645,28 @@ fn ban_card(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
     let mut unban = false;
     egui::Frame::new()
         .fill(theme::SURFACE)
-        .corner_radius(CornerRadius::same(theme::RADIUS))
-        .inner_margin(Margin::symmetric(12, 8))
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(12, 10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 3.0;
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&ban.nickname).strong().color(theme::TEXT));
-                ui.label(
-                    RichText::new(ban.identity.to_string()).font(FontId::monospace(11.5)).color(theme::TEXT_FAINT),
-                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    unban = ui.small_button("Unban").clicked();
+                    unban = ui.add(Btn::secondary("Unban").small()).clicked();
                 });
             });
-            ui.label(RichText::new(details.join(" · ")).size(12.0).color(theme::TEXT_DIM));
+            ui.label(RichText::new(details.join(" · ")).size(12.0).color(theme::TEXT_FAINT));
             if !ban.reason.is_empty() {
-                ui.label(RichText::new(&ban.reason).size(12.5).color(theme::TEXT));
+                ui.label(RichText::new(&ban.reason).size(13.0).color(theme::TEXT_DIM));
             }
         });
     unban
 }
 
-/// A red button for an action that is hard to take back.
-fn danger_button(text: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
-        .fill(theme::RED)
-        .stroke(Stroke::NONE)
-        .corner_radius(theme::RADIUS)
-}
-
 fn reason_field(ui: &mut egui::Ui, reason: &mut String, focused: &mut bool) {
-    let edit = ui.add(
-        egui::TextEdit::singleline(reason)
-            .hint_text("Reason (optional)")
-            .char_limit(MAX_REASON_LEN)
-            .desired_width(f32::INFINITY)
-            .margin(Margin::symmetric(10, 7)),
-    );
+    let edit = ui.add(text_input(reason).hint_text("Reason (optional)").char_limit(MAX_REASON_LEN));
     if !*focused {
         edit.request_focus();
         *focused = true;
@@ -2637,39 +2674,35 @@ fn reason_field(ui: &mut egui::Ui, reason: &mut String, focused: &mut bool) {
 }
 
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool) -> egui::Response {
-    ui.label(RichText::new(label).size(12.0).color(theme::TEXT_DIM));
-    let resp = ui.add(
-        egui::TextEdit::singleline(value)
-            .password(password)
-            .desired_width(f32::INFINITY)
-            .margin(Margin::symmetric(10, 7)),
-    );
-    ui.add_space(6.0);
+    field_label(ui, label);
+    let resp = ui.add(text_input(value).password(password));
+    ui.add_space(8.0);
     resp
 }
 
 fn recent_card(ui: &mut egui::Ui, r: &Recent) -> egui::Response {
-    let width = 320.0_f32.min(ui.available_width());
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 48.0), Sense::click());
+    let width = RECENT_W.min(ui.available_width());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 50.0), Sense::click());
     let p = ui.painter();
-    let fill = if resp.hovered() { theme::SURFACE_HOVER } else { theme::SURFACE };
-    p.rect(rect, CornerRadius::same(10), fill, Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
+    let (fill, stroke) =
+        if resp.hovered() { (theme::SURFACE_HOVER, theme::BORDER_STRONG) } else { (theme::SURFACE, theme::BORDER) };
+    p.rect(rect, CornerRadius::same(8), fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
     let x = rect.left() + 14.0;
     p.text(
-        egui::pos2(x, rect.top() + 16.0),
+        egui::pos2(x, rect.top() + 17.0),
         Align2::LEFT_CENTER,
         &r.server_name,
-        FontId::proportional(14.0),
+        FontId::proportional(13.5),
         theme::TEXT,
     );
     p.text(
-        egui::pos2(x, rect.top() + 33.0),
+        egui::pos2(x, rect.top() + 34.0),
         Align2::LEFT_CENTER,
         &r.address,
         FontId::proportional(12.0),
         theme::TEXT_FAINT,
     );
-    let chevron = egui::Rect::from_center_size(rect.right_center() - vec2(20.0, 0.0), vec2(16.0, 16.0));
+    let chevron = egui::Rect::from_center_size(rect.right_center() - vec2(18.0, 0.0), vec2(16.0, 16.0));
     icons::paint(p, chevron, Icon::ChevronRight, if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM });
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
