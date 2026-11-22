@@ -200,3 +200,11 @@ are refused, so changing keys means one manual download for everyone.
 1. Permissions beyond admin: kick/ban, channel moderators.
 2. TLS for the control connection plus encrypted voice.
 3. Drag-and-drop to rearrange channels.
+
+## License
+
+[MIT](LICENSE).
+
+T7 is an independent project, not affiliated with or endorsed by any other
+voice-chat vendor. Product names mentioned in the code, such as the install
+folders it searches for sound packs, are trademarks of their owners.
