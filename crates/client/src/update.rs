@@ -24,7 +24,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const ENABLED: bool = option_env!("T7_RELEASE").is_some();
 const MANIFEST_URL: &str = "https://github.com/Mavial/t7rs/releases/latest/download/latest.json";
 /// Release signing key (the secret half is a GitHub Actions secret).
-const PUBLIC_KEY: &str = "ba30a394300df3c99808700bceac58cac9cc935b02336740827f6e505378dd4d";
+const PUBLIC_KEY: &str = "d293f0fe813036683dd8b909c9577906c5b5545cfd0d41f1bf3cdc2a4edc2d24";
 const FIRST_CHECK: Duration = Duration::from_secs(5);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 const MAX_MANIFEST: u64 = 64 * 1024;
