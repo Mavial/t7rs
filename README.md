@@ -169,6 +169,32 @@ cargo run --example bot -- 127.0.0.1:9988    # fill a server with demo users
 cargo run --example bot -- 127.0.0.1:9988 500   # crude load test
 ```
 
+## Updates and releases
+
+Release builds update themselves. Shortly after start and every 6 hours T7
+reads `latest.json` from the latest GitHub release; if it lists a newer version
+for the platform, T7 downloads it next to itself and accepts it only if the
+SHA-256 matches and the ed25519 signature verifies against the key built into
+the client. The new build replaces the old one when T7 closes, or right away
+with "Restart to update". When a server says the client is too old, T7 checks
+immediately. Local builds (without `T7_RELEASE` set) never update themselves.
+
+To publish a release:
+
+```sh
+# 1. bump `version` in Cargo.toml, commit
+git tag v0.3.0 && git push origin main v0.3.0
+```
+
+GitHub Actions (`.github/workflows/release.yml`) then builds Windows, Linux and
+macOS, signs each build with the `T7_SIGNING_KEY` secret and publishes the
+release with `latest.json`. The optional `T7_DEFAULT_SERVER` repository
+variable sets the address prefilled for first-time users.
+
+`cargo run -p t7-release -- keygen FILE` makes a new signing key. Its public
+half goes in `crates/client/src/update.rs`; builds signed with a different key
+are refused, so changing keys means one manual download for everyone.
+
 ## Roadmap
 
 1. Permissions beyond admin: kick/ban, channel moderators.

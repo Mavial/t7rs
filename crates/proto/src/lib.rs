@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub mod model;
+pub mod update;
 pub mod voice;
 
 /// This build's protocol. New messages are only ever appended to the enums

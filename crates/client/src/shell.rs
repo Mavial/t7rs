@@ -175,7 +175,15 @@ impl ApplicationHandler<RepaintAfter> for Shell {
                 self.app.on_exit();
                 return event_loop.exit();
             }
-            WindowEvent::RedrawRequested => return self.paint(),
+            WindowEvent::RedrawRequested => {
+                self.paint();
+                if self.app.take_quit() {
+                    self.store.save(self.app.settings());
+                    self.app.on_exit();
+                    event_loop.exit();
+                }
+                return;
+            }
             _ => {}
         }
         if response.repaint {

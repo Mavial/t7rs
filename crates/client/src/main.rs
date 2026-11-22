@@ -11,6 +11,7 @@ mod settings;
 mod shell;
 mod sounds;
 mod theme;
+mod update;
 
 fn main() {
     tracing_subscriber::fmt()

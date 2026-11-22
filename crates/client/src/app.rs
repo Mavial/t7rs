@@ -200,6 +200,9 @@ pub struct App {
     pending_admin_token: Option<String>,
     /// Ask the window manager to flash the taskbar entry.
     attention: bool,
+    updater: crate::update::Updater,
+    /// Set by "Restart to update": the shell closes the window after this frame.
+    quit: bool,
 }
 
 impl App {
@@ -243,6 +246,8 @@ impl App {
             server_address: String::new(),
             pending_admin_token: None,
             attention: false,
+            updater: crate::update::Updater::start(ctx.clone()),
+            quit: false,
         };
         app.sound_pack = Pack::open(app.settings.audio.sound_pack.as_deref());
         if let Some(l) = launch {
@@ -548,6 +553,10 @@ impl App {
         if was_connected {
             self.sound(if reason.is_some() { Sound::ConnectionLost } else { Sound::Disconnected });
         }
+        // A server newer than us: fetch the update right away.
+        if reason.as_deref().is_some_and(|r| r.contains("please update your T7")) {
+            self.updater.check_now();
+        }
         if !was_connected {
             self.last_error = reason;
         }
@@ -758,6 +767,20 @@ impl App {
                     }
                     ui.add_space(6.0);
                     self.status_pill(ui);
+                    match self.updater.status() {
+                        crate::update::Status::Ready(version) => {
+                            ui.add_space(6.0);
+                            let label = format!("Restart to update to {version}");
+                            if ui.add(theme::primary_button(&label)).on_hover_text("The update is downloaded and verified").clicked() {
+                                self.restart_to_update();
+                            }
+                        }
+                        crate::update::Status::Downloading(version) => {
+                            ui.add_space(6.0);
+                            ui.label(RichText::new(format!("Downloading {version}…")).size(12.5).color(theme::TEXT_FAINT));
+                        }
+                        _ => {}
+                    }
                 });
             });
         });
@@ -1473,6 +1496,22 @@ impl App {
             );
 
             ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("T7 {}", crate::update::VERSION)).size(11.5).color(theme::TEXT_FAINT));
+                if self.updater.enabled() {
+                    let state = match self.updater.status() {
+                        crate::update::Status::Idle | crate::update::Status::UpToDate => "up to date".to_owned(),
+                        crate::update::Status::Checking => "checking for updates…".to_owned(),
+                        crate::update::Status::Downloading(v) => format!("downloading {v}…"),
+                        crate::update::Status::Ready(v) => format!("{v} ready, restart to update"),
+                        crate::update::Status::Failed(e) => e,
+                    };
+                    ui.label(RichText::new(format!("· {state}")).size(11.5).color(theme::TEXT_FAINT));
+                    if ui.small_button("Check now").clicked() {
+                        self.updater.check_now();
+                    }
+                }
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(theme::primary_button("Done")).clicked() {
                     close = true;
@@ -1847,8 +1886,23 @@ impl App {
 
     pub fn on_exit(&mut self) {
         self.disconnect();
+        // A downloaded update is put in place now and runs next time.
+        self.updater.install();
         // Give the network thread a moment to send the goodbye.
         std::thread::sleep(Duration::from_millis(50));
+    }
+
+    pub fn take_quit(&mut self) -> bool {
+        std::mem::take(&mut self.quit)
+    }
+
+    fn restart_to_update(&mut self) {
+        let Some(exe) = self.updater.install() else { return };
+        // Same arguments, so a command-line connection reconnects.
+        match std::process::Command::new(&exe).args(std::env::args().skip(1)).spawn() {
+            Ok(_) => self.quit = true,
+            Err(e) => self.push(0, LineKind::Error, format!("Updated, but couldn't restart T7: {e}. Start it again.")),
+        }
     }
 }
 
