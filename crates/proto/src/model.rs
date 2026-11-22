@@ -101,7 +101,7 @@ impl ServerView {
         }
         let mut out = Vec::with_capacity(self.channels.len());
         let mut stack: Vec<(usize, ChannelId)> =
-            children.get(&None).map(|l| l.iter().rev().map(|c| (0, c.id)).collect()).unwrap_or_default();
+            children.get(&None).map_or_default(|l| l.iter().rev().map(|c| (0, c.id)).collect());
         while let Some((depth, id)) = stack.pop() {
             out.push((depth, id));
             if let Some(kids) = children.get(&Some(id)) {

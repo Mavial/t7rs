@@ -725,7 +725,7 @@ impl App {
                         self.authenticate(token);
                     } else {
                         let pin = self.settings.server_certs.get(&net::canonical_address(&self.server_address));
-                        let fingerprint = pin.map(|f| format!(" ({f})")).unwrap_or_default();
+                        let fingerprint = pin.map_or_default(|f| format!(" ({f})"));
                         self.push(
                             0,
                             LineKind::System,
@@ -2491,7 +2491,7 @@ fn logo(ui: &mut egui::Ui, size: f32) {
 
 fn paint_avatar(p: &egui::Painter, center: egui::Pos2, radius: f32, name: &str) {
     p.circle_filled(center, radius, theme::avatar_color(name));
-    let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+    let initial: String = name.chars().next().map_or_default(|c| c.to_uppercase().collect());
     p.text(center, Align2::CENTER_CENTER, initial, FontId::proportional(radius * 1.1), Color32::WHITE);
 }
 
@@ -2580,8 +2580,7 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color:
 fn ban_card(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
     let local = |secs: u64| {
         chrono::DateTime::from_timestamp(secs as i64, 0)
-            .map(|t| t.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
-            .unwrap_or_default()
+            .map_or_default(|t| t.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
     };
     let mut details = vec![format!("by {} on {}", ban.banned_by, local(ban.created_unix))];
     details.push(match ban.expires_unix {
