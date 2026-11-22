@@ -1,23 +1,29 @@
 //! Wire protocol shared by the T7 server and client.
 //!
-//! Every message travels over TCP as a frame: a little-endian `u32` payload
-//! length followed by a [postcard]-encoded message. Postcard is a compact
-//! varint-based binary format, so typical control messages are only a few
-//! bytes on the wire and (de)serialisation is extremely cheap.
+//! Every message travels over TLS 1.3 on TCP (see [`tls`]) as a frame: a
+//! little-endian `u32` payload length followed by a [postcard]-encoded
+//! message. Postcard is a compact varint-based binary format, so typical
+//! control messages are only a few bytes on the wire and (de)serialisation is
+//! extremely cheap.
+
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod identity;
 pub mod model;
+pub mod perms;
+pub mod tls;
 pub mod update;
 pub mod voice;
 
 /// This build's protocol. New messages are only ever appended to the enums
 /// below, so older clients keep working for everything they know about.
-pub const PROTOCOL_VERSION: u16 = 4;
-/// Oldest client protocol a server still accepts. Protocol 4 changed the
-/// channel and client records, so older clients can't follow along.
-pub const MIN_PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
+/// Oldest client protocol a server still accepts. Protocol 5 moved the
+/// control connection into TLS and encrypts voice, so older clients can't connect.
+pub const MIN_PROTOCOL_VERSION: u16 = 5;
 /// Default port of a T7 server (TCP for control, UDP for voice).
 pub const DEFAULT_PORT: u16 = 9988;
 /// Upper bound for a single frame. Protects both sides from memory abuse.
@@ -26,6 +32,8 @@ pub const MAX_FRAME_LEN: usize = 256 * 1024;
 pub const MAX_NICKNAME_LEN: usize = 32;
 pub const MAX_TEXT_LEN: usize = 2000;
 pub const MAX_POKE_LEN: usize = 100;
+/// For kick and ban reasons.
+pub const MAX_REASON_LEN: usize = 100;
 pub const MAX_CHANNEL_NAME_LEN: usize = 40;
 pub const MAX_CHANNEL_TOPIC_LEN: usize = 200;
 /// Channels nest at most this deep (top level is depth 1).
@@ -39,6 +47,9 @@ pub const IDLE_TIMEOUT_SECS: u64 = 30;
 
 pub type ClientId = u32;
 pub type ChannelId = u32;
+pub type BanId = u32;
+
+pub use identity::{Identity, IdentityProof};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct ClientStatus {
@@ -73,6 +84,8 @@ pub struct ChannelInfo {
     pub default: bool,
     /// Who made a temporary channel; they may edit and delete it.
     pub creator: Option<ClientId>,
+    /// They moderate this channel and every channel below it.
+    pub moderators: Vec<Identity>,
 }
 
 /// The editable part of a channel.
@@ -99,6 +112,24 @@ pub struct ClientInfo {
     pub status: ClientStatus,
     /// Server admin: may manage every channel.
     pub admin: bool,
+    /// The same on every connection with the same key; two connections may share one.
+    pub identity: Identity,
+}
+
+/// A ban on the server: the identity, and the IP address if that was banned too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BanInfo {
+    pub id: BanId,
+    pub identity: Identity,
+    pub ip: Option<IpAddr>,
+    /// Their nickname when they were banned.
+    pub nickname: String,
+    pub reason: String,
+    /// The admin's nickname.
+    pub banned_by: String,
+    pub created_unix: u64,
+    /// `None`: permanent.
+    pub expires_unix: Option<u64>,
 }
 
 /// Where a text message goes.
@@ -127,6 +158,7 @@ pub enum C2S {
         protocol: u16,
         nickname: String,
         password: Option<String>,
+        identity: IdentityProof,
     },
     /// `password` is needed for password-protected channels (admins skip it).
     JoinChannel { channel: ChannelId, password: Option<String> },
@@ -149,6 +181,18 @@ pub enum C2S {
     SetDefaultChannel { id: ChannelId },
     /// Become admin with the server's admin token.
     Authenticate { token: String },
+    /// Admins only. By identity, so someone offline can be removed too.
+    SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
+    /// Out of their channel to where a new client would land (admins and the channel's
+    /// moderators), or off the server (admins). See [`perms`].
+    Kick { target: ClientId, from_server: bool, reason: String },
+    /// Admins only. Bans their identity, and their IP address with `include_ip`,
+    /// for `duration_secs` (`None`: for good), and kicks off everyone it covers.
+    Ban { target: ClientId, duration_secs: Option<u64>, reason: String, include_ip: bool },
+    /// Admins only; answered with [`S2C::Bans`].
+    ListBans,
+    /// Admins only; answered with the new [`S2C::Bans`].
+    Unban { id: BanId },
 }
 
 /// Server → client.
@@ -157,13 +201,14 @@ pub enum S2C {
     /// Successful handshake: full snapshot of the server state.
     Welcome {
         your_id: ClientId,
-        /// Secret that authenticates this client's voice datagrams.
-        voice_token: u64,
+        /// Seals this client's voice datagrams, both ways.
+        voice_key: voice::VoiceKey,
         server: ServerInfo,
         channels: Vec<ChannelInfo>,
         clients: Vec<ClientInfo>,
     },
     /// Handshake refused; the server closes the connection afterwards.
+    /// Servers also send it, outside TLS, to clients too old for TLS.
     Rejected { reason: String },
     ClientJoined(ClientInfo),
     ClientLeft { id: ClientId, reason: LeaveReason },
@@ -185,6 +230,11 @@ pub enum S2C {
     /// The whole channel list, sent after any change to it.
     Channels(Vec<ChannelInfo>),
     ClientAdmin { id: ClientId, admin: bool },
+    /// Sent to everyone before the kicked client is moved to the default
+    /// channel, or disconnected with [`LeaveReason::Kicked`].
+    ClientKicked { id: ClientId, by: ClientId, from_server: bool, reason: String },
+    /// The ban list, for an admin who asked.
+    Bans(Vec<BanInfo>),
 }
 
 #[derive(Debug)]
@@ -243,12 +293,14 @@ where
     postcard::from_bytes(scratch).map_err(FrameError::Decode)
 }
 
+/// Writes one frame and flushes it, so it doesn't wait in a TLS or write buffer.
 pub async fn write_frame<W, T>(writer: &mut W, msg: &T) -> Result<(), FrameError>
 where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
     writer.write_all(&encode_frame(msg)).await?;
+    writer.flush().await?;
     Ok(())
 }
 
@@ -274,6 +326,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             nickname: "alice".into(),
             password: None,
+            identity: identity::IdentityKey::from_seed([3; 32]).prove(&[4; 32]),
         };
         let frame = encode_frame(&msg);
         assert_eq!(
