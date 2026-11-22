@@ -5,7 +5,6 @@
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
-use eframe::egui;
 use t7_proto::{
     C2S, DEFAULT_PORT, FrameError, PING_INTERVAL_SECS, PROTOCOL_VERSION, S2C, read_frame,
     write_frame,

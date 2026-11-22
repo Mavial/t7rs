@@ -80,7 +80,7 @@ Set log verbosity with `RUST_LOG=debug`.
 crates/
   proto/    wire protocol + shared client-side state model (ServerView)
   server/   t7-server: tokio, a single core task owning all state
-  client/   t7-client: egui/eframe UI + background network thread
+  client/   t7-client: egui UI, CPU-rendered, + background network thread
 ```
 
 - **Protocol:** length-prefixed [postcard](https://docs.rs/postcard) frames over TCP.
@@ -91,16 +91,20 @@ crates/
   one flush. Slow clients whose 1024-frame queue overflows are dropped instead of
   stalling everyone. Chat has a per-client rate limit, and handshakes and idle
   connections have timeouts.
-- **Client:** immediate-mode UI that redraws only on input or network events, so it
+- **Client:** immediate-mode egui UI drawn on the CPU (winit + softbuffer + a
+  software rasterizer). No GPU driver is loaded: an empty OpenGL window alone
+  commits ~66 MB, more than eight times this whole client. The UI redraws only on
+  input or network events, and a full redraw takes ~1.2 ms (median, 1100×720), so it
   sits at ~0% CPU when idle. Networking runs on its own thread with a
   current-thread tokio runtime. Icons are painted vectors (no image assets).
+  Settings live in `T7/settings.toml` in the user's config directory.
 
-Measured on Windows (release build, 6 clients connected):
+Measured on Windows (release build, idle and connected, median of 5 runs):
 
-| | Binary | RAM | Idle CPU |
-| --- | --- | --- | --- |
-| t7-server | 1.4 MB | 7.5 MB | 0% |
-| t7-client | 6.5 MB | 77 MB | 0% |
+| | Binary | Private memory (Task Manager) | Committed | Idle CPU |
+| --- | --- | --- | --- | --- |
+| t7-server | 1.4 MB | — | 7.5 MB working set | 0% |
+| t7-client | 5.9 MB | 7.2 MB | 8.1 MB | 0% |
 
 ## Development
 

@@ -1,0 +1,97 @@
+//! Client settings, stored as TOML in the user's config directory.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use t7_proto::ClientStatus;
+
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct Settings {
+    pub nickname: String,
+    pub status: ClientStatus,
+    pub recent: Vec<Recent>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Recent {
+    pub address: String,
+    pub server_name: String,
+}
+
+/// Remembers what is on disk so `save` only writes when something changed.
+pub struct Store {
+    path: Option<PathBuf>,
+    saved: Settings,
+}
+
+impl Store {
+    /// `profile` selects a separate settings file, e.g. to run two clients on one machine.
+    pub fn open(profile: Option<&str>) -> (Self, Settings) {
+        let file = match profile {
+            Some(p) => format!("settings-{p}.toml"),
+            None => "settings.toml".to_owned(),
+        };
+        let path = config_dir().map(|d| d.join("T7").join(file));
+        let settings: Settings = path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|text| match toml::from_str(&text) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!("ignoring unreadable settings file: {e}");
+                    None
+                }
+            })
+            .unwrap_or_default();
+        (Self { path, saved: settings.clone() }, settings)
+    }
+
+    pub fn save(&mut self, settings: &Settings) {
+        if *settings == self.saved {
+            return;
+        }
+        let Some(path) = &self.path else { return };
+        let write = || -> std::io::Result<()> {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let text = toml::to_string(settings).map_err(std::io::Error::other)?;
+            // Write-then-rename, so a crash mid-write never leaves a truncated file.
+            let tmp = path.with_extension("toml.tmp");
+            std::fs::write(&tmp, text)?;
+            std::fs::rename(&tmp, path)
+        };
+        match write() {
+            Ok(()) => self.saved = settings.clone(),
+            Err(e) => tracing::warn!("could not save settings to {}: {e}", path.display()),
+        }
+    }
+}
+
+fn config_dir() -> Option<PathBuf> {
+    let env = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if cfg!(windows) {
+        env("APPDATA")
+    } else if cfg!(target_os = "macos") {
+        env("HOME").map(|h| h.join("Library/Application Support"))
+    } else {
+        env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toml_roundtrip() {
+        let s = Settings {
+            nickname: "santi".into(),
+            status: ClientStatus { muted: true, deafened: false, away: false },
+            recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
+        };
+        let text = toml::to_string(&s).unwrap();
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+    }
+}

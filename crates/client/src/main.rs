@@ -3,9 +3,11 @@
 mod app;
 mod icons;
 mod net;
+mod settings;
+mod shell;
 mod theme;
 
-fn main() -> eframe::Result {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
@@ -13,20 +15,17 @@ fn main() -> eframe::Result {
         .init();
 
     // Separate settings per profile, e.g. to run two clients on one machine.
-    let app_id = match std::env::var("T7_PROFILE") {
-        Ok(p) if !p.trim().is_empty() => format!("t7-{}", p.trim()),
-        _ => "t7".to_owned(),
-    };
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("T7")
-            .with_app_id(&app_id)
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([760.0, 480.0]),
-        ..Default::default()
-    };
+    let profile = std::env::var("T7_PROFILE").ok().filter(|p| !p.trim().is_empty());
+    let (store, settings) = settings::Store::open(profile.as_deref().map(str::trim));
     let launch = parse_args();
-    eframe::run_native(&app_id, options, Box::new(|cc| Ok(Box::new(app::App::new(cc, launch)))))
+
+    let result = shell::run(egui::Context::default(), store, |ctx| {
+        app::App::new(ctx, settings, launch)
+    });
+    if let Err(e) = result {
+        tracing::error!("{e}");
+        std::process::exit(1);
+    }
 }
 
 /// `t7-client [ADDRESS] [--nick NAME]`: optionally connect right away.

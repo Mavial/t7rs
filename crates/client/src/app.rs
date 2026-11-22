@@ -1,37 +1,22 @@
 use std::time::Duration;
 
-use eframe::egui::{
+use egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Id, Layout, Margin, RichText, Sense, Stroke,
     text::LayoutJob, vec2,
 };
-use serde::{Deserialize, Serialize};
 use t7_proto::model::ServerView;
 use t7_proto::{C2S, ChannelId, ClientId, ClientStatus, LeaveReason, S2C, TextTarget};
 
 use crate::icons::{self, Icon};
 use crate::net::{Net, NetEvent, SessionId};
+use crate::settings::{Recent, Settings};
 use crate::theme;
 
-const SETTINGS_KEY: &str = "t7-settings";
 const MAX_LINES: usize = 1000;
 const MAX_RECENT: usize = 8;
 /// Server prefilled for first-time users. Set at build time, e.g.
 /// `T7_DEFAULT_SERVER=example.com cargo build --release -p t7-client`.
 const DEFAULT_SERVER: Option<&str> = option_env!("T7_DEFAULT_SERVER");
-
-#[derive(Serialize, Deserialize, Default)]
-#[serde(default)]
-struct Settings {
-    nickname: String,
-    recent: Vec<Recent>,
-    status: ClientStatus,
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
-struct Recent {
-    address: String,
-    server_name: String,
-}
 
 enum Conn {
     Disconnected,
@@ -96,23 +81,18 @@ pub struct App {
     form: Option<ConnectForm>,
     /// Shown on the empty state / connect dialog after a failed attempt.
     last_error: Option<String>,
-    title: String,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, launch: Option<Launch>) -> Self {
-        theme::apply(&cc.egui_ctx);
-        let mut settings: Settings = cc
-            .storage
-            .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
-            .unwrap_or_default();
+    pub fn new(ctx: &egui::Context, mut settings: Settings, launch: Option<Launch>) -> Self {
+        theme::apply(ctx);
         if settings.nickname.is_empty() {
             settings.nickname = std::env::var("USERNAME")
                 .or_else(|_| std::env::var("USER"))
                 .unwrap_or_else(|_| "User".into());
         }
         let mut app = Self {
-            net: Net::spawn(cc.egui_ctx.clone()),
+            net: Net::spawn(ctx.clone()),
             settings,
             session: 0,
             conn: Conn::Disconnected,
@@ -124,7 +104,6 @@ impl App {
             focus_input: false,
             form: None,
             last_error: None,
-            title: String::new(),
         };
         if let Some(l) = launch {
             let nick = l.nickname.unwrap_or_else(|| app.settings.nickname.clone());
@@ -414,17 +393,6 @@ impl App {
         if deafen {
             let s = self.settings.status;
             self.set_status(ClientStatus { deafened: !s.deafened, ..s });
-        }
-    }
-
-    fn update_title(&mut self, ctx: &egui::Context) {
-        let title = match &self.view {
-            Some(v) => format!("{} — T7", v.info.name),
-            None => "T7".to_owned(),
-        };
-        if title != self.title {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
-            self.title = title;
         }
     }
 
@@ -868,13 +836,10 @@ impl App {
     }
 }
 
-impl eframe::App for App {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+/// What the window shell needs from the app.
+impl App {
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.poll_network();
-        self.update_title(ctx);
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.shortcuts(&ctx);
         self.top_bar(ui);
@@ -886,18 +851,21 @@ impl eframe::App for App {
         self.connect_dialog(&ctx);
     }
 
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, SETTINGS_KEY, &self.settings);
+    pub fn title(&self) -> String {
+        match &self.view {
+            Some(v) => format!("{} — T7", v.info.name),
+            None => "T7".to_owned(),
+        }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn on_exit(&mut self) {
         self.disconnect();
         // Give the network thread a moment to send the goodbye.
         std::thread::sleep(Duration::from_millis(50));
-    }
-
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::BG.to_normalized_gamma_f32()
     }
 }
 

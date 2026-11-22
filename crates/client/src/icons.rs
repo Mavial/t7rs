@@ -3,7 +3,7 @@
 
 use std::f32::consts::PI;
 
-use eframe::egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2};
+use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Icon {

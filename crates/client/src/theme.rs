@@ -1,6 +1,6 @@
 //! Visual identity: a calm dark theme with a violet accent.
 
-use eframe::egui::{
+use egui::{
     self, Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle, Visuals,
 };
 
