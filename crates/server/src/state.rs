@@ -603,17 +603,19 @@ impl Server {
             client.info.role = role;
         }
         let default = self.channels.default_id();
-        let mut evicted = false;
+        let mut evicted = Vec::new();
         for c in self.clients.values_mut().filter(|c| !c.permissions.may_in(c.info.channel, Perm::View)) {
             c.info.channel = default;
-            evicted = true;
+            evicted.push(c.info.id);
         }
 
         for id in regranted {
             self.send(id, &S2C::Permissions(self.clients[&id].permissions.clone()));
         }
         self.send_channel_lists(&lists);
-        for &id in &ids {
+        // The moved first: they then hear nothing of those they left behind,
+        // who are going out of their view.
+        for &id in evicted.iter().chain(ids.iter().filter(|id| !evicted.contains(id))) {
             self.sync_about(id);
         }
         if !editors.is_empty() {
@@ -623,7 +625,7 @@ impl Server {
             let role = self.clients[&id].info.role.clone();
             self.broadcast(&S2C::ClientRole { id, role }, |c| c.known.contains_key(&id));
         }
-        if evicted {
+        if !evicted.is_empty() {
             self.remove_abandoned_channels();
         }
     }

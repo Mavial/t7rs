@@ -1158,10 +1158,18 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     assert!(error(&mut user).await.contains("no longer online"));
 
     // Without the role, the moderator may not view where they are, so they
-    // go to the default channel, back in everyone's view.
+    // go to the default channel, back in everyone's view. They hear of that
+    // before the moderator who stays goes out of their view.
+    let (mut stays, ws) = TestClient::connect(addr, "mod2", None).await;
+    let stays_id = welcomed_id(&ws);
+    owner.change_roles(assign("mod2", RoleId::MODERATOR, true)).await;
+    stays.channels().await;
+    stays.send(C2S::JoinChannel { channel: office, password: None }).await;
+    moder.until(|m| *m == S2C::ClientMoved { id: stays_id, channel: office }).await;
     owner.change_roles(assign("mod", RoleId::MODERATOR, false)).await;
-    let moved = moder.until(|m| matches!(m, S2C::ClientMoved { .. })).await;
+    let moved = moder.until(|m| matches!(m, S2C::ClientMoved { .. } | S2C::ClientHidden { .. })).await;
     assert_eq!(moved, S2C::ClientMoved { id: mod_id, channel: lobby });
+    assert_eq!(moder.recv().await, S2C::ClientHidden { id: stays_id });
     let S2C::ClientShown(back) = user.until(|m| matches!(m, S2C::ClientShown(_))).await else { unreachable!() };
     assert_eq!((back.id, back.channel), (mod_id, lobby));
     let S2C::Welcome { channels, .. } = TestClient::connect(addr, "mod", None).await.1 else { unreachable!() };
