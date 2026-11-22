@@ -1,0 +1,2 @@
+# Proper nouns that doc comments may use without backticks.
+doc-valid-idents = ["TeamSpeak", ".."]
