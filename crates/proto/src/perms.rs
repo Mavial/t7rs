@@ -219,14 +219,21 @@ pub struct Member {
 
 /// Height in the role order. You may only act on people, and roles, below your own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Rank(u32);
+pub struct Rank {
+    role_height: u32,
+    room_owner: bool,
+}
 
 impl Rank {
-    pub const EVERYONE: Rank = Rank(0);
+    pub const EVERYONE: Rank = Rank::of_role(0);
     /// A room's owner, in it: above Everyone, below every role, so that
     /// moderators keep their say over people in rooms of their own.
-    pub const ROOM_OWNER: Rank = Rank(1);
-    pub const OWNER: Rank = Rank(u32::MAX);
+    pub const ROOM_OWNER: Rank = Rank { role_height: 0, room_owner: true };
+    pub const OWNER: Rank = Rank::of_role(u32::MAX);
+
+    const fn of_role(role_height: u32) -> Rank {
+        Rank { role_height, room_owner: false }
+    }
 }
 
 const EVERYONE_PERMS: Perms =
@@ -438,7 +445,7 @@ impl Roles {
     /// one moved there.
     pub fn height_at(&self, position: usize) -> Rank {
         let len = self.ranked.len();
-        Rank(2 * (len - position.min(len.saturating_sub(1))) as u32)
+        Rank::of_role((len - position.min(len.saturating_sub(1))) as u32)
     }
 
     /// Their highest standing on the server, wherever they are.
