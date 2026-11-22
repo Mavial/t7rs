@@ -121,6 +121,7 @@ impl ApplicationHandler<RepaintAfter> for Shell {
         }
         let attrs = Window::default_attributes()
             .with_title("T7")
+            .with_window_icon(crate::brand::window_icon())
             .with_theme(Some(Theme::Dark))
             .with_inner_size(LogicalSize::new(1100.0, 720.0))
             .with_min_inner_size(LogicalSize::new(760.0, 480.0));
