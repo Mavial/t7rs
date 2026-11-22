@@ -18,7 +18,6 @@ pub enum RoleError {
     Everyone,
     /// Channel moderators hold it.
     Moderator,
-    /// Everyone must see the default channel.
     EveryoneViews,
 }
 

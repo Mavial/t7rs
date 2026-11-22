@@ -47,7 +47,6 @@ fn view() -> ServerView {
     let mut afk = channel(5, None, "AFK", 2);
     afk.temporary = true;
     let music = channel(6, None, "Music", 3);
-    // Only moderators see it.
     let mut staff = channel(7, None, "Staff", 4);
     staff.kind = ChannelKind::Category;
     let view_only = Perms::of(&[Perm::View]);

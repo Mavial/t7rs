@@ -1070,8 +1070,6 @@ async fn an_owner_reset_hands_the_server_to_the_next_claimer() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Lobby, then Staff with Office in it, which Everyone may not view but the
-/// Moderator role may, and AFK.
 const PRIVATE: &str = r#"
 [[channels]]
 name = "Lobby"
@@ -1102,8 +1100,6 @@ fn names(list: &[ChannelInfo]) -> Vec<&str> {
 }
 
 impl TestClient {
-    /// Everything that arrives until the answer to a ping: what the server
-    /// sent this client before it handled the ping.
     async fn drain(&mut self) -> Vec<S2C> {
         self.send(C2S::Ping { nonce: 9 }).await;
         let mut got = Vec::new();
@@ -1121,7 +1117,6 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     let dir = data_dir("hidden");
     let (addr, task) = start_in(PRIVATE, Some(dir.clone())).await;
     let (mut owner, _, _) = claim(addr, &dir, HOME).await;
-    // The owner sees every channel, once it is the owner.
     let S2C::Welcome { channels, .. } = TestClient::connect(addr, "admin", None).await.1 else { unreachable!() };
     let [lobby, staff, office] = ["Lobby", "Staff", "Office"].map(|name| id_of(&channels, name));
     let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
@@ -1132,17 +1127,14 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     assert!(!permissions.sees(staff) && !permissions.sees(office));
     assert!(channels.iter().all(|c| c.overrides.is_empty()), "only editors get overrides");
 
-    // Moderators hold Everyone too, and there the Moderator role's allow beats its deny.
     owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
     assert_eq!(names(&moder.channels().await), ["AFK", "Lobby", "Office", "Staff"]);
 
-    // In there, the moderator vanishes for the user, not for the owner.
     moder.send(C2S::JoinChannel { channel: office, password: None }).await;
     assert_eq!(user.until(|m| matches!(m, S2C::ClientHidden { .. })).await, S2C::ClientHidden { id: mod_id });
     for c in [&mut owner, &mut moder] {
         c.until(|m| *m == S2C::ClientMoved { id: mod_id, channel: office }).await;
     }
-    // Someone connecting now doesn't see them either, nor what they say to the server.
     let (mut late, wl) = TestClient::connect(addr, "late", None).await;
     let S2C::Welcome { clients, .. } = &wl else { unreachable!() };
     assert!(clients.iter().all(|c| c.id != mod_id), "{clients:?}");
@@ -1151,15 +1143,11 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     let heard = late.drain().await;
     assert!(heard.iter().all(|m| !matches!(m, S2C::Text { from, .. } if *from == mod_id)), "{heard:?}");
 
-    // The user can't join it, or reach the moderator.
     user.send(C2S::JoinChannel { channel: office, password: None }).await;
     assert_eq!(error(&mut user).await, "channel does not exist");
     user.send(C2S::SendText { target: TextTarget::Client(mod_id), text: "hi".into() }).await;
     assert!(error(&mut user).await.contains("no longer online"));
 
-    // Without the role, the moderator may not view where they are, so they
-    // go to the default channel, back in everyone's view. They hear of that
-    // before the moderator who stays goes out of their view.
     let (mut stays, ws) = TestClient::connect(addr, "mod2", None).await;
     let stays_id = welcomed_id(&ws);
     owner.change_roles(assign("mod2", RoleId::MODERATOR, true)).await;
@@ -1178,8 +1166,6 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Games denies Everyone Speak and Send, and allows the Moderator role Speak;
-/// Squad in it allows Everyone Send again; Duo in Squad sets nothing.
 const LAYERED: &str = r#"
 [[channels]]
 name = "Lobby"
@@ -1207,7 +1193,6 @@ name = "Games"
     name = "Duo"
 "#;
 
-/// Whether `permissions` let them speak and send messages in `channel`.
 fn talks(permissions: &perms::Permissions, channel: ChannelId) -> (bool, bool) {
     (permissions.may_in(channel, Perm::Speak), permissions.may_in(channel, Perm::SendMessages))
 }
@@ -1222,12 +1207,9 @@ async fn the_closest_setting_wins_inherit_takes_the_parents_and_allow_beats_deny
     let S2C::Welcome { permissions, .. } = &wu else { unreachable!() };
     assert_eq!(talks(permissions, lobby), (true, true));
     assert_eq!(talks(permissions, games), (false, false));
-    // Squad says nothing about Speak, so Games' deny holds; its own allow
-    // of Send is closer than Games' deny.
     assert_eq!(talks(permissions, squad), (false, true));
     assert_eq!(talks(permissions, duo), (false, true), "Duo inherits Squad");
 
-    // Holding Everyone and Moderator, Games' allow for Moderator beats its deny for Everyone.
     let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
     owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
     let S2C::Permissions(p) = moder.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
@@ -1266,14 +1248,12 @@ async fn a_category_is_never_joined_or_nested() {
     admin.send(temporary).await;
     assert!(error(&mut admin).await.contains("can't be temporary"));
 
-    // Channels go inside it, and people into those.
     admin.send(new_channel("Squad", Some(games), ChannelKind::Voice)).await;
     let list = admin.channels().await;
     let squad = id_of(&list, "Squad");
     assert_eq!(list.iter().find(|c| c.id == squad).unwrap().parent, Some(games));
     let moved = admin.until(|m| matches!(m, S2C::ClientMoved { .. })).await;
     assert_eq!(moved, S2C::ClientMoved { id: admin_id, channel: squad });
-    // Someone who may only make temporary channels makes no categories.
     let (mut user, _) = TestClient::connect(addr, "user", None).await;
     user.send(new_channel("Mine", None, ChannelKind::Category)).await;
     assert!(error(&mut user).await.contains("can't create permanent channels"));
@@ -1283,13 +1263,11 @@ fn set(channel: ChannelId, role: RoleId, allow: &[Perm], deny: &[Perm]) -> C2S {
     C2S::SetOverride { channel, role, allow: Perms::of(allow), deny: Perms::of(deny) }
 }
 
-/// What `channel` sets per role, in `list`.
 fn overrides_in(list: &[ChannelInfo], channel: ChannelId) -> Vec<perms::Override> {
     list.iter().find(|c| c.id == channel).unwrap_or_else(|| panic!("no channel {channel}")).overrides.clone()
 }
 
 impl TestClient {
-    /// Waits for a channel list in which `channel` sets something.
     async fn overrides(&mut self, channel: ChannelId) -> Vec<perms::Override> {
         let list = self
             .until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.id == channel && !c.overrides.is_empty())))
@@ -1312,13 +1290,11 @@ async fn overrides_take_effect_at_once_and_survive_a_restart() {
         c.until(|m| *m == S2C::ClientMoved { id: user_id, channel: hangout }).await;
     }
 
-    // Hidden from Everyone, the channel is gone for the user, who lands in the default channel.
     owner.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::View])).await;
     let hidden = perms::Override::new(RoleId::EVERYONE, Perms::NONE, Perms::of(&[Perm::View]));
     assert_eq!(owner.overrides(hangout).await, [hidden]);
     assert!(user.channels().await.iter().all(|c| c.id != hangout));
     assert_eq!(user.recv().await, S2C::ClientMoved { id: user_id, channel: lobby });
-    // Nobody may hide the default channel.
     owner.send(set(lobby, RoleId::EVERYONE, &[], &[Perm::View])).await;
     assert!(error(&mut owner).await.contains("see the default channel"));
     task.abort();
@@ -1344,10 +1320,8 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     owner.change_roles(assign("boss", RoleId::ADMIN, true)).await;
     owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
 
-    // Moderators may not manage permissions.
     moder.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
     assert!(error(&mut moder).await.contains("can't change this channel's permissions"));
-    // Admins may, for roles below theirs.
     boss.send(set(hangout, RoleId::ADMIN, &[], &[Perm::Speak])).await;
     assert!(error(&mut boss).await.contains("roles below your own"));
     boss.send(set(hangout, RoleId(99), &[], &[Perm::Speak])).await;
@@ -1356,8 +1330,6 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     let granted = perms::Override::new(RoleId::MODERATOR, Perms::of(&[Perm::ManagePermissions]), Perms::NONE);
     assert_eq!(owner.overrides(hangout).await, [granted]);
 
-    // Now moderators may there, and so get the roles to pick from, but only
-    // for the roles below theirs, and only there.
     let S2C::Permissions(p) = moder.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
     assert!(p.may_in(hangout, Perm::ManagePermissions) && !p.may_in(lobby, Perm::ManagePermissions));
     moder.until(|m| matches!(m, S2C::Roles(_))).await;

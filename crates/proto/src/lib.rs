@@ -95,11 +95,9 @@ pub struct ChannelInfo {
     pub overrides: Vec<perms::Override>,
 }
 
-/// What a channel is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChannelKind {
-    /// People join it to talk.
     #[default]
     Voice,
     /// Groups the channels under it, at the top level. Nobody joins it.

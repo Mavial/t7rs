@@ -20,7 +20,6 @@ pub struct Settings {
     pub user_volumes: std::collections::BTreeMap<String, f32>,
     /// Certificate fingerprint per `net::canonical_address`, pinned on first connect.
     pub server_certs: std::collections::BTreeMap<String, Fingerprint>,
-    /// Per `net::canonical_address`, the categories folded in the channel tree, by name.
     pub folded: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Who this user is on every server: roles, bans and moderator rights follow it.
     /// Made on the first connect.

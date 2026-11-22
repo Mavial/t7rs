@@ -34,12 +34,9 @@ pub enum ChannelError {
     DefaultChannel,
     PermanentUnderTemporary,
     IntoItself,
-    /// Categories only go at the top level.
     CategoryPlacement,
-    /// Categories are permanent, without a password or a limit.
     CategorySettings,
     DefaultCategory,
-    /// Everyone must be able to see the default channel, where people land.
     HidesDefault,
 }
 
@@ -79,8 +76,6 @@ pub struct Channels {
 }
 
 impl Channels {
-    /// Builds the tree from config entries. Without a channel to join, a
-    /// "Lobby" is added; without a default, the first channel to join is it.
     pub fn from_config(list: &[ChannelConfig]) -> Result<Self, String> {
         let mut channels = Self { map: BTreeMap::new(), default: 0, next_id: 1 };
         let mut default = None;
@@ -372,8 +367,6 @@ impl Channels {
         Ok(true)
     }
 
-    /// Replaces what `id` sets for the override's role, keeping only what
-    /// channels can set. Returns whether anything changed.
     pub fn set_override(&mut self, id: ChannelId, set: Override) -> Result<bool, ChannelError> {
         let set = Override::new(set.role, set.allow() & Perms::CHANNEL, set.deny() & Perms::CHANNEL);
         if set.deny().has(Perm::View) && self.path(self.default).contains(&id) {
@@ -396,8 +389,6 @@ impl Channels {
         Ok(true)
     }
 
-    /// Drops what every channel sets for a role that is gone. Returns
-    /// whether a permanent channel set anything for it.
     pub fn forget_role(&mut self, role: RoleId) -> bool {
         let mut saved = false;
         for c in self.map.values_mut() {
@@ -408,7 +399,6 @@ impl Channels {
         saved
     }
 
-    /// `id` and the channels above it, closest first.
     fn path(&self, id: ChannelId) -> Vec<ChannelId> {
         let mut out = Vec::new();
         let mut at = self.map.get(&id);
@@ -419,7 +409,6 @@ impl Channels {
         out
     }
 
-    /// Whether `id` or a channel above it denies some role View.
     fn hides(&self, id: ChannelId) -> bool {
         self.path(id).iter().any(|c| self.map[c].info.overrides.iter().any(|o| o.deny().has(Perm::View)))
     }
@@ -507,7 +496,6 @@ impl Channels {
     }
 }
 
-/// Whether settings give a channel what only channels people join have.
 fn has_room_settings(s: &ChannelSettings) -> bool {
     s.max_clients.is_some() || matches!(&s.password, PasswordChange::Set(p) if !p.is_empty())
 }
@@ -704,7 +692,6 @@ mod tests {
         assert_eq!(back.to_config(), ch.to_config());
         assert_eq!(back.get(1).unwrap().kind, ChannelKind::Category);
 
-        // Hand-edited files are checked, and a server of only categories gets a Lobby to land in.
         let inside = Channels::from_config(&[cfg("Lobby", vec![category("Inner")])]);
         assert!(inside.err().unwrap().contains("Inner: categories can only be at the top level"));
         let only = Channels::from_config(&[category("Games")]).unwrap();
@@ -720,7 +707,6 @@ mod tests {
         assert_eq!(ch.set_override(2, deny_view(RoleId::EVERYONE)), Ok(true));
         assert_eq!(ch.set_override(2, moderators), Ok(false), "unchanged");
         assert_eq!(ch.get(2).unwrap().overrides, [deny_view(RoleId::EVERYONE), moderators]);
-        // Server-wide permissions mean nothing in a channel.
         let ban = Override::new(RoleId::ADMIN, Perms::of(&[Perm::Ban, Perm::ManageRoles]), Perms::NONE);
         assert_eq!(ch.set_override(3, ban), Ok(false));
         assert_eq!(ch.set_override(99, moderators), Err(ChannelError::NotFound));
@@ -738,7 +724,6 @@ deny = [\"view\"]"
         let back = Channels::from_config(&toml::from_str::<ChannelsFile>(&text).unwrap().channels).unwrap();
         assert_eq!(back.get(2).unwrap().overrides, ch.get(2).unwrap().overrides);
 
-        // Setting nothing removes it, and so does deleting its role.
         assert_eq!(ch.set_override(2, Override::new(RoleId::MODERATOR, Perms::NONE, Perms::NONE)), Ok(true));
         assert_eq!(ch.get(2).unwrap().overrides, [deny_view(RoleId::EVERYONE)]);
         let dj = RoleId(7);
@@ -750,10 +735,8 @@ deny = [\"view\"]"
 
     #[test]
     fn everyone_keeps_seeing_the_default_channel() {
-        // Lobby (default), Gaming > Squad, AFK
         let mut ch = three();
         assert_eq!(ch.set_override(1, deny_view(RoleId::MODERATOR)), Err(ChannelError::HidesDefault));
-        // Anything else may be set there, and other channels may be hidden.
         ch.set_override(1, Override::new(RoleId::EVERYONE, Perms::NONE, Perms::of(&[Perm::Speak]))).unwrap();
         ch.set_override(2, deny_view(RoleId::EVERYONE)).unwrap();
         assert_eq!(ch.move_to(1, Some(2), 0), Err(ChannelError::HidesDefault));
@@ -761,7 +744,6 @@ deny = [\"view\"]"
         ch.set_default(4).unwrap();
         assert_eq!(ch.set_override(4, deny_view(RoleId::EVERYONE)), Err(ChannelError::HidesDefault));
 
-        // A file that breaks the rule doesn't load.
         let mut list = ch.to_config();
         list[2].overrides.push(deny_view(RoleId::EVERYONE));
         assert!(Channels::from_config(&list).err().unwrap().contains("AFK: everyone must be able to see the default"));

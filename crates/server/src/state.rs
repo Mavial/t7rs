@@ -68,9 +68,7 @@ struct Client {
     /// Learned from the first authenticated datagram (works behind NAT).
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
-    /// What it was last told it may do, and so which channels it sees.
     permissions: Permissions,
-    /// Where it was last told each person it sees is, itself included.
     known: HashMap<ClientId, ChannelId>,
 }
 
@@ -324,9 +322,6 @@ impl Server {
         (1..).map(|i| format!("{base}{i}")).find(|n| !taken(n)).expect("infinite iterator")
     }
 
-    /// Where someone who may do `permissions`, joining the server or kicked
-    /// out of `leaving`, lands: the default channel, or the first open channel
-    /// they may view with room if it's full. Everyone may view the default.
     fn landing_channel(&self, permissions: &Permissions, leaving: Option<ChannelId>) -> ChannelId {
         let default = self.channels.default_id();
         std::iter::once(default)
@@ -352,7 +347,6 @@ impl Server {
 
     fn message(&mut self, id: ClientId, msg: C2S) {
         let Some(client) = self.clients.get(&id) else { return };
-        // To a client, a channel it doesn't see doesn't exist.
         let named = match &msg {
             C2S::JoinChannel { channel, .. }
             | C2S::EditChannel { id: channel, .. }
@@ -436,8 +430,6 @@ impl Server {
         }
     }
 
-    /// Changes what `channel` sets for a role below `id`'s own, if it may
-    /// manage the channel's permissions.
     fn set_override(&mut self, id: ClientId, channel: ChannelId, set: Override) {
         let mine = self.standing(id, Some(channel));
         if !mine.perms.has(Perm::ManagePermissions) {
@@ -534,8 +526,6 @@ impl Server {
         self.sync_about(id);
     }
 
-    /// Tells everyone what changed about where `subject` is, as far as they
-    /// see it: that it moved, came into view, or went out of it.
     fn sync_about(&mut self, subject: ClientId) {
         let info = self.clients[&subject].info.clone();
         let mut told = [Vec::new(), Vec::new(), Vec::new()];
@@ -573,11 +563,6 @@ impl Server {
         self.roles.roles().permissions(who, &self.channels)
     }
 
-    /// Brings every client up to date after channels or roles changed: what
-    /// it may do, the channels it sees, who it sees in them, and the role
-    /// shown next to each. Editors get the roles: all of them when
-    /// `roles_changed`, else only those who just became editors. Anyone who
-    /// may no longer view their channel moves to the default channel.
     fn refresh(&mut self, channels_changed: bool, roles_changed: bool) {
         let ids: Vec<ClientId> = self.clients.keys().copied().collect();
         let (mut regranted, mut lists, mut editors, mut retitled) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -613,8 +598,6 @@ impl Server {
             self.send(id, &S2C::Permissions(self.clients[&id].permissions.clone()));
         }
         self.send_channel_lists(&lists);
-        // The moved first: they then hear nothing of those they left behind,
-        // who are going out of their view.
         for &id in evicted.iter().chain(ids.iter().filter(|id| !evicted.contains(id))) {
             self.sync_about(id);
         }
@@ -630,8 +613,6 @@ impl Server {
         }
     }
 
-    /// The channels someone who may do `permissions` sees, with what they set
-    /// for each role if it may edit that.
     fn channel_list(&self, permissions: &Permissions) -> Vec<ChannelInfo> {
         let editor = permissions.edits_permissions();
         let list = permissions.channels.keys().filter_map(|c| self.channels.get(*c));
@@ -639,7 +620,6 @@ impl Server {
             .collect()
     }
 
-    /// Sends each of `to` the channels it sees, encoding each different list once.
     fn send_channel_lists(&mut self, to: &[ClientId]) {
         let mut frames: HashMap<(Vec<ChannelId>, bool), Frame> = HashMap::new();
         for id in to {
@@ -673,7 +653,6 @@ impl Server {
         match self.channels.create(parent, settings, temporary, kind, id) {
             Ok(channel) => {
                 self.channels_changed(!temporary);
-                // Unless it's a category, or the channel above hides it from them.
                 if kind == ChannelKind::Voice && self.clients[&id].permissions.may_in(channel, Perm::View) {
                     self.move_to(id, channel);
                 }
@@ -880,8 +859,6 @@ impl Server {
         }
     }
 
-    /// Sends everyone the channels they see now and what they may do there;
-    /// saves them when permanent channels changed.
     fn channels_changed(&mut self, save: bool) {
         self.refresh(true, false);
         if save {
@@ -954,13 +931,10 @@ impl Server {
         }
     }
 
-    /// Whether `id` sees `other`.
     fn knows(&self, id: ClientId, other: ClientId) -> bool {
         self.clients.get(&id).is_some_and(|c| c.known.contains_key(&other))
     }
 
-    /// Why `id` can't message or poke `target`, if it can't: only people who
-    /// see each other reach each other.
     fn unreachable(&self, id: ClientId, target: ClientId) -> Option<String> {
         if target == id || !self.knows(id, target) {
             Some("that user is no longer online".into())
@@ -997,7 +971,6 @@ impl Server {
         self.broadcast(msg, |c| c.info.id == id);
     }
 
-    /// Encodes once and enqueues to every matching client.
     fn broadcast(&mut self, msg: &S2C, filter: impl Fn(&Client) -> bool) {
         let frame = encode(msg);
         for client in self.clients.values().filter(|c| filter(c)) {
@@ -1006,8 +979,6 @@ impl Server {
     }
 }
 
-/// Enqueues a frame to a client. One whose queue is full is too slow to keep
-/// up, and joins the `dead` to be disconnected.
 fn deliver(dead: &mut Vec<ClientId>, client: &Client, frame: Frame) {
     if client.outbox.try_send(frame).is_err() && !dead.contains(&client.info.id) {
         dead.push(client.info.id);
