@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use t7_proto::ClientStatus;
+use t7_proto::identity::IdentityKey;
 use t7_proto::tls::Fingerprint;
 
 use crate::audio::AudioSettings;
@@ -21,6 +22,16 @@ pub struct Settings {
     pub admin_tokens: std::collections::BTreeMap<String, String>,
     /// Certificate fingerprint per `net::canonical_address`, pinned on first connect.
     pub server_certs: std::collections::BTreeMap<String, Fingerprint>,
+    /// Who this user is on every server: bans and moderator rights follow it.
+    /// Made on the first connect.
+    pub identity_key: Option<IdentityKey>,
+}
+
+/// A new identity, from the system's randomness.
+pub fn new_identity_key() -> IdentityKey {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).expect("no system randomness");
+    IdentityKey::from_seed(seed)
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -109,6 +120,7 @@ mod tests {
             user_volumes: [("Some One".to_owned(), 0.5)].into(),
             admin_tokens: [("1.2.3.4".to_owned(), "abc".to_owned())].into(),
             server_certs: [("1.2.3.4:9988".to_owned(), Fingerprint([0xab; 32]))].into(),
+            identity_key: Some(new_identity_key()),
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);

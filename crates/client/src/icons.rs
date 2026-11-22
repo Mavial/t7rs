@@ -17,6 +17,7 @@ pub enum Icon {
     Sliders,
     Lock,
     Shield,
+    Star,
     Dots,
 }
 
@@ -113,6 +114,16 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             &[(12.0, 2.5), (20.0, 5.5), (20.0, 11.0), (17.5, 17.0), (12.0, 21.5), (6.5, 17.0), (4.0, 11.0), (4.0, 5.5)],
             true,
         ),
+        Icon::Star => {
+            let points: Vec<(f32, f32)> = (0..10)
+                .map(|i| {
+                    let r = if i % 2 == 0 { 10.0 } else { 4.2 };
+                    let a = (-90.0 + i as f32 * 36.0) * PI / 180.0;
+                    (12.0 + r * a.cos(), 12.8 + r * a.sin())
+                })
+                .collect();
+            pen.poly(&points, true);
+        }
         Icon::Dots => {
             for x in [5.0, 12.0, 19.0] {
                 pen.poly(&Pen::arc_points(x, 12.0, 1.5, 0.0, 360.0), true);

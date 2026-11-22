@@ -3228,6 +3228,7 @@ dependencies = [
  "egui",
  "egui-winit",
  "embed-resource",
+ "getrandom 0.3.4",
  "hdrshot-egui-backend",
  "hound",
  "nnnoiseless",
@@ -3252,6 +3253,7 @@ name = "t7-proto"
 version = "0.2.0"
 dependencies = [
  "chacha20poly1305",
+ "ed25519-dalek",
  "postcard",
  "rcgen",
  "rustls",
@@ -3259,6 +3261,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-rustls",
+ "toml",
 ]
 
 [[package]]

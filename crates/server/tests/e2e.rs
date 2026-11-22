@@ -1,11 +1,14 @@
 //! Spins up a real server on localhost and drives it with raw protocol clients.
 
+use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 
+use t7_proto::identity::IdentityKey;
 use t7_proto::*;
 use t7_server::config::{Config, DEFAULT_CONFIG};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 
 type Tls = tls::ClientStream<TcpStream>;
 
@@ -13,24 +16,50 @@ struct TestClient {
     r: BufReader<ReadHalf<Tls>>,
     w: WriteHalf<Tls>,
     buf: Vec<u8>,
+    /// What this connection's identity proof signs.
+    exporter: [u8; 32],
 }
 
+/// One key per nickname, so reconnecting under a name is the same person.
+fn key(nick: &str) -> IdentityKey {
+    let mut seed = [0u8; 32];
+    seed.iter_mut().zip(nick.bytes()).for_each(|(s, b)| *s = b);
+    IdentityKey::from_seed(seed)
+}
+
+/// Loopback addresses for clients that must not share an IP.
+const HOME: Ipv4Addr = Ipv4Addr::LOCALHOST;
+const ADMIN_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
+const ELSEWHERE: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 3);
+
 impl TestClient {
-    async fn connect(addr: std::net::SocketAddr, nick: &str, pw: Option<&str>) -> (Self, S2C) {
+    async fn connect(addr: SocketAddr, nick: &str, pw: Option<&str>) -> (Self, S2C) {
         Self::connect_as(addr, nick, pw, PROTOCOL_VERSION).await
     }
-    async fn connect_as(addr: std::net::SocketAddr, nick: &str, pw: Option<&str>, protocol: u16) -> (Self, S2C) {
-        let (tls, _) = tls::connect(TcpStream::connect(addr).await.unwrap(), None).await.unwrap();
+    async fn connect_as(addr: SocketAddr, nick: &str, pw: Option<&str>, protocol: u16) -> (Self, S2C) {
+        let c = Self::open(addr, HOME).await;
+        let proof = key(nick).prove(&c.exporter);
+        c.hello(nick, pw, protocol, proof).await
+    }
+    /// From another loopback address, with any key.
+    async fn connect_from(addr: SocketAddr, from: Ipv4Addr, nick: &str, key: &IdentityKey) -> (Self, S2C) {
+        let c = Self::open(addr, from).await;
+        let proof = key.prove(&c.exporter);
+        c.hello(nick, None, PROTOCOL_VERSION, proof).await
+    }
+    /// A TLS connection that hasn't said Hello yet.
+    async fn open(addr: SocketAddr, from: Ipv4Addr) -> Self {
+        let sock = TcpSocket::new_v4().unwrap();
+        sock.bind((from, 0).into()).unwrap();
+        let (tls, _) = tls::connect(sock.connect(addr).await.unwrap(), None).await.unwrap();
+        let exporter = tls::exporter(tls.get_ref().1);
         let (r, w) = tokio::io::split(tls);
-        let mut c = Self { r: BufReader::new(r), w, buf: Vec::new() };
-        c.send(C2S::Hello {
-            protocol,
-            nickname: nick.into(),
-            password: pw.map(Into::into),
-        })
-        .await;
-        let first = c.recv().await;
-        (c, first)
+        Self { r: BufReader::new(r), w, buf: Vec::new(), exporter }
+    }
+    async fn hello(mut self, nick: &str, pw: Option<&str>, protocol: u16, identity: IdentityProof) -> (Self, S2C) {
+        self.send(C2S::Hello { protocol, nickname: nick.into(), password: pw.map(Into::into), identity }).await;
+        let first = self.recv().await;
+        (self, first)
     }
     async fn send(&mut self, m: C2S) {
         write_frame(&mut self.w, &m).await.unwrap();
@@ -41,9 +70,21 @@ impl TestClient {
             .expect("timed out waiting for message")
             .unwrap()
     }
+    /// Reads until the server hangs up.
+    async fn closed(&mut self) {
+        let read = async {
+            while read_frame::<_, S2C>(&mut self.r, &mut self.buf).await.is_ok() {}
+        };
+        tokio::time::timeout(Duration::from_secs(2), read).await.expect("the server kept the connection open");
+    }
 }
 
-async fn start(cfg_text: &str) -> std::net::SocketAddr {
+async fn start(cfg_text: &str) -> SocketAddr {
+    start_in(cfg_text, None).await.0
+}
+
+/// A server keeping its files in `dir`; abort the task to stop it.
+async fn start_in(cfg_text: &str, dir: Option<PathBuf>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let cfg: Config = toml::from_str(cfg_text).unwrap();
     // The server also binds UDP on the TCP port's number, so pick a port free for both.
     let listener = loop {
@@ -53,12 +94,12 @@ async fn start(cfg_text: &str) -> std::net::SocketAddr {
         }
     };
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        if let Err(e) = t7_server::serve(listener, &cfg, None).await {
+    let task = tokio::spawn(async move {
+        if let Err(e) = t7_server::serve(listener, &cfg, dir.as_deref()).await {
             panic!("test server failed: {e}");
         }
     });
-    addr
+    (addr, task)
 }
 
 #[tokio::test]
@@ -263,7 +304,12 @@ async fn clients_without_tls_are_told_to_update() {
     // A protocol 4 client: a plain frame, no TLS. Its Hello frame length (22)
     // starts with the same byte as a TLS record.
     let mut old = TcpStream::connect(addr).await.unwrap();
-    let hello = C2S::Hello { protocol: 4, nickname: "eighteen_char_nick".into(), password: None };
+    // Protocol 4's Hello, which had no identity.
+    #[derive(serde::Serialize)]
+    enum OldC2S {
+        Hello { protocol: u16, nickname: String, password: Option<String> },
+    }
+    let hello = OldC2S::Hello { protocol: 4, nickname: "eighteen_char_nick".into(), password: None };
     let frame = encode_frame(&hello);
     assert_eq!(frame[0], tls::HANDSHAKE_RECORD);
     old.write_all(&frame).await.unwrap();
@@ -376,26 +422,20 @@ async fn channels_are_managed_with_permissions() {
     assert!(list.iter().all(|c| c.id != raid), "empty temporary channel should be gone");
 }
 
+/// An empty directory of its own for a test's server files.
+fn data_dir(test: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("t7-e2e-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 #[tokio::test]
 async fn channel_edits_and_the_certificate_survive_a_restart() {
-    let dir = std::env::temp_dir().join(format!("t7-e2e-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = data_dir("restart");
     let cfg: Config = toml::from_str(&with_admin_token("t")).unwrap();
-
-    let run =|dir: std::path::PathBuf, cfg_text: String| async move {
-        let cfg: Config = toml::from_str(&cfg_text).unwrap();
-        let listener = loop {
-            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            if std::net::UdpSocket::bind(l.local_addr().unwrap()).is_ok() {
-                break l;
-            }
-        };
-        let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move { t7_server::serve(listener, &cfg, Some(&dir)).await });
-        (addr, task)
-    };
     let cfg_text = with_admin_token("t");
-    let (addr, task) = run(dir.clone(), cfg_text.clone()).await;
+    let (addr, task) = start_in(&cfg_text, Some(dir.clone())).await;
     let first = fingerprint(addr).await;
     let cert = std::fs::read(dir.join("tls_cert.der")).expect("certificate saved");
     assert_eq!(tls::Fingerprint::of(&cert), first);
@@ -406,7 +446,7 @@ async fn channel_edits_and_the_certificate_survive_a_restart() {
     task.abort();
     drop(admin);
 
-    let (addr, task) = run(dir.clone(), cfg_text).await;
+    let (addr, task) = start_in(&cfg_text, Some(dir.clone())).await;
     assert_eq!(fingerprint(addr).await, first, "a restart must keep the certificate");
     let (_, welcome) = TestClient::connect(addr, "later", None).await;
     let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed") };
@@ -425,4 +465,304 @@ impl Channels {
         }
         walk(&cfg.channels)
     }
+}
+
+/// Connects and logs in as admin.
+async fn admin_login(addr: SocketAddr, from: Ipv4Addr) -> (TestClient, ClientId, Vec<ChannelInfo>) {
+    let (mut admin, welcome) = TestClient::connect_from(addr, from, "admin", &key("admin")).await;
+    let S2C::Welcome { your_id, channels, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
+    admin.send(C2S::Authenticate { token: "t".into() }).await;
+    admin.until(|m| matches!(m, S2C::ClientAdmin { .. })).await;
+    (admin, your_id, channels)
+}
+
+fn welcomed_id(welcome: &S2C) -> ClientId {
+    match welcome {
+        S2C::Welcome { your_id, .. } => *your_id,
+        other => panic!("not welcomed: {other:?}"),
+    }
+}
+
+fn rejected(reply: &S2C) -> &str {
+    match reply {
+        S2C::Rejected { reason } => reason,
+        other => panic!("not rejected: {other:?}"),
+    }
+}
+
+async fn error(c: &mut TestClient) -> String {
+    match c.until(|m| matches!(m, S2C::Error { .. })).await {
+        S2C::Error { message } => message,
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn identities_are_proven_on_each_connection() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (_, welcome) = TestClient::connect(addr, "alice", None).await;
+    let S2C::Welcome { your_id, clients, .. } = &welcome else { panic!("not welcomed: {welcome:?}") };
+    assert_eq!(clients.iter().find(|c| c.id == *your_id).unwrap().identity, key("alice").identity());
+
+    // A signature over other bytes than this connection's exporter.
+    let c = TestClient::open(addr, HOME).await;
+    let forged = key("mallory").prove(&[0; 32]);
+    let (_, reply) = c.hello("mallory", None, PROTOCOL_VERSION, forged).await;
+    assert!(rejected(&reply).contains("identity proof"), "{reply:?}");
+
+    // A real proof, but from another connection.
+    let first = TestClient::open(addr, HOME).await;
+    let replayed = key("mallory").prove(&first.exporter);
+    let (_, reply) = TestClient::open(addr, HOME).await.hello("mallory", None, PROTOCOL_VERSION, replayed).await;
+    assert!(rejected(&reply).contains("identity proof"), "{reply:?}");
+
+    // One person may connect twice.
+    let (_, again) = TestClient::connect(addr, "alice", None).await;
+    let S2C::Welcome { your_id, clients, .. } = &again else { panic!("not welcomed: {again:?}") };
+    assert_eq!(clients.iter().find(|c| c.id == *your_id).unwrap().identity, key("alice").identity());
+}
+
+#[tokio::test]
+async fn moderators_kick_from_their_channels_only() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, admin_id, channels) = admin_login(addr, HOME).await;
+    let (gaming, squad, lobby) = (id_of(&channels, "Gaming"), id_of(&channels, "Squad 1"), id_of(&channels, "Lobby"));
+    let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let (mod_id, user_id) = (welcomed_id(&wm), welcomed_id(&wu));
+    admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: true }).await;
+    moder.channels().await;
+
+    // The user goes to a sub-channel of Gaming.
+    user.send(C2S::JoinChannel { channel: squad, password: None }).await;
+    moder.until(|m| *m == S2C::ClientMoved { id: user_id, channel: squad }).await;
+
+    // Nobody else may kick, and a moderator may not kick off the server.
+    user.send(C2S::Kick { target: mod_id, from_server: false, reason: String::new() }).await;
+    assert!(error(&mut user).await.contains("can't kick"));
+    moder.send(C2S::Kick { target: user_id, from_server: true, reason: "bye".into() }).await;
+    assert!(error(&mut moder).await.contains("only admins"));
+    moder.send(C2S::Kick { target: admin_id, from_server: false, reason: String::new() }).await;
+    assert!(error(&mut moder).await.contains("can't kick"), "an admin");
+
+    // A channel kick: everyone hears who and why, and the user lands in the default channel.
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: "  off topic ".into() }).await;
+    let kicked = S2C::ClientKicked { id: user_id, by: mod_id, from_server: false, reason: "off topic".into() };
+    assert_eq!(admin.until(|m| matches!(m, S2C::ClientKicked { .. })).await, kicked);
+    assert_eq!(user.until(|m| matches!(m, S2C::ClientKicked { .. })).await, kicked);
+    assert_eq!(user.recv().await, S2C::ClientMoved { id: user_id, channel: lobby });
+
+    // In the default channel there is nowhere to kick them to.
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    assert!(error(&mut moder).await.contains("can't kick"));
+
+    // An admin's server kick: the notice arrives before the connection closes.
+    admin.send(C2S::Kick { target: user_id, from_server: true, reason: "x".repeat(MAX_REASON_LEN + 1) }).await;
+    assert!(error(&mut admin).await.contains("at most"));
+    admin.send(C2S::Kick { target: user_id, from_server: true, reason: "enough".into() }).await;
+    let kicked = S2C::ClientKicked { id: user_id, by: admin_id, from_server: true, reason: "enough".into() };
+    assert_eq!(user.until(|m| matches!(m, S2C::ClientKicked { .. })).await, kicked);
+    user.closed().await;
+    let left = moder.until(|m| matches!(m, S2C::ClientLeft { .. })).await;
+    assert_eq!(left, S2C::ClientLeft { id: user_id, reason: LeaveReason::Kicked });
+}
+
+#[tokio::test]
+async fn kicked_people_land_where_a_joining_client_would() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    let [lobby, hangout, gaming, squad] = ["Lobby", "Hangout", "Gaming", "Squad 1"].map(|name| id_of(&channels, name));
+    let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    for channel in [gaming, hangout] {
+        admin.send(C2S::SetModerator { channel, identity: key("mod").identity(), moderator: true }).await;
+        moder.channels().await;
+    }
+    user.send(C2S::JoinChannel { channel: squad, password: None }).await;
+    moder.until(|m| *m == S2C::ClientMoved { id: user_id, channel: squad }).await;
+
+    // The default channel needs a password: the kick lands them in the first open channel.
+    let locked = ChannelSettings { password: PasswordChange::Set("pw".into()), ..settings("Lobby") };
+    admin.send(C2S::EditChannel { id: lobby, settings: locked }).await;
+    moder.channels().await;
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    moder.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    assert_eq!(moder.recv().await, S2C::ClientMoved { id: user_id, channel: hangout });
+
+    // The default channel is full (admin and mod are in it), and the kick is
+    // out of Hangout, so the next open channel it is.
+    let full = ChannelSettings { max_clients: Some(2), password: PasswordChange::Remove, ..settings("Lobby") };
+    admin.send(C2S::EditChannel { id: lobby, settings: full }).await;
+    moder.channels().await;
+    moder.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
+    moder.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    assert_eq!(moder.recv().await, S2C::ClientMoved { id: user_id, channel: gaming });
+}
+
+#[tokio::test]
+async fn bans_keep_identities_and_addresses_out() {
+    let addr = start(&with_admin_token("t")).await;
+    // The admin comes from another address than the people it bans.
+    let (mut admin, admin_id, _) = admin_login(addr, ADMIN_IP).await;
+    let (mut mallory, wm) = TestClient::connect(addr, "mallory", None).await;
+    let mallory_id = welcomed_id(&wm);
+
+    // An identity ban kicks them off with the reason...
+    admin.send(C2S::Ban { target: mallory_id, duration_secs: None, reason: "spam".into(), include_ip: false }).await;
+    let kicked = S2C::ClientKicked { id: mallory_id, by: admin_id, from_server: true, reason: "banned for good (spam)".into() };
+    assert_eq!(mallory.until(|m| matches!(m, S2C::ClientKicked { .. })).await, kicked);
+    mallory.closed().await;
+    // ...and keeps that key out from any address.
+    for from in [HOME, ELSEWHERE] {
+        let (_, reply) = TestClient::connect_from(addr, from, "mallory", &key("mallory")).await;
+        assert_eq!(rejected(&reply), "You are banned from this server (spam).");
+    }
+    // Their address wasn't banned, so another key gets in from it.
+    let (_, reply) = TestClient::connect_from(addr, HOME, "newcomer", &key("newcomer")).await;
+    welcomed_id(&reply);
+
+    // An IP ban also keeps out new keys from that address.
+    let eve_ip = Ipv4Addr::new(127, 0, 0, 4);
+    let (mut eve, we) = TestClient::connect_from(addr, eve_ip, "eve", &key("eve")).await;
+    admin.send(C2S::Ban { target: welcomed_id(&we), duration_secs: Some(3600), reason: String::new(), include_ip: true }).await;
+    eve.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    let (_, reply) = TestClient::connect_from(addr, eve_ip, "eve2", &key("eve2")).await;
+    let ends = ["59 minutes", "1 hour"].map(|left| format!("You are banned from this server. The ban ends in {left}."));
+    assert!(ends.iter().any(|e| e == rejected(&reply)), "{reply:?}");
+
+    // Banning the address the admin is on would lock the admin out too.
+    let (_, wb) = TestClient::connect_from(addr, ADMIN_IP, "flatmate", &key("flatmate")).await;
+    admin.send(C2S::Ban { target: welcomed_id(&wb), duration_secs: None, reason: String::new(), include_ip: true }).await;
+    assert!(error(&mut admin).await.contains("your IP address"));
+
+    // The list has both bans; lifting eve's lets her address back in.
+    admin.send(C2S::ListBans).await;
+    let S2C::Bans(list) = admin.until(|m| matches!(m, S2C::Bans(_))).await else { unreachable!() };
+    assert_eq!(list.len(), 2, "{list:?}");
+    let eve_ban = list.iter().find(|b| b.identity == key("eve").identity()).expect("eve's ban");
+    assert_eq!(eve_ban.ip, Some(eve_ip.into()));
+    assert_eq!((eve_ban.nickname.as_str(), eve_ban.banned_by.as_str()), ("eve", "admin"));
+    assert_eq!(eve_ban.expires_unix, Some(eve_ban.created_unix + 3600));
+    let mallory_ban = list.iter().find(|b| b.identity == key("mallory").identity()).expect("mallory's ban");
+    assert_eq!((mallory_ban.ip, mallory_ban.expires_unix, mallory_ban.reason.as_str()), (None, None, "spam"));
+
+    admin.send(C2S::Unban { id: eve_ban.id }).await;
+    let S2C::Bans(list) = admin.until(|m| matches!(m, S2C::Bans(_))).await else { unreachable!() };
+    assert_eq!(list.iter().map(|b| b.id).collect::<Vec<_>>(), [mallory_ban.id]);
+    let (_, reply) = TestClient::connect_from(addr, eve_ip, "eve", &key("eve")).await;
+    welcomed_id(&reply);
+
+    // Only admins see or lift bans.
+    let (mut user, _) = TestClient::connect(addr, "user", None).await;
+    user.send(C2S::ListBans).await;
+    assert!(error(&mut user).await.contains("only admins"));
+    user.send(C2S::Unban { id: mallory_ban.id }).await;
+    assert!(error(&mut user).await.contains("only admins"));
+}
+
+#[tokio::test]
+async fn ip_bans_eject_everyone_at_that_address() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, admin_id, _) = admin_login(addr, ADMIN_IP).await;
+    let (mut eve, we) = TestClient::connect_from(addr, ELSEWHERE, "eve", &key("eve")).await;
+    let (mut sock, ws) = TestClient::connect_from(addr, ELSEWHERE, "sock", &key("sock")).await;
+    let (mut bystander, _) = TestClient::connect_from(addr, HOME, "bystander", &key("bystander")).await;
+    let (eve_id, sock_id) = (welcomed_id(&we), welcomed_id(&ws));
+
+    admin.send(C2S::Ban { target: eve_id, duration_secs: None, reason: "spam".into(), include_ip: true }).await;
+    for (client, id) in [(&mut eve, eve_id), (&mut sock, sock_id)] {
+        let kicked = client.until(|m| matches!(m, S2C::ClientKicked { id: k, .. } if *k == id)).await;
+        let notice = S2C::ClientKicked { id, by: admin_id, from_server: true, reason: "banned for good (spam)".into() };
+        assert_eq!(kicked, notice);
+        client.closed().await;
+    }
+    // Someone at another address stays.
+    bystander.send(C2S::Ping { nonce: 7 }).await;
+    assert_eq!(bystander.until(|m| matches!(m, S2C::Pong { .. })).await, S2C::Pong { nonce: 7 });
+}
+
+#[tokio::test]
+async fn only_admins_rearrange_channels() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, _, channels) = admin_login(addr, HOME).await;
+    let afk = id_of(&channels, "AFK");
+    // Even a moderator of the channel may not.
+    let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
+    admin.send(C2S::SetModerator { channel: afk, identity: key("mod").identity(), moderator: true }).await;
+    let mut before = moder.channels().await;
+
+    moder.send(C2S::MoveChannel { id: afk, parent: None, position: 0 }).await;
+    assert!(error(&mut moder).await.contains("only admins"));
+    moder.send(C2S::SetDefaultChannel { id: afk }).await;
+    assert!(error(&mut moder).await.contains("only admins"));
+
+    let (_, welcome) = TestClient::connect(addr, "later", None).await;
+    let S2C::Welcome { channels: mut after, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
+    before.sort_by_key(|c| c.id);
+    after.sort_by_key(|c| c.id);
+    assert_eq!(after, before, "the channel tree changed");
+}
+
+#[tokio::test]
+async fn temporary_bans_end() {
+    let addr = start(&with_admin_token("t")).await;
+    let (mut admin, _, _) = admin_login(addr, ADMIN_IP).await;
+    let (mut mallory, wm) = TestClient::connect(addr, "mallory", None).await;
+    // Bans count whole seconds, so this one lasts between one and two.
+    admin.send(C2S::Ban { target: welcomed_id(&wm), duration_secs: Some(2), reason: "cool off".into(), include_ip: true }).await;
+    let kicked = mallory.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
+    assert!(matches!(kicked, S2C::ClientKicked { ref reason, .. } if reason == "banned for less than a minute (cool off)"), "{kicked:?}");
+
+    let (_, reply) = TestClient::connect(addr, "mallory", None).await;
+    assert!(rejected(&reply).contains("ends in less than a minute"), "{reply:?}");
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let (_, reply) = TestClient::connect(addr, "mallory", None).await;
+    welcomed_id(&reply);
+    admin.send(C2S::ListBans).await;
+    assert_eq!(admin.until(|m| matches!(m, S2C::Bans(_))).await, S2C::Bans(Vec::new()), "expired bans leave the list");
+}
+
+#[tokio::test]
+async fn moderators_and_bans_survive_a_restart() {
+    let dir = data_dir("moderation");
+    let cfg = with_admin_token("t");
+    let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
+    // Off the banned address, to log in again after the restart.
+    let (mut admin, _, channels) = admin_login(addr, ADMIN_IP).await;
+    let gaming = id_of(&channels, "Gaming");
+    // Only admins choose moderators.
+    let (mut user, _) = TestClient::connect(addr, "user", None).await;
+    user.send(C2S::SetModerator { channel: gaming, identity: key("user").identity(), moderator: true }).await;
+    assert!(error(&mut user).await.contains("only admins"));
+    admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: true }).await;
+    let list = admin.channels().await;
+    assert_eq!(list.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
+    let (_, wm) = TestClient::connect(addr, "mallory", None).await;
+    admin.send(C2S::Ban { target: welcomed_id(&wm), duration_secs: None, reason: "spam".into(), include_ip: true }).await;
+    // The server saves before it kicks.
+    admin.until(|m| matches!(m, S2C::ClientLeft { .. })).await;
+    task.abort();
+    drop(admin);
+
+    let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
+    let (_, reply) = TestClient::connect(addr, "mallory", None).await;
+    assert!(rejected(&reply).contains("spam"), "the ban was lost: {reply:?}");
+    let (mut admin, _, channels) = admin_login(addr, ADMIN_IP).await;
+    assert_eq!(channels.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
+    admin.send(C2S::ListBans).await;
+    let S2C::Bans(list) = admin.until(|m| matches!(m, S2C::Bans(_))).await else { unreachable!() };
+    assert_eq!(list.len(), 1);
+    assert_eq!((list[0].identity, list[0].ip), (key("mallory").identity(), Some(HOME.into())));
+
+    // Removing the moderator by identity works while they are offline, and sticks.
+    admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: false }).await;
+    assert!(admin.channels().await.iter().all(|c| c.moderators.is_empty()));
+    // The server saves after it broadcasts; a round trip waits for that.
+    admin.send(C2S::Ping { nonce: 1 }).await;
+    admin.until(|m| matches!(m, S2C::Pong { .. })).await;
+    let saved = std::fs::read_to_string(dir.join("channels.toml")).unwrap();
+    assert!(!saved.contains("moderators"), "{saved}");
+    task.abort();
+    std::fs::remove_dir_all(dir).unwrap();
 }

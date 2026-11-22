@@ -9,17 +9,19 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
+use t7_proto::perms::{self, Action};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
-    C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, LeaveReason, MAX_POKE_LEN,
-    MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo, TextTarget, encode_frame,
-    validate_nickname,
+    BanId, BanInfo, C2S, ChannelId, ChannelSettings, ClientId, ClientInfo, ClientStatus, Identity, LeaveReason,
+    MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, S2C, ServerInfo,
+    TextTarget, encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::bans::{self, Bans, NewBan, describe_duration};
 use crate::channels::Channels;
 
 /// A complete, ready-to-write frame shared between all recipients.
@@ -34,9 +36,8 @@ pub enum Event {
         protocol: u16,
         nickname: String,
         password: Option<String>,
-        /// The connection's TLS exporter value, for proving an identity on it.
-        #[expect(dead_code, reason = "client identities will sign it")]
-        exporter: [u8; 32],
+        /// Proven on this connection; `None` if the proof didn't verify.
+        identity: Option<Identity>,
         outbox: mpsc::Sender<Frame>,
         /// Receives the assigned id, or `None` if the handshake was rejected.
         reply: oneshot::Sender<Option<ClientId>>,
@@ -99,8 +100,9 @@ pub struct Server {
     info: ServerInfo,
     password: Option<String>,
     channels: Channels,
-    /// Where permanent channel changes are saved (`None`: not saved).
-    channels_file: Option<PathBuf>,
+    bans: Bans,
+    /// Holds `channels.toml` and `bans.toml` (`None`: changes are not saved).
+    data_dir: Option<PathBuf>,
     admin_token: String,
     clients: HashMap<ClientId, Client>,
     next_id: ClientId,
@@ -115,7 +117,8 @@ impl Server {
         info: ServerInfo,
         password: Option<String>,
         channels: Channels,
-        channels_file: Option<PathBuf>,
+        bans: Bans,
+        data_dir: Option<PathBuf>,
         admin_token: String,
         udp: Arc<UdpSocket>,
     ) -> Self {
@@ -123,7 +126,8 @@ impl Server {
             info,
             password,
             channels,
-            channels_file,
+            bans,
+            data_dir,
             admin_token,
             clients: HashMap::new(),
             next_id: 1,
@@ -142,8 +146,8 @@ impl Server {
 
     fn handle(&mut self, ev: Event) {
         match ev {
-            Event::Join { addr, protocol, nickname, password, exporter: _, outbox, reply } => {
-                let id = self.join(addr, protocol, nickname, password, outbox);
+            Event::Join { addr, protocol, nickname, password, identity, outbox, reply } => {
+                let id = self.join(addr, protocol, nickname, password, identity, outbox);
                 let _ = reply.send(id);
             }
             Event::Message { id, msg } => self.message(id, msg),
@@ -192,6 +196,7 @@ impl Server {
         protocol: u16,
         nickname: String,
         password: Option<String>,
+        identity: Option<Identity>,
         outbox: mpsc::Sender<Frame>,
     ) -> Option<ClientId> {
         let reject = |reason: &str| {
@@ -209,6 +214,11 @@ impl Server {
                 "protocol mismatch (server {PROTOCOL_VERSION}, client {protocol}); this server needs an update"
             ));
         }
+        let Some(identity) = identity else { return reject("your identity proof is invalid") };
+        let now = unix_now();
+        if let Some(ban) = self.bans.find(identity, addr.ip(), now) {
+            return reject(&banned_message(ban, now));
+        }
         if let Some(pw) = &self.password
             && password.as_deref() != Some(pw.as_str())
         {
@@ -224,8 +234,8 @@ impl Server {
 
         let id = self.next_id;
         self.next_id += 1;
-        let channel = self.default_channel_for_join();
-        let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), admin: false };
+        let channel = self.landing_channel(None);
+        let info = ClientInfo { id, nickname, channel, status: ClientStatus::default(), admin: false, identity };
 
         let mut clients: Vec<ClientInfo> = self.clients.values().map(|c| c.info.clone()).collect();
         clients.push(info.clone());
@@ -274,12 +284,13 @@ impl Server {
             .expect("infinite iterator")
     }
 
-    /// The default channel, or the first open channel with room if it's full.
-    fn default_channel_for_join(&self) -> ChannelId {
+    /// Where someone joining the server, or kicked out of `leaving`, lands:
+    /// the default channel, or the first open channel with room if it's full.
+    fn landing_channel(&self, leaving: Option<ChannelId>) -> ChannelId {
         let default = self.channels.default_id();
         std::iter::once(default)
             .chain(self.channels.ids_in_order())
-            .find(|&ch| self.has_room(ch) && self.channels.password_ok(ch, None))
+            .find(|&ch| Some(ch) != leaving && self.has_room(ch) && self.channels.password_ok(ch, None))
             .unwrap_or(default)
     }
 
@@ -315,7 +326,7 @@ impl Server {
             C2S::CreateChannel { parent, settings, temporary } => self.create_channel(id, parent, settings, temporary),
             C2S::EditChannel { id: channel, settings } => self.edit_channel(id, channel, &settings),
             C2S::MoveChannel { id: channel, parent, position } => {
-                if !self.is_admin(id) {
+                if !self.allowed(id, Action::RearrangeChannels) {
                     return self.error(id, "only admins can rearrange channels");
                 }
                 match self.channels.move_to(channel, parent, position) {
@@ -325,7 +336,7 @@ impl Server {
             }
             C2S::DeleteChannel { id: channel } => self.delete_channel(id, channel),
             C2S::SetDefaultChannel { id: channel } => {
-                if !self.is_admin(id) {
+                if !self.allowed(id, Action::RearrangeChannels) {
                     return self.error(id, "only admins can change the default channel");
                 }
                 match self.channels.set_default(channel) {
@@ -334,6 +345,23 @@ impl Server {
                 }
             }
             C2S::Authenticate { token } => self.authenticate(id, &token),
+            C2S::SetModerator { channel, identity, moderator } => {
+                if !self.allowed(id, Action::SetModerator) {
+                    return self.error(id, "only admins can choose moderators");
+                }
+                let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
+                match self.channels.set_moderator(channel, identity, moderator) {
+                    Ok(true) => self.channels_changed(permanent),
+                    Ok(false) => {}
+                    Err(e) => self.error(id, &e.message()),
+                }
+            }
+            C2S::Kick { target, from_server, reason } => self.kick(id, target, from_server, &reason),
+            C2S::Ban { target, duration_secs, reason, include_ip } => {
+                self.ban(id, target, duration_secs, &reason, include_ip)
+            }
+            C2S::ListBans => self.list_bans(id),
+            C2S::Unban { id: ban } => self.unban(id, ban),
         }
     }
 
@@ -344,7 +372,7 @@ impl Server {
         if self.clients[&id].info.channel == channel {
             return;
         }
-        if !self.is_admin(id) && !self.channels.password_ok(channel, password) {
+        if !self.allowed(id, Action::SkipChannelPassword) && !self.channels.password_ok(channel, password) {
             let msg = if password.is_some() { "wrong channel password" } else { "this channel needs a password" };
             return self.error(id, msg);
         }
@@ -360,17 +388,12 @@ impl Server {
         self.broadcast(&S2C::ClientMoved { id, channel }, |_| true);
     }
 
-    fn is_admin(&self, id: ClientId) -> bool {
-        self.clients.get(&id).is_some_and(|c| c.info.admin)
-    }
-
-    /// Admins manage every channel; anyone manages the temporary channels they made.
-    fn may_manage(&self, id: ClientId, channel: ChannelId) -> bool {
-        self.is_admin(id) || self.channels.get(channel).is_some_and(|c| c.temporary && c.creator == Some(id))
+    fn allowed(&self, id: ClientId, action: Action<'_>) -> bool {
+        perms::allowed(&self.clients[&id].info, action, &self.channels)
     }
 
     fn create_channel(&mut self, id: ClientId, parent: Option<ChannelId>, settings: ChannelSettings, temporary: bool) {
-        if !temporary && !self.is_admin(id) {
+        if !temporary && !self.allowed(id, Action::CreatePermanentChannel) {
             return self.error(id, "only admins can create permanent channels");
         }
         if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
@@ -387,7 +410,7 @@ impl Server {
     }
 
     fn edit_channel(&mut self, id: ClientId, channel: ChannelId, settings: &ChannelSettings) {
-        if !self.may_manage(id, channel) {
+        if !self.allowed(id, Action::EditChannel(channel)) {
             return self.error(id, "you can't edit this channel");
         }
         let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
@@ -398,7 +421,7 @@ impl Server {
     }
 
     fn delete_channel(&mut self, id: ClientId, channel: ChannelId) {
-        if !self.may_manage(id, channel) {
+        if !self.allowed(id, Action::DeleteChannel(channel)) {
             return self.error(id, "you can't delete this channel");
         }
         let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
@@ -430,12 +453,130 @@ impl Server {
         }
     }
 
+    fn kick(&mut self, id: ClientId, target: ClientId, from_server: bool, reason: &str) {
+        let Some(reason) = self.reason(id, reason) else { return };
+        let Some(t) = self.clients.get(&target) else { return self.error(id, "that user is no longer online") };
+        if !self.allowed(id, Action::Kick { target: &t.info, from_server }) {
+            let msg = if from_server && !self.clients[&id].info.admin {
+                "only admins can kick people off the server".to_owned()
+            } else {
+                format!("you can't kick {}", t.info.nickname)
+            };
+            return self.error(id, &msg);
+        }
+        if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
+            return self.error(id, "you are kicking too fast");
+        }
+        self.eject(target, id, from_server, reason);
+    }
+
+    /// Tells everyone, then moves `target` where a joining client would land, or disconnects it.
+    fn eject(&mut self, target: ClientId, by: ClientId, from_server: bool, reason: String) {
+        tracing::info!(target, by, from_server, reason, "client kicked");
+        self.broadcast(&S2C::ClientKicked { id: target, by, from_server, reason }, |_| true);
+        if from_server {
+            // Its writer sends the notice before it closes the connection.
+            self.remove(target, LeaveReason::Kicked);
+        } else {
+            let leaving = self.clients[&target].info.channel;
+            self.move_to(target, self.landing_channel(Some(leaving)));
+            self.remove_abandoned_channels();
+        }
+    }
+
+    /// A kick or ban reason, trimmed; `None` (with an error sent) if it's too long.
+    fn reason(&mut self, id: ClientId, raw: &str) -> Option<String> {
+        let reason: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
+        if reason.chars().count() > MAX_REASON_LEN {
+            self.error(id, &format!("reasons can have at most {MAX_REASON_LEN} characters"));
+            return None;
+        }
+        Some(reason)
+    }
+
+    fn ban(&mut self, id: ClientId, target: ClientId, duration_secs: Option<u64>, reason: &str, include_ip: bool) {
+        let Some(reason) = self.reason(id, reason) else { return };
+        let Some(t) = self.clients.get(&target) else { return self.error(id, "that user is no longer online") };
+        if !self.allowed(id, Action::Ban(&t.info)) {
+            let msg = if self.clients[&id].info.admin { "you can't ban yourself" } else { "only admins can ban people" };
+            return self.error(id, msg);
+        }
+        if duration_secs == Some(0) {
+            return self.error(id, "a ban must last at least a second");
+        }
+        let actor = &self.clients[&id];
+        // On a shared connection (a LAN, a household) this would lock the admin out too.
+        if include_ip && t.addr.ip().to_canonical() == actor.addr.ip().to_canonical() {
+            return self.error(id, &format!("{} connects from your IP address; ban them without it", t.info.nickname));
+        }
+        let ban = NewBan {
+            identity: t.info.identity,
+            ip: include_ip.then(|| t.addr.ip()),
+            nickname: t.info.nickname.clone(),
+            reason: reason.clone(),
+            banned_by: actor.info.nickname.clone(),
+            duration_secs,
+        };
+        let ban = self.bans.add(ban, unix_now()).clone();
+        tracing::info!(id = ban.id, identity = %ban.identity.to_hex(), ip = ?ban.ip, by = %ban.banned_by, "ban added");
+        self.save_bans();
+
+        let length = match duration_secs {
+            Some(secs) => format!("for {}", describe_duration(secs)),
+            None => "for good".into(),
+        };
+        let notice = if reason.is_empty() { format!("banned {length}") } else { format!("banned {length} ({reason})") };
+        // Everyone the ban would keep out if they connected now: with an IP
+        // ban, that includes other identities at the address.
+        let connected: Vec<ClientId> = self
+            .clients
+            .values()
+            .filter(|c| bans::covers(&ban, c.info.identity, c.addr.ip()))
+            .map(|c| c.info.id)
+            .collect();
+        for client in connected {
+            self.eject(client, id, true, notice.clone());
+        }
+    }
+
+    fn list_bans(&mut self, id: ClientId) {
+        if !self.allowed(id, Action::ManageBans) {
+            return self.error(id, "only admins can see the ban list");
+        }
+        if self.bans.prune(unix_now()) {
+            self.save_bans();
+        }
+        self.send(id, &S2C::Bans(self.bans.list().to_vec()));
+    }
+
+    fn unban(&mut self, id: ClientId, ban: BanId) {
+        if !self.allowed(id, Action::ManageBans) {
+            return self.error(id, "only admins can lift bans");
+        }
+        match self.bans.remove(ban) {
+            Some(lifted) => {
+                tracing::info!(id = ban, identity = %lifted.identity.to_hex(), "ban lifted");
+                self.save_bans();
+            }
+            None => self.error(id, "that ban has already ended"),
+        }
+        self.list_bans(id);
+    }
+
+    fn save_bans(&self) {
+        if let Some(path) = self.data_dir.as_ref().map(|d| d.join("bans.toml"))
+            && let Err(e) = self.bans.save(&path)
+        {
+            tracing::error!("cannot save bans to {}: {e}", path.display());
+        }
+    }
+
     /// Sends everyone the new channel list; saves it when permanent channels changed.
     fn channels_changed(&mut self, save: bool) {
         self.broadcast(&S2C::Channels(self.channels.snapshot()), |_| true);
         if save
-            && let Some(path) = &self.channels_file
-            && let Err(e) = self.channels.save(path)
+            && let Some(path) = self.data_dir.as_ref().map(|d| d.join("channels.toml"))
+            && let Err(e) = self.channels.save(&path)
         {
             tracing::error!("cannot save channels to {}: {e}", path.display());
         }
@@ -531,4 +672,21 @@ impl Server {
 
 fn encode(msg: &S2C) -> Frame {
     encode_frame(msg).into()
+}
+
+pub fn unix_now() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// What a banned client is told when it tries to join.
+fn banned_message(ban: &BanInfo, now: u64) -> String {
+    let mut msg = "You are banned from this server".to_owned();
+    if !ban.reason.is_empty() {
+        msg.push_str(&format!(" ({})", ban.reason));
+    }
+    msg.push('.');
+    if let Some(end) = ban.expires_unix {
+        msg.push_str(&format!(" The ban ends in {}.", describe_duration(end.saturating_sub(now))));
+    }
+    msg
 }
