@@ -23,7 +23,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bans::{self, Bans, NewBan, describe_duration};
-use crate::channels::Channels;
+use crate::channels::{Channels, SavedChannels};
 use crate::roles::RoleStore;
 
 /// A complete, ready-to-write frame shared between all recipients.
@@ -488,13 +488,13 @@ impl Server {
         if mine.rank <= highest_rank_touched(self.roles.roles(), &change) {
             return self.error(id, "you can only manage roles, and the roles of people, below your own");
         }
-        let mut forgot = false;
+        let mut saved_channels = SavedChannels::Unchanged;
         let changed = match change {
             RoleChange::Create { name } => self.roles.create(&name).map(drop),
             RoleChange::Rename { id, name } => self.roles.rename(id, &name),
             RoleChange::SetPermissions { id, perms } => self.roles.set_perms(id, perms),
             RoleChange::Move { id, position } => self.roles.move_to(id, position as usize),
-            RoleChange::Delete { id } => self.roles.delete(id).map(|()| forgot = self.channels.forget_role(id)),
+            RoleChange::Delete { id } => self.roles.delete(id).map(|()| saved_channels = self.channels.forget_role(id)),
             RoleChange::Assign { identity, role, held: false } => self.roles.revoke(identity, role).map(drop),
             RoleChange::Assign { identity, role, held: true } => {
                 let online = self.clients.values().find(|c| c.info.identity == identity);
@@ -507,7 +507,7 @@ impl Server {
         match changed {
             Ok(()) => {
                 self.save_roles();
-                if forgot {
+                if saved_channels == SavedChannels::Changed {
                     self.save_channels();
                     self.refresh(ChannelListsTo::Everyone, RolesTo::EveryEditor);
                 } else {
