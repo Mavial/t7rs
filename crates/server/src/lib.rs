@@ -28,8 +28,9 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
     let udp = Arc::new(UdpSocket::bind(listener.local_addr()?).await?);
     let channels_file = data_dir.map(|d| d.join("channels.toml"));
     let channels = match &channels_file {
-        Some(file) if file.exists() => Channels::load(file)
-            .map_err(|e| std::io::Error::other(format!("cannot read {}: {e}", file.display())))?,
+        Some(file) if file.exists() => {
+            Channels::load(file).map_err(|e| std::io::Error::other(format!("cannot read {}: {e}", file.display())))?
+        }
         _ => {
             let channels = Channels::from_config(&cfg.channels);
             if let Some(file) = &channels_file {
@@ -54,11 +55,7 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
         ))
     })?;
 
-    let info = ServerInfo {
-        name: cfg.name.clone(),
-        welcome: cfg.welcome.clone(),
-        max_clients: cfg.max_clients,
-    };
+    let info = ServerInfo { name: cfg.name.clone(), welcome: cfg.welcome.clone(), max_clients: cfg.max_clients };
     let server = Server::new(
         info,
         cfg.password().map(str::to_owned),
@@ -97,7 +94,7 @@ fn admin_token(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<String>
     }
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(format!("no system randomness: {e}")))?;
-    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let token = t7_proto::update::to_hex(&bytes);
     if let Some(file) = &file {
         std::fs::write(file, &token)?;
     }

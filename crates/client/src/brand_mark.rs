@@ -49,7 +49,7 @@ pub fn rasterize(size: u32) -> Vec<u8> {
                     let scale = size * SS * 2;
                     let hit = MARK.iter().rev().find(|k| {
                         let inside = |v: u32, lo: u8, len: u8| {
-                            v * GRID >= lo as u32 * scale && v * GRID < (lo as u32 + len as u32) * scale
+                            v * GRID >= u32::from(lo) * scale && v * GRID < (u32::from(lo) + u32::from(len)) * scale
                         };
                         inside(gx, k.x, k.w) && inside(gy, k.y, k.h)
                     });

@@ -18,12 +18,7 @@ pub struct ServerView {
 }
 
 impl ServerView {
-    pub fn new(
-        my_id: ClientId,
-        info: ServerInfo,
-        channels: Vec<ChannelInfo>,
-        clients: Vec<ClientInfo>,
-    ) -> Self {
+    pub fn new(my_id: ClientId, info: ServerInfo, channels: Vec<ChannelInfo>, clients: Vec<ClientInfo>) -> Self {
         let mut view = Self {
             my_id,
             info,
@@ -87,11 +82,7 @@ impl ServerView {
 
     /// Clients in a channel, sorted by nickname (case-insensitive).
     pub fn clients_in(&self, channel: ChannelId) -> Vec<&ClientInfo> {
-        let mut v: Vec<_> = self
-            .clients
-            .values()
-            .filter(|c| c.channel == channel)
-            .collect();
+        let mut v: Vec<_> = self.clients.values().filter(|c| c.channel == channel).collect();
         v.sort_by_cached_key(|c| (c.nickname.to_lowercase(), c.id));
         v
     }
@@ -109,10 +100,8 @@ impl ServerView {
             list.sort_by_key(|c| (c.order, c.id));
         }
         let mut out = Vec::with_capacity(self.channels.len());
-        let mut stack: Vec<(usize, ChannelId)> = children
-            .get(&None)
-            .map(|l| l.iter().rev().map(|c| (0, c.id)).collect())
-            .unwrap_or_default();
+        let mut stack: Vec<(usize, ChannelId)> =
+            children.get(&None).map_or_default(|l| l.iter().rev().map(|c| (0, c.id)).collect());
         while let Some((depth, id)) = stack.pop() {
             out.push((depth, id));
             if let Some(kids) = children.get(&Some(id)) {
@@ -146,11 +135,7 @@ mod tests {
 
     #[test]
     fn tree_order_and_events() {
-        let info = ServerInfo {
-            name: "s".into(),
-            welcome: String::new(),
-            max_clients: 10,
-        };
+        let info = ServerInfo { name: "s".into(), welcome: String::new(), max_clients: 10 };
         let me = ClientInfo {
             id: 1,
             nickname: "me".into(),
@@ -159,12 +144,7 @@ mod tests {
             admin: false,
             identity: crate::Identity([1; 32]),
         };
-        let mut v = ServerView::new(
-            1,
-            info,
-            vec![chan(3, None, 1), chan(1, None, 0), chan(2, Some(1), 0)],
-            vec![me],
-        );
+        let mut v = ServerView::new(1, info, vec![chan(3, None, 1), chan(1, None, 0), chan(2, Some(1), 0)], vec![me]);
         assert_eq!(v.tree(), &[(0, 1), (1, 2), (0, 3)]);
 
         v.apply(&S2C::Channels(vec![chan(1, None, 1), chan(3, None, 0)]));
@@ -172,10 +152,7 @@ mod tests {
 
         v.apply(&S2C::ClientMoved { id: 1, channel: 3 });
         assert_eq!(v.my_channel(), Some(3));
-        v.apply(&S2C::ClientLeft {
-            id: 1,
-            reason: LeaveReason::Disconnected,
-        });
+        v.apply(&S2C::ClientLeft { id: 1, reason: LeaveReason::Disconnected });
         assert!(v.me().is_none());
     }
 }

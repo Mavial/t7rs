@@ -1,9 +1,10 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Id, Layout, Margin, RichText, Sense, Stroke,
-    text::LayoutJob, vec2,
+    self, Align, Align2, Color32, CornerRadius, FontId, Id, Layout, Margin, RichText, Sense, Stroke, text::LayoutJob,
+    vec2,
 };
 use t7_proto::model::ServerView;
 use t7_proto::perms::{self, Action};
@@ -33,7 +34,11 @@ enum Conn {
     /// `known_cert`: the certificate was pinned by an earlier connection. A pin
     /// made on first use, or just trusted in place of a changed one, vouches
     /// only for whoever answered, so a saved admin token is not sent on it.
-    Connecting { address: String, password: String, known_cert: bool },
+    Connecting {
+        address: String,
+        password: String,
+        known_cert: bool,
+    },
     Connected,
 }
 
@@ -133,8 +138,21 @@ struct PokeForm {
 
 /// The moderation dialog on screen, if any.
 enum Moderation {
-    Kick { target: ClientId, name: String, from_server: bool, reason: String, focused: bool },
-    Ban { target: ClientId, name: String, reason: String, length: Option<u64>, include_ip: bool, focused: bool },
+    Kick {
+        target: ClientId,
+        name: String,
+        from_server: bool,
+        reason: String,
+        focused: bool,
+    },
+    Ban {
+        target: ClientId,
+        name: String,
+        reason: String,
+        length: Option<u64>,
+        include_ip: bool,
+        focused: bool,
+    },
     /// The ban list; `None` until the server sends it.
     Bans(Option<Vec<BanInfo>>),
 }
@@ -248,9 +266,8 @@ impl App {
     pub fn new(ctx: &egui::Context, mut settings: Settings, launch: Option<Launch>) -> Self {
         theme::apply(ctx);
         if settings.nickname.is_empty() {
-            settings.nickname = std::env::var("USERNAME")
-                .or_else(|_| std::env::var("USER"))
-                .unwrap_or_else(|_| "User".into());
+            settings.nickname =
+                std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "User".into());
         }
         let playback = audio::Playback::new(ctx.clone());
         let net = Net::spawn(ctx.clone(), playback.clone());
@@ -279,7 +296,7 @@ impl App {
             voice,
             audio_dialog: None,
             poke_form: None,
-            pokes: Default::default(),
+            pokes: std::collections::VecDeque::default(),
             sound_pack: Pack::BuiltIn,
             channel_dialog: None,
             moderation: None,
@@ -309,8 +326,7 @@ impl App {
             .settings
             .recent
             .first()
-            .map(|r| r.address.clone())
-            .unwrap_or_else(|| DEFAULT_SERVER.unwrap_or("localhost").into());
+            .map_or_else(|| DEFAULT_SERVER.unwrap_or("localhost").into(), |r| r.address.clone());
         self.form = Some(ConnectForm {
             address,
             nickname: self.settings.nickname.clone(),
@@ -325,7 +341,7 @@ impl App {
         if address.is_empty() || nickname.is_empty() {
             return;
         }
-        self.settings.nickname = nickname.clone();
+        self.settings.nickname.clone_from(&nickname);
         let pinned = self.settings.server_certs.get(&net::canonical_address(&address)).copied();
         let login_password = Some(password.clone()).filter(|p| !p.is_empty());
         let key = self.settings.identity_key.get_or_insert_with(settings::new_identity_key).clone();
@@ -352,7 +368,8 @@ impl App {
         }
         if ch.has_password && !view.allowed(Action::SkipChannelPassword) {
             let name = ch.name.clone();
-            self.channel_dialog = Some(ChannelDialog::Password { channel, name, password: String::new(), focused: false });
+            self.channel_dialog =
+                Some(ChannelDialog::Password { channel, name, password: String::new(), focused: false });
         } else {
             self.net.send(C2S::JoinChannel { channel, password: None });
         }
@@ -494,7 +511,8 @@ impl App {
 
     fn open_poke(&mut self, target: ClientId) {
         let Some(name) = self.view.as_ref().and_then(|v| v.nickname(target)) else { return };
-        self.poke_form = Some(PokeForm { target, name: name.to_owned(), message: String::new(), focus_requested: false });
+        self.poke_form =
+            Some(PokeForm { target, name: name.to_owned(), message: String::new(), focus_requested: false });
     }
 
     fn on_kicked(&mut self, id: ClientId, by: ClientId, from_server: bool, reason: &str) {
@@ -517,7 +535,7 @@ impl App {
             if from_server {
                 self.kicked = Some(line.clone());
             }
-            self.push(if from_server { 0 } else { 1 }, LineKind::Error, line);
+            self.push(usize::from(!from_server), LineKind::Error, line);
             return;
         }
         let line = format!("{target} was kicked from {place} by {actor}{why}");
@@ -531,7 +549,8 @@ impl App {
 
     fn on_poked(&mut self, from: ClientId, message: String) {
         let from = self.view.as_ref().and_then(|v| v.nickname(from)).unwrap_or("Someone").to_owned();
-        let line = if message.is_empty() { format!("{from} poked you") } else { format!("{from} poked you: {message}") };
+        let line =
+            if message.is_empty() { format!("{from} poked you") } else { format!("{from} poked you: {message}") };
         self.push(0, LineKind::System, line);
         self.sound(Sound::Poke);
         let time = chrono::Local::now().format("%H:%M").to_string();
@@ -578,12 +597,7 @@ impl App {
         if let Some(i) = self.tabs.iter().position(|t| t.kind == TabKind::Private(id)) {
             return i;
         }
-        let title = self
-            .view
-            .as_ref()
-            .and_then(|v| v.nickname(id))
-            .unwrap_or("unknown")
-            .to_owned();
+        let title = self.view.as_ref().and_then(|v| v.nickname(id)).unwrap_or("unknown").to_owned();
         self.tabs.push(Tab { kind: TabKind::Private(id), title, lines: Vec::new(), unread: 0 });
         self.tabs.len() - 1
     }
@@ -598,15 +612,11 @@ impl App {
     }
 
     fn channel_name(&self, id: ChannelId) -> String {
-        self.view
-            .as_ref()
-            .and_then(|v| v.channels.get(&id))
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| "?".into())
+        self.view.as_ref().and_then(|v| v.channels.get(&id)).map_or_else(|| "?".into(), |c| c.name.clone())
     }
 
     fn sync_channel_tab_title(&mut self) {
-        if let Some(ch) = self.view.as_ref().and_then(|v| v.my_channel()) {
+        if let Some(ch) = self.view.as_ref().and_then(ServerView::my_channel) {
             self.tabs[1].title = self.channel_name(ch);
         }
     }
@@ -680,7 +690,7 @@ impl App {
                     Conn::Connecting { address, known_cert, .. } => (address.clone(), *known_cert),
                     _ => (String::new(), false),
                 };
-                self.server_address = address.clone();
+                self.server_address.clone_from(&address);
                 let recent = Recent { address, server_name: server.name.clone() };
                 self.settings.recent.retain(|r| r.address != recent.address);
                 self.settings.recent.insert(0, recent);
@@ -715,7 +725,7 @@ impl App {
                         self.authenticate(token);
                     } else {
                         let pin = self.settings.server_certs.get(&net::canonical_address(&self.server_address));
-                        let fingerprint = pin.map(|f| format!(" ({f})")).unwrap_or_default();
+                        let fingerprint = pin.map_or_default(|f| format!(" ({f})"));
                         self.push(
                             0,
                             LineKind::System,
@@ -731,7 +741,7 @@ impl App {
             S2C::ClientJoined(info) => {
                 self.apply_user_volume(info.id, &info.nickname);
                 let line = format!("{} connected", info.nickname);
-                let here = self.view.as_ref().and_then(|v| v.my_channel()) == Some(info.channel);
+                let here = self.view.as_ref().and_then(ServerView::my_channel) == Some(info.channel);
                 self.apply(&S2C::ClientJoined(info.clone()));
                 self.push(0, LineKind::System, line.clone());
                 if here {
@@ -877,7 +887,7 @@ impl App {
             ui.horizontal(|ui| {
                 logo(ui, 26.0);
                 ui.add_space(4.0);
-                let name = self.view.as_ref().map(|v| v.info.name.as_str()).unwrap_or("T7");
+                let name = self.view.as_ref().map_or("T7", |v| v.info.name.as_str());
                 ui.label(RichText::new(name).size(16.0).strong().color(theme::TEXT));
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -904,13 +914,19 @@ impl App {
                         crate::update::Status::Ready(version) => {
                             ui.add_space(6.0);
                             let label = format!("Restart to update to {version}");
-                            if ui.add(theme::primary_button(&label)).on_hover_text("The update is downloaded and verified").clicked() {
+                            if ui
+                                .add(theme::primary_button(&label))
+                                .on_hover_text("The update is downloaded and verified")
+                                .clicked()
+                            {
                                 self.restart_to_update();
                             }
                         }
                         crate::update::Status::Downloading(version) => {
                             ui.add_space(6.0);
-                            ui.label(RichText::new(format!("Downloading {version}…")).size(12.5).color(theme::TEXT_FAINT));
+                            ui.label(
+                                RichText::new(format!("Downloading {version}…")).size(12.5).color(theme::TEXT_FAINT),
+                            );
                         }
                         _ => {}
                     }
@@ -964,8 +980,7 @@ impl App {
                     .view
                     .as_ref()
                     .and_then(|v| v.me())
-                    .map(|c| c.nickname.clone())
-                    .unwrap_or_else(|| self.settings.nickname.clone());
+                    .map_or_else(|| self.settings.nickname.clone(), |c| c.nickname.clone());
                 avatar(ui, &nick, 30.0, self.voice.shared.transmitting());
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
@@ -995,8 +1010,22 @@ impl App {
                     ui.add_space(4.0);
                     let mut s = self.settings.status;
                     let changed = toggle(ui, &mut s.away, Icon::Moon, Icon::Moon, theme::AMBER, "Away")
-                        | toggle(ui, &mut s.deafened, Icon::Headphones, Icon::HeadphonesOff, theme::RED, "Turn sound off (Ctrl+Shift+D)")
-                        | toggle(ui, &mut s.muted, Icon::Mic, Icon::MicOff, theme::RED, "Mute microphone (Ctrl+Shift+M)");
+                        | toggle(
+                            ui,
+                            &mut s.deafened,
+                            Icon::Headphones,
+                            Icon::HeadphonesOff,
+                            theme::RED,
+                            "Turn sound off (Ctrl+Shift+D)",
+                        )
+                        | toggle(
+                            ui,
+                            &mut s.muted,
+                            Icon::Mic,
+                            Icon::MicOff,
+                            theme::RED,
+                            "Mute microphone (Ctrl+Shift+M)",
+                        );
                     if changed {
                         self.set_status(s);
                     }
@@ -1011,12 +1040,9 @@ impl App {
         let volumes = self.settings.user_volumes.clone();
         let mut volume_change: Option<(ClientId, String, f32)> = None;
         let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(8, 10));
-        egui::Panel::left("tree")
-            .frame(frame)
-            .resizable(true)
-            .default_size(290.0)
-            .size_range(220.0..=520.0)
-            .show(ui, |ui| {
+        egui::Panel::left("tree").frame(frame).resizable(true).default_size(290.0).size_range(220.0..=520.0).show(
+            ui,
+            |ui| {
                 let Some(view) = &self.view else { return };
                 let mut join = None;
                 let mut private = None;
@@ -1032,7 +1058,12 @@ impl App {
                         if resp.hovered() {
                             ui.painter().rect_filled(rect, CornerRadius::same(5), theme::SURFACE_HOVER);
                         }
-                        icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), Icon::Dots, color);
+                        icons::paint(
+                            ui.painter(),
+                            egui::Rect::from_center_size(rect.center(), vec2(16.0, 16.0)),
+                            Icon::Dots,
+                            color,
+                        );
                         egui::Popup::menu(&resp).show(|ui| {
                             let permanent = view.allowed(Action::CreatePermanentChannel);
                             let label = if permanent { "Create channel…" } else { "Create temporary channel…" };
@@ -1090,28 +1121,56 @@ impl App {
                         let p = ui.painter();
                         p.rect_filled(rect, CornerRadius::same(6), bg);
                         if drop_hover {
-                            p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
+                            p.rect_stroke(
+                                rect,
+                                CornerRadius::same(6),
+                                Stroke::new(1.0, theme::ACCENT),
+                                egui::StrokeKind::Inside,
+                            );
                         }
                         if let Some((zone @ (Zone::Before | Zone::After), Outcome::Move(_))) = channel_drop {
                             // Indented to the level the channel lands on.
                             let y = if zone == Zone::Before { rect.top() - 0.5 } else { rect.bottom() + 0.5 };
                             let left = rect.left() + indent + 4.0;
                             p.circle_filled(egui::pos2(left, y), 3.0, theme::ACCENT);
-                            p.line_segment([egui::pos2(left, y), egui::pos2(rect.right() - 4.0, y)], Stroke::new(2.0, theme::ACCENT));
+                            p.line_segment(
+                                [egui::pos2(left, y), egui::pos2(rect.right() - 4.0, y)],
+                                Stroke::new(2.0, theme::ACCENT),
+                            );
                         }
                         let icon_color = if is_mine { theme::ACCENT_TEXT } else { theme::TEXT_FAINT };
                         let x = rect.left() + indent + 6.0;
-                        icons::paint(p, egui::Rect::from_center_size(egui::pos2(x + 7.0, rect.center().y), vec2(15.0, 15.0)), Icon::Speaker, icon_color);
+                        icons::paint(
+                            p,
+                            egui::Rect::from_center_size(egui::pos2(x + 7.0, rect.center().y), vec2(15.0, 15.0)),
+                            Icon::Speaker,
+                            icon_color,
+                        );
                         let name_color = if is_mine { theme::TEXT } else { theme::TEXT_DIM };
-                        let name_rect = p.text(egui::pos2(x + 22.0, rect.center().y), Align2::LEFT_CENTER, &ch.name, FontId::proportional(14.0), name_color);
+                        let name_rect = p.text(
+                            egui::pos2(x + 22.0, rect.center().y),
+                            Align2::LEFT_CENTER,
+                            &ch.name,
+                            FontId::proportional(14.0),
+                            name_color,
+                        );
                         let mut after = name_rect.right() + 6.0;
                         if ch.has_password {
-                            let r = egui::Rect::from_center_size(egui::pos2(after + 6.0, rect.center().y), vec2(12.0, 12.0));
+                            let r = egui::Rect::from_center_size(
+                                egui::pos2(after + 6.0, rect.center().y),
+                                vec2(12.0, 12.0),
+                            );
                             icons::paint(p, r, Icon::Lock, theme::TEXT_FAINT);
                             after += 16.0;
                         }
                         if ch.temporary {
-                            p.text(egui::pos2(after, rect.center().y + 0.5), Align2::LEFT_CENTER, "temporary", FontId::proportional(11.0), theme::TEXT_FAINT);
+                            p.text(
+                                egui::pos2(after, rect.center().y + 0.5),
+                                Align2::LEFT_CENTER,
+                                "temporary",
+                                FontId::proportional(11.0),
+                                theme::TEXT_FAINT,
+                            );
                         }
 
                         let count = match ch.max_clients {
@@ -1121,11 +1180,18 @@ impl App {
                         };
                         if !count.is_empty() {
                             let c = if full { theme::AMBER } else { theme::TEXT_FAINT };
-                            p.text(rect.right_center() - vec2(8.0, 0.0), Align2::RIGHT_CENTER, count, FontId::proportional(11.5), c);
+                            p.text(
+                                rect.right_center() - vec2(8.0, 0.0),
+                                Align2::RIGHT_CENTER,
+                                count,
+                                FontId::proportional(11.5),
+                                c,
+                            );
                         }
 
                         // Releasing takes the payload whatever its type, so ask only for the one being dragged.
-                        if resp.double_clicked() || (dragging_self && resp.dnd_release_payload::<DragSelf>().is_some()) {
+                        if resp.double_clicked() || (dragging_self && resp.dnd_release_payload::<DragSelf>().is_some())
+                        {
                             join = Some(ch_id);
                         }
                         if may_rearrange {
@@ -1184,7 +1250,10 @@ impl App {
                                     ui.close();
                                 }
                             }
-                            if view.allowed(Action::DeleteChannel(ch_id)) && !ch.default && ui.button("Delete channel…").clicked() {
+                            if view.allowed(Action::DeleteChannel(ch_id))
+                                && !ch.default
+                                && ui.button("Delete channel…").clicked()
+                            {
                                 action = Some(TreeAction::Delete(ch_id));
                                 ui.close();
                             }
@@ -1195,7 +1264,11 @@ impl App {
                             let sense = if is_me { Sense::click_and_drag() } else { Sense::click() };
                             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), sense);
                             if resp.hovered() {
-                                ui.painter().rect_filled(rect, CornerRadius::same(6), theme::SURFACE_HOVER.gamma_multiply(0.7));
+                                ui.painter().rect_filled(
+                                    rect,
+                                    CornerRadius::same(6),
+                                    theme::SURFACE_HOVER.gamma_multiply(0.7),
+                                );
                             }
                             let p = ui.painter();
                             let ax = rect.left() + indent + 34.0;
@@ -1205,7 +1278,13 @@ impl App {
                                 p.circle_stroke(center, 12.5, Stroke::new(2.0, theme::GREEN));
                             }
                             let color = if c.status.away { theme::TEXT_FAINT } else { theme::TEXT };
-                            let name_rect = p.text(egui::pos2(ax + 18.0, rect.center().y), Align2::LEFT_CENTER, &c.nickname, FontId::proportional(13.5), color);
+                            let name_rect = p.text(
+                                egui::pos2(ax + 18.0, rect.center().y),
+                                Align2::LEFT_CENTER,
+                                &c.nickname,
+                                FontId::proportional(13.5),
+                                color,
+                            );
                             let mut name_end = name_rect.right();
                             let badge = if c.admin {
                                 Some((Icon::Shield, theme::ACCENT_TEXT))
@@ -1215,11 +1294,15 @@ impl App {
                                 None
                             };
                             if let Some((icon, color)) = badge {
-                                let r = egui::Rect::from_center_size(egui::pos2(name_end + 11.0, rect.center().y), vec2(12.0, 12.0));
+                                let r = egui::Rect::from_center_size(
+                                    egui::pos2(name_end + 11.0, rect.center().y),
+                                    vec2(12.0, 12.0),
+                                );
                                 icons::paint(p, r, icon, color);
                                 name_end += 16.0;
                             }
-                            let name_rect = egui::Rect::from_min_max(name_rect.min, egui::pos2(name_end, name_rect.max.y));
+                            let name_rect =
+                                egui::Rect::from_min_max(name_rect.min, egui::pos2(name_end, name_rect.max.y));
                             let volume = volumes.get(&c.nickname).copied().unwrap_or(1.0);
                             let hint = if is_me {
                                 Some("you".to_owned())
@@ -1231,7 +1314,13 @@ impl App {
                                 None
                             };
                             if let Some(hint) = hint {
-                                p.text(name_rect.right_center() + vec2(6.0, 0.5), Align2::LEFT_CENTER, hint, FontId::proportional(11.0), theme::TEXT_FAINT);
+                                p.text(
+                                    name_rect.right_center() + vec2(6.0, 0.5),
+                                    Align2::LEFT_CENTER,
+                                    hint,
+                                    FontId::proportional(11.0),
+                                    theme::TEXT_FAINT,
+                                );
                             }
                             let mut x = rect.right() - 16.0;
                             for (on, icon, col) in [
@@ -1240,7 +1329,8 @@ impl App {
                                 (c.status.muted, Icon::MicOff, theme::RED),
                             ] {
                                 if on {
-                                    let r = egui::Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(14.0, 14.0));
+                                    let r =
+                                        egui::Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(14.0, 14.0));
                                     icons::paint(p, r, icon, col);
                                     x -= 20.0;
                                 }
@@ -1267,8 +1357,11 @@ impl App {
                                         poke = Some(c.id);
                                         ui.close();
                                     }
-                                    let kicks = [(false, "Kick from channel…"), (true, "Kick from server…")]
-                                        .map(|(from_server, label)| (from_server, label, view.allowed(Action::Kick { target: c, from_server })));
+                                    let kicks = [(false, "Kick from channel…"), (true, "Kick from server…")].map(
+                                        |(from_server, label)| {
+                                            (from_server, label, view.allowed(Action::Kick { target: c, from_server }))
+                                        },
+                                    );
                                     let ban = view.allowed(Action::Ban(c));
                                     let set_moderator = view.allowed(Action::SetModerator);
                                     if kicks.iter().any(|k| k.2) || ban || set_moderator {
@@ -1286,10 +1379,17 @@ impl App {
                                     }
                                     if set_moderator {
                                         let moderator = ch.moderators.contains(&c.identity);
-                                        let label =
-                                            if moderator { "Remove as moderator".to_owned() } else { format!("Make moderator of {}", ch.name) };
+                                        let label = if moderator {
+                                            "Remove as moderator".to_owned()
+                                        } else {
+                                            format!("Make moderator of {}", ch.name)
+                                        };
                                         if ui.button(label).clicked() {
-                                            action = Some(TreeAction::SetModerator { channel: ch_id, identity: c.identity, moderator: !moderator });
+                                            action = Some(TreeAction::SetModerator {
+                                                channel: ch_id,
+                                                identity: c.identity,
+                                                moderator: !moderator,
+                                            });
                                             ui.close();
                                         }
                                     }
@@ -1299,7 +1399,9 @@ impl App {
                                     ui.horizontal(|ui| {
                                         let slider = egui::Slider::new(&mut v, 0.0..=2.0)
                                             .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                                            .custom_parser(|s| s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0));
+                                            .custom_parser(|s| {
+                                                s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)
+                                            });
                                         ui.add(slider);
                                         if ui.add_enabled(v != 1.0, egui::Button::new("Reset").small()).clicked() {
                                             v = 1.0;
@@ -1349,7 +1451,8 @@ impl App {
                     }
                     None => {}
                 }
-            });
+            },
+        );
     }
 
     fn chat(&mut self, ui: &mut egui::Ui) {
@@ -1442,16 +1545,12 @@ impl App {
 
             let view = self.view.as_ref().expect("checked above");
             let tab = &self.tabs[self.active_tab];
-            egui::ScrollArea::vertical()
-                .id_salt(kind)
-                .auto_shrink(false)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 5.0;
-                    for line in &tab.lines {
-                        ui.label(layout_line(line, view.my_id, ui.available_width()));
-                    }
-                });
+            egui::ScrollArea::vertical().id_salt(kind).auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 5.0;
+                for line in &tab.lines {
+                    ui.label(layout_line(line, view.my_id, ui.available_width()));
+                }
+            });
         });
     }
 
@@ -1461,35 +1560,32 @@ impl App {
             ui.add_space((ui.available_height() * 0.22).max(20.0));
             logo(ui, 64.0);
             ui.add_space(14.0);
-            match &self.conn {
-                Conn::Connecting { address, .. } => {
-                    ui.label(RichText::new("Connecting…").size(22.0).strong().color(theme::TEXT));
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(address).color(theme::TEXT_DIM));
-                    ui.add_space(14.0);
-                    ui.add(egui::Spinner::new().size(22.0).color(theme::ACCENT_TEXT));
+            if let Conn::Connecting { address, .. } = &self.conn {
+                ui.label(RichText::new("Connecting…").size(22.0).strong().color(theme::TEXT));
+                ui.add_space(6.0);
+                ui.label(RichText::new(address).color(theme::TEXT_DIM));
+                ui.add_space(14.0);
+                ui.add(egui::Spinner::new().size(22.0).color(theme::ACCENT_TEXT));
+            } else {
+                ui.label(RichText::new("Not connected").size(22.0).strong().color(theme::TEXT));
+                ui.add_space(6.0);
+                ui.label(RichText::new("Connect to a T7 server to start talking.").color(theme::TEXT_DIM));
+                if let Some(err) = &self.last_error {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(err).color(theme::RED));
                 }
-                _ => {
-                    ui.label(RichText::new("Not connected").size(22.0).strong().color(theme::TEXT));
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("Connect to a T7 server to start talking.").color(theme::TEXT_DIM));
-                    if let Some(err) = &self.last_error {
-                        ui.add_space(10.0);
-                        ui.label(RichText::new(err).color(theme::RED));
-                    }
-                    ui.add_space(16.0);
-                    if ui.add(theme::primary_button("Connect to server").min_size(vec2(180.0, 36.0))).clicked() {
-                        self.open_connect_form();
-                    }
+                ui.add_space(16.0);
+                if ui.add(theme::primary_button("Connect to server").min_size(vec2(180.0, 36.0))).clicked() {
+                    self.open_connect_form();
+                }
 
-                    if !self.settings.recent.is_empty() {
-                        ui.add_space(28.0);
-                        ui.label(RichText::new("RECENT").size(11.0).strong().color(theme::TEXT_FAINT));
-                        ui.add_space(6.0);
-                        for r in &self.settings.recent {
-                            if recent_card(ui, r).clicked() {
-                                connect_to = Some(r.address.clone());
-                            }
+                if !self.settings.recent.is_empty() {
+                    ui.add_space(28.0);
+                    ui.label(RichText::new("RECENT").size(11.0).strong().color(theme::TEXT_FAINT));
+                    ui.add_space(6.0);
+                    for r in &self.settings.recent {
+                        if recent_card(ui, r).clicked() {
+                            connect_to = Some(r.address.clone());
                         }
                     }
                 }
@@ -1509,7 +1605,9 @@ impl App {
             ui.set_width(360.0);
             ui.label(RichText::new("Connect to server").size(19.0).strong().color(theme::TEXT));
             ui.add_space(2.0);
-            ui.label(RichText::new("Enter an address like example.com or 1.2.3.4:9988").size(12.5).color(theme::TEXT_DIM));
+            ui.label(
+                RichText::new("Enter an address like example.com or 1.2.3.4:9988").size(12.5).color(theme::TEXT_DIM),
+            );
             ui.add_space(14.0);
 
             let address = field(ui, "Server address", &mut form.address, false);
@@ -1569,7 +1667,8 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
         let binding = self.audio_dialog.as_ref().is_some_and(|d| d.binding);
-        if let (TxMode::PushToTalk, Some(key), false) = (self.settings.audio.mode, self.settings.audio.ptt_key, binding) {
+        if let (TxMode::PushToTalk, Some(key), false) = (self.settings.audio.mode, self.settings.audio.ptt_key, binding)
+        {
             v.shared.set_ptt_local(ctx.input(|i| ptt::is_down(key.vk, i)));
         }
         // Talking rings fade out without any input event, so poll while anyone talks.
@@ -1632,9 +1731,11 @@ impl App {
                                 .fixed_decimals(0),
                         );
                         ui.label(
-                            RichText::new("Talk normally: the bar should cross the line, and stay left of it when you're quiet.")
-                                .size(11.5)
-                                .color(theme::TEXT_FAINT),
+                            RichText::new(
+                                "Talk normally: the bar should cross the line, and stay left of it when you're quiet.",
+                            )
+                            .size(11.5)
+                            .color(theme::TEXT_FAINT),
                         );
                     }
                     TxMode::PushToTalk => {
@@ -1685,8 +1786,7 @@ impl App {
                             .packs
                             .iter()
                             .find(|(_, d)| d == dir)
-                            .map(|(label, _)| label.clone())
-                            .unwrap_or_else(|| dir.display().to_string()),
+                            .map_or_else(|| dir.display().to_string(), |(label, _)| label.clone()),
                     };
                     egui::ComboBox::from_id_salt("sound-pack").width(250.0).selected_text(shown).show_ui(ui, |ui| {
                         ui.selectable_value(&mut a.sound_pack, None, "Built-in");
@@ -1702,7 +1802,10 @@ impl App {
                     let names: Vec<&str> = Sound::ALL.iter().map(|s| s.file_name()).collect();
                     if ui
                         .small_button("Open custom folder…")
-                        .on_hover_text(format!("WAV files with these names replace the built-in sounds: {}", names.join(", ")))
+                        .on_hover_text(format!(
+                            "WAV files with these names replace the built-in sounds: {}",
+                            names.join(", ")
+                        ))
                         .clicked()
                     {
                         open_sounds_folder();
@@ -1710,7 +1813,12 @@ impl App {
                 }
 
                 section(ui, "Volume");
-                ui.add(egui::Slider::new(&mut a.input_gain_db, -20.0..=20.0).text("microphone").suffix(" dB").fixed_decimals(0));
+                ui.add(
+                    egui::Slider::new(&mut a.input_gain_db, -20.0..=20.0)
+                        .text("microphone")
+                        .suffix(" dB")
+                        .fixed_decimals(0),
+                );
                 ui.add(
                     egui::Slider::new(&mut a.output_volume, 0.0..=2.0)
                         .text("speakers")
@@ -1823,7 +1931,7 @@ impl App {
         }
         let (Some(dialog), Some(view)) = (&mut self.moderation, &self.view) else { return };
         let default_name =
-            view.channels.values().find(|c| c.default).map(|c| c.name.clone()).unwrap_or_else(|| "the default channel".into());
+            view.channels.values().find(|c| c.default).map_or_else(|| "the default channel".into(), |c| c.name.clone());
         let mut send: Option<C2S> = None;
         let mut unban = None;
         let mut cancel = false;
@@ -1835,7 +1943,10 @@ impl App {
                     let (title, note) = if *from_server {
                         (format!("Kick {name} from the server"), "They can connect again right away.".to_owned())
                     } else {
-                        (format!("Kick {name} from the channel"), format!("They move to {default_name}, or the first open channel if it's full or locked."))
+                        (
+                            format!("Kick {name} from the channel"),
+                            format!("They move to {default_name}, or the first open channel if it's full or locked."),
+                        )
                     };
                     ui.label(RichText::new(title).size(19.0).strong().color(theme::TEXT));
                     ui.add_space(2.0);
@@ -1870,13 +1981,19 @@ impl App {
                         }
                     });
                     ui.add_space(6.0);
-                    ui.checkbox(include_ip, "Also ban IP address")
-                        .on_hover_text("Also kicks off and keeps out everyone else at their address, under any identity");
+                    ui.checkbox(include_ip, "Also ban IP address").on_hover_text(
+                        "Also kicks off and keeps out everyone else at their address, under any identity",
+                    );
                     ui.add_space(14.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.add(danger_button("Ban")).clicked() || enter {
                             let reason = reason.trim().to_owned();
-                            send = Some(C2S::Ban { target: *target, duration_secs: *length, reason, include_ip: *include_ip });
+                            send = Some(C2S::Ban {
+                                target: *target,
+                                duration_secs: *length,
+                                reason,
+                                include_ip: *include_ip,
+                            });
                         }
                         if ui.button("Cancel").clicked() {
                             cancel = true;
@@ -2041,9 +2158,8 @@ impl App {
                 ch.moderators.iter().map(|m| (*m, online(m))).collect()
             });
         let mut unmoderate: Option<Identity> = None;
-        let channel_name = |id: Option<ChannelId>| {
-            id.and_then(|id| self.view.as_ref()?.channels.get(&id).map(|c| c.name.clone()))
-        };
+        let channel_name =
+            |id: Option<ChannelId>| id.and_then(|id| self.view.as_ref()?.channels.get(&id).map(|c| c.name.clone()));
         let parent_name = match dialog {
             ChannelDialog::Form(f) if f.editing.is_none() => channel_name(f.parent),
             _ => None,
@@ -2118,12 +2234,9 @@ impl App {
                         }
                         for (identity, nickname) in list {
                             ui.horizontal(|ui| {
-                                match nickname {
-                                    Some(name) => ui.label(RichText::new(name).color(theme::TEXT)),
-                                    None => {
-                                        ui.label(RichText::new(identity.to_string()).font(FontId::monospace(12.5)).color(theme::TEXT_DIM));
-                                        ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT))
-                                    }
+                                if let Some(name) = nickname { ui.label(RichText::new(name).color(theme::TEXT)) } else {
+                                    ui.label(RichText::new(identity.to_string()).font(FontId::monospace(12.5)).color(theme::TEXT_DIM));
+                                    ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT))
                                 };
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     if ui.small_button("Remove").clicked() {
@@ -2193,7 +2306,7 @@ impl App {
                     let mut text = "Its sub-channels are deleted too.".to_owned();
                     if *occupants > 0 {
                         let who = if *occupants == 1 { "The 1 person".to_owned() } else { format!("The {occupants} people") };
-                        text.push_str(&format!(" {who} inside will move to {default_name}."));
+                        let _ = write!(text, " {who} inside will move to {default_name}.");
                     }
                     ui.label(RichText::new(text).size(13.0).color(theme::TEXT_DIM));
                     ui.add_space(14.0);
@@ -2354,7 +2467,8 @@ fn base_tabs() -> Vec<Tab> {
 /// One chat line as a single wrapped text layout: cheap to lay out and render.
 fn layout_line(line: &Line, my_id: ClientId, width: f32) -> LayoutJob {
     use egui::text::TextFormat;
-    let fmt = |size: f32, color: Color32| TextFormat { font_id: FontId::proportional(size), color, ..Default::default() };
+    let fmt =
+        |size: f32, color: Color32| TextFormat { font_id: FontId::proportional(size), color, ..Default::default() };
     let mut job = LayoutJob::default();
     job.wrap.max_width = width;
     job.append(&line.time, 0.0, fmt(11.5, theme::TEXT_FAINT));
@@ -2377,7 +2491,7 @@ fn logo(ui: &mut egui::Ui, size: f32) {
 
 fn paint_avatar(p: &egui::Painter, center: egui::Pos2, radius: f32, name: &str) {
     p.circle_filled(center, radius, theme::avatar_color(name));
-    let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+    let initial: String = name.chars().next().map_or_default(|c| c.to_uppercase().collect());
     p.text(center, Align2::CENTER_CENTER, initial, FontId::proportional(radius * 1.1), Color32::WHITE);
 }
 
@@ -2391,7 +2505,8 @@ fn avatar(ui: &mut egui::Ui, name: &str, size: f32, talking: bool) {
 
 fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 34.0), Sense::click());
-    let (fill, color) = if resp.hovered() { (theme::SURFACE_HOVER, theme::TEXT) } else { (theme::SURFACE, theme::TEXT_DIM) };
+    let (fill, color) =
+        if resp.hovered() { (theme::SURFACE_HOVER, theme::TEXT) } else { (theme::SURFACE, theme::TEXT_DIM) };
     ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
     icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
     resp.on_hover_text(tip)
@@ -2423,7 +2538,10 @@ fn level_meter(ui: &mut egui::Ui, level_db: f32, threshold_db: f32, open: bool) 
     fill.set_width(rect.width() * t(level_db));
     p.rect_filled(fill, CornerRadius::same(5), if open { theme::GREEN } else { theme::TEXT_FAINT });
     let x = rect.left() + rect.width() * t(threshold_db);
-    p.line_segment([egui::pos2(x, rect.top() - 3.0), egui::pos2(x, rect.bottom() + 3.0)], Stroke::new(2.0, theme::ACCENT_TEXT));
+    p.line_segment(
+        [egui::pos2(x, rect.top() - 3.0), egui::pos2(x, rect.bottom() + 3.0)],
+        Stroke::new(2.0, theme::ACCENT_TEXT),
+    );
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
@@ -2462,8 +2580,7 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color:
 fn ban_card(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
     let local = |secs: u64| {
         chrono::DateTime::from_timestamp(secs as i64, 0)
-            .map(|t| t.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
-            .unwrap_or_default()
+            .map_or_default(|t| t.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
     };
     let mut details = vec![format!("by {} on {}", ban.banned_by, local(ban.created_unix))];
     details.push(match ban.expires_unix {
@@ -2482,7 +2599,9 @@ fn ban_card(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&ban.nickname).strong().color(theme::TEXT));
-                ui.label(RichText::new(ban.identity.to_string()).font(FontId::monospace(11.5)).color(theme::TEXT_FAINT));
+                ui.label(
+                    RichText::new(ban.identity.to_string()).font(FontId::monospace(11.5)).color(theme::TEXT_FAINT),
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     unban = ui.small_button("Unban").clicked();
                 });
@@ -2536,8 +2655,20 @@ fn recent_card(ui: &mut egui::Ui, r: &Recent) -> egui::Response {
     let fill = if resp.hovered() { theme::SURFACE_HOVER } else { theme::SURFACE };
     p.rect(rect, CornerRadius::same(10), fill, Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
     let x = rect.left() + 14.0;
-    p.text(egui::pos2(x, rect.top() + 16.0), Align2::LEFT_CENTER, &r.server_name, FontId::proportional(14.0), theme::TEXT);
-    p.text(egui::pos2(x, rect.top() + 33.0), Align2::LEFT_CENTER, &r.address, FontId::proportional(12.0), theme::TEXT_FAINT);
+    p.text(
+        egui::pos2(x, rect.top() + 16.0),
+        Align2::LEFT_CENTER,
+        &r.server_name,
+        FontId::proportional(14.0),
+        theme::TEXT,
+    );
+    p.text(
+        egui::pos2(x, rect.top() + 33.0),
+        Align2::LEFT_CENTER,
+        &r.address,
+        FontId::proportional(12.0),
+        theme::TEXT_FAINT,
+    );
     let chevron = egui::Rect::from_center_size(rect.right_center() - vec2(20.0, 0.0), vec2(16.0, 16.0));
     icons::paint(p, chevron, Icon::ChevronRight, if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM });
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)

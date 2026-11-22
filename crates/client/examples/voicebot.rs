@@ -15,7 +15,10 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use t7_proto::voice::{self, FRAME_SAMPLES, ToClient, ToServer};
-use t7_proto::*;
+use t7_proto::{
+    C2S, ChannelSettings, ClientId, DEFAULT_PORT, PROTOCOL_VERSION, PasswordChange, S2C, identity, read_frame, tls,
+    write_frame,
+};
 use tokio::io::BufReader;
 use tokio::net::{TcpStream, UdpSocket};
 
@@ -92,7 +95,7 @@ async fn main() {
             loop {
                 match read_frame::<_, S2C>(&mut r, &mut buf).await {
                     Ok(S2C::Error { message }) => return Some(message),
-                    Ok(_) => continue,
+                    Ok(_) => {}
                     Err(_) => return None,
                 }
             }
@@ -117,7 +120,8 @@ async fn main() {
     let deadline = Instant::now() + Duration::from_secs(secs);
     if mode == "tone" {
         let mut enc =
-            opus1::OpusEncoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono, opus1::Application::Voip).unwrap();
+            opus1::OpusEncoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono, opus1::Application::Voip)
+                .unwrap();
         let mut pkt = [0u8; voice::MAX_OPUS_PAYLOAD];
         let mut tick = tokio::time::interval(Duration::from_millis(20));
         let mut seq = 0u32;
@@ -136,7 +140,7 @@ async fn main() {
             udp.send(&out).await.unwrap();
             seq += 1;
             if seq.is_multiple_of(50) {
-                crypto.seal(ToServer::Ping { nonce: seq as u64 }, &mut out);
+                crypto.seal(ToServer::Ping { nonce: u64::from(seq) }, &mut out);
                 udp.send(&out).await.unwrap();
             }
         }
@@ -150,7 +154,7 @@ async fn main() {
         let mut ping = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
-                _ = tokio::time::sleep_until(deadline.into()) => break,
+                () = tokio::time::sleep_until(deadline.into()) => break,
                 _ = ping.tick() => {
                     crypto.seal(ToServer::Ping { nonce: 2 }, &mut out);
                     udp.send(&out).await.unwrap();
@@ -163,7 +167,7 @@ async fn main() {
                                 opus1::OpusDecoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono).unwrap()
                             });
                             let samples = dec.decode(payload, FRAME_SAMPLES, &mut pcm).unwrap_or(0);
-                            let energy: f64 = pcm[..samples].iter().map(|&v| (v as f64).powi(2)).sum();
+                            let energy: f64 = pcm[..samples].iter().map(|&v| f64::from(v).powi(2)).sum();
                             let e = stats.entry(from).or_default();
                             e.0 += 1;
                             e.1 += energy / samples.max(1) as f64;
@@ -180,7 +184,7 @@ async fn main() {
         }
         for (from, (frames, energy)) in stats {
             let name = names.get(&from).cloned().unwrap_or_else(|| format!("client {from}"));
-            let db = 10.0 * (energy / frames as f64).max(1e-12).log10();
+            let db = 10.0 * (energy / f64::from(frames)).max(1e-12).log10();
             println!("heard {name}: {frames} frames ({:.1} s), mean level {db:.1} dBFS", frames as f32 / 50.0);
         }
     }

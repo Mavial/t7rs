@@ -18,10 +18,7 @@ struct Args {
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         // No color codes when logs go to a file or a container log collector.
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
@@ -32,14 +29,11 @@ fn main() {
         cfg.bind = bind;
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("failed to start tokio runtime");
+    let runtime =
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("failed to start tokio runtime");
     runtime.block_on(async {
-        let listener = TcpListener::bind(&cfg.bind)
-            .await
-            .unwrap_or_else(|e| fail(format!("cannot bind {}: {e}", cfg.bind)));
+        let listener =
+            TcpListener::bind(&cfg.bind).await.unwrap_or_else(|e| fail(format!("cannot bind {}: {e}", cfg.bind)));
         tracing::info!(
             "\"{}\" listening on {} (TCP control + UDP voice{})",
             cfg.name,
@@ -49,7 +43,7 @@ fn main() {
         // channels.toml and the admin token live next to the config file.
         let data_dir = match args.config.parent() {
             Some(dir) if !dir.as_os_str().is_empty() => dir.to_owned(),
-            _ => std::path::PathBuf::from("."),
+            _ => PathBuf::from("."),
         };
         tokio::select! {
             res = t7_server::serve(listener, &cfg, Some(&data_dir)) => {

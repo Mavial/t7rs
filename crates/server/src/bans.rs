@@ -55,7 +55,8 @@ impl Bans {
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let header = "# Banned identities and IP addresses, kept up to date by the server as\n\
                       # admins ban and unban people in T7. Edit it only while the server is stopped.\n\n";
-        let body = toml::to_string(&BansFile { next_id: self.next_id, bans: self.list.clone() }).map_err(std::io::Error::other)?;
+        let body = toml::to_string(&BansFile { next_id: self.next_id, bans: self.list.clone() })
+            .map_err(std::io::Error::other)?;
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, format!("{header}{body}"))?;
         std::fs::rename(&tmp, path)
@@ -161,7 +162,7 @@ mod tests {
         assert!(bans.find(BOB, ip("10.0.0.1"), 160).is_none(), "the IP ban ends too");
         assert_eq!(bans.list().len(), 1, "finding doesn't prune");
         assert!(bans.prune(160));
-        assert!(bans.list().is_empty());
+        assert_eq!(bans.list(), []);
         assert!(!bans.prune(160));
     }
 
@@ -197,7 +198,7 @@ mod tests {
 
         // A file from before the next id was saved continues after its highest id, expired or not.
         let saved = std::fs::read_to_string(&file).unwrap();
-        let old: String = saved.lines().filter(|l| !l.starts_with("next_id")).map(|l| format!("{l}\n")).collect();
+        let old: String = saved.lines().filter(|l| !l.starts_with("next_id")).flat_map(|l| [l, "\n"]).collect();
         assert_ne!(old, saved, "the next id is saved");
         std::fs::write(&file, old).unwrap();
         let mut old = Bans::load(&file, 200).unwrap();

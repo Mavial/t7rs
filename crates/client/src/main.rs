@@ -17,9 +17,7 @@ mod update;
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
         .init();
 
     // Separate settings per profile, e.g. to run two clients on one machine.
@@ -27,9 +25,7 @@ fn main() {
     let (store, settings) = settings::Store::open(profile.as_deref().map(str::trim));
     let launch = parse_args();
 
-    let result = shell::run(egui::Context::default(), store, |ctx| {
-        app::App::new(ctx, settings, launch)
-    });
+    let result = shell::run(egui::Context::default(), store, |ctx| app::App::new(ctx, settings, launch));
     if let Err(e) = result {
         tracing::error!("{e}");
         std::process::exit(1);

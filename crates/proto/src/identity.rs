@@ -124,7 +124,7 @@ impl<'de> Deserialize<'de> for IdentityKey {
 
 /// Serde implements arrays only up to 32 elements; a signature has 64 bytes.
 mod bytes64 {
-    use super::*;
+    use super::{Deserializer, SeqAccess, SerializeTuple, Serializer, Visitor, de, fmt};
 
     pub fn serialize<S: Serializer>(bytes: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
         let mut tuple = s.serialize_tuple(64)?;

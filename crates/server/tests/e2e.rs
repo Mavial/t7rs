@@ -72,9 +72,7 @@ impl TestClient {
     }
     /// Reads until the server hangs up.
     async fn closed(&mut self) {
-        let read = async {
-            while read_frame::<_, S2C>(&mut self.r, &mut self.buf).await.is_ok() {}
-        };
+        let read = async { while read_frame::<_, S2C>(&mut self.r, &mut self.buf).await.is_ok() {} };
         tokio::time::timeout(Duration::from_secs(2), read).await.expect("the server kept the connection open");
     }
 }
@@ -178,7 +176,7 @@ struct Voice {
 }
 
 impl Voice {
-    async fn open(server: std::net::SocketAddr, welcome: &S2C) -> Self {
+    async fn open(server: SocketAddr, welcome: &S2C) -> Self {
         let S2C::Welcome { your_id, voice_key, .. } = welcome else { panic!("{welcome:?}") };
         let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         sock.connect(server).await.unwrap();
@@ -294,7 +292,7 @@ async fn pokes_and_protocol_versions() {
 }
 
 /// The certificate fingerprint a server presents.
-async fn fingerprint(addr: std::net::SocketAddr) -> tls::Fingerprint {
+async fn fingerprint(addr: SocketAddr) -> tls::Fingerprint {
     tls::connect(TcpStream::connect(addr).await.unwrap(), None).await.unwrap().1
 }
 
@@ -380,7 +378,9 @@ async fn channels_are_managed_with_permissions() {
 
     // ...but not a permanent one, and not edit channels they didn't make.
     user.send(C2S::CreateChannel { parent: None, settings: settings("Mine"), temporary: false }).await;
-    assert!(matches!(user.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { ref message } if message.contains("only admins")));
+    assert!(
+        matches!(user.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { ref message } if message.contains("only admins"))
+    );
     user.send(C2S::DeleteChannel { id: lobby }).await;
     assert!(matches!(user.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { .. }));
 
@@ -392,13 +392,21 @@ async fn channels_are_managed_with_permissions() {
 
     // A wrong token is refused; the right one makes you admin, and everyone hears about it.
     admin.send(C2S::Authenticate { token: "guess".into() }).await;
-    assert!(matches!(admin.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { ref message } if message.contains("wrong admin token")));
+    assert!(
+        matches!(admin.until(|m| matches!(m, S2C::Error { .. })).await, S2C::Error { ref message } if message.contains("wrong admin token"))
+    );
     admin.send(C2S::Authenticate { token: "sekrit".into() }).await;
-    assert_eq!(user.until(|m| matches!(m, S2C::ClientAdmin { .. })).await, S2C::ClientAdmin { id: admin_id, admin: true });
+    assert_eq!(
+        user.until(|m| matches!(m, S2C::ClientAdmin { .. })).await,
+        S2C::ClientAdmin { id: admin_id, admin: true }
+    );
 
     // Admins skip channel passwords; others need them.
     admin.send(C2S::JoinChannel { channel: raid, password: None }).await;
-    assert_eq!(admin.until(|m| matches!(m, S2C::ClientMoved { .. })).await, S2C::ClientMoved { id: admin_id, channel: raid });
+    assert_eq!(
+        admin.until(|m| matches!(m, S2C::ClientMoved { .. })).await,
+        S2C::ClientMoved { id: admin_id, channel: raid }
+    );
 
     // Admins make permanent channels, rearrange them and pick the default.
     admin.send(C2S::CreateChannel { parent: None, settings: settings("Music"), temporary: false }).await;
@@ -413,7 +421,10 @@ async fn channels_are_managed_with_permissions() {
     user.send(C2S::JoinChannel { channel: lobby, password: None }).await;
     user.until(|m| matches!(m, S2C::ClientMoved { id, .. } if *id == user_id)).await;
     admin.send(C2S::DeleteChannel { id: lobby }).await;
-    assert_eq!(user.until(|m| matches!(m, S2C::ClientMoved { .. })).await, S2C::ClientMoved { id: user_id, channel: music });
+    assert_eq!(
+        user.until(|m| matches!(m, S2C::ClientMoved { .. })).await,
+        S2C::ClientMoved { id: user_id, channel: music }
+    );
     assert!(user.channels().await.iter().all(|c| c.id != lobby));
 
     // The temporary channel vanished when the admin (its last occupant) left it.
@@ -610,7 +621,8 @@ async fn bans_keep_identities_and_addresses_out() {
 
     // An identity ban kicks them off with the reason...
     admin.send(C2S::Ban { target: mallory_id, duration_secs: None, reason: "spam".into(), include_ip: false }).await;
-    let kicked = S2C::ClientKicked { id: mallory_id, by: admin_id, from_server: true, reason: "banned for good (spam)".into() };
+    let kicked =
+        S2C::ClientKicked { id: mallory_id, by: admin_id, from_server: true, reason: "banned for good (spam)".into() };
     assert_eq!(mallory.until(|m| matches!(m, S2C::ClientKicked { .. })).await, kicked);
     mallory.closed().await;
     // ...and keeps that key out from any address.
@@ -625,15 +637,20 @@ async fn bans_keep_identities_and_addresses_out() {
     // An IP ban also keeps out new keys from that address.
     let eve_ip = Ipv4Addr::new(127, 0, 0, 4);
     let (mut eve, we) = TestClient::connect_from(addr, eve_ip, "eve", &key("eve")).await;
-    admin.send(C2S::Ban { target: welcomed_id(&we), duration_secs: Some(3600), reason: String::new(), include_ip: true }).await;
+    admin
+        .send(C2S::Ban { target: welcomed_id(&we), duration_secs: Some(3600), reason: String::new(), include_ip: true })
+        .await;
     eve.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
     let (_, reply) = TestClient::connect_from(addr, eve_ip, "eve2", &key("eve2")).await;
     let ends = ["59 minutes", "1 hour"].map(|left| format!("You are banned from this server. The ban ends in {left}."));
     assert!(ends.iter().any(|e| e == rejected(&reply)), "{reply:?}");
 
     // Banning the address the admin is on would lock the admin out too.
-    let (_, wb) = TestClient::connect_from(addr, ADMIN_IP, "flatmate", &key("flatmate")).await;
-    admin.send(C2S::Ban { target: welcomed_id(&wb), duration_secs: None, reason: String::new(), include_ip: true }).await;
+    // Held open: a dropped connection could leave before the ban arrives.
+    let (_flatmate, wb) = TestClient::connect_from(addr, ADMIN_IP, "flatmate", &key("flatmate")).await;
+    admin
+        .send(C2S::Ban { target: welcomed_id(&wb), duration_secs: None, reason: String::new(), include_ip: true })
+        .await;
     assert!(error(&mut admin).await.contains("your IP address"));
 
     // The list has both bans; lifting eve's lets her address back in.
@@ -710,9 +727,19 @@ async fn temporary_bans_end() {
     let (mut admin, _, _) = admin_login(addr, ADMIN_IP).await;
     let (mut mallory, wm) = TestClient::connect(addr, "mallory", None).await;
     // Bans count whole seconds, so this one lasts between one and two.
-    admin.send(C2S::Ban { target: welcomed_id(&wm), duration_secs: Some(2), reason: "cool off".into(), include_ip: true }).await;
+    admin
+        .send(C2S::Ban {
+            target: welcomed_id(&wm),
+            duration_secs: Some(2),
+            reason: "cool off".into(),
+            include_ip: true,
+        })
+        .await;
     let kicked = mallory.until(|m| matches!(m, S2C::ClientKicked { .. })).await;
-    assert!(matches!(kicked, S2C::ClientKicked { ref reason, .. } if reason == "banned for less than a minute (cool off)"), "{kicked:?}");
+    assert!(
+        matches!(kicked, S2C::ClientKicked { ref reason, .. } if reason == "banned for less than a minute (cool off)"),
+        "{kicked:?}"
+    );
 
     let (_, reply) = TestClient::connect(addr, "mallory", None).await;
     assert!(rejected(&reply).contains("ends in less than a minute"), "{reply:?}");
@@ -738,8 +765,11 @@ async fn moderators_and_bans_survive_a_restart() {
     admin.send(C2S::SetModerator { channel: gaming, identity: key("mod").identity(), moderator: true }).await;
     let list = admin.channels().await;
     assert_eq!(list.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
-    let (_, wm) = TestClient::connect(addr, "mallory", None).await;
-    admin.send(C2S::Ban { target: welcomed_id(&wm), duration_secs: None, reason: "spam".into(), include_ip: true }).await;
+    // Held open, so the ClientLeft below is the ban's kick and not a disconnect.
+    let (_mallory, wm) = TestClient::connect(addr, "mallory", None).await;
+    admin
+        .send(C2S::Ban { target: welcomed_id(&wm), duration_secs: None, reason: "spam".into(), include_ip: true })
+        .await;
     // The server saves before it kicks.
     admin.until(|m| matches!(m, S2C::ClientLeft { .. })).await;
     task.abort();

@@ -98,17 +98,17 @@ pub fn drop_target(
             return Outcome::NotAllowed(Refusal::TooDeep);
         }
     }
-    if parent != moving.parent {
+    if parent == moving.parent {
+        let current = siblings_now(channels, dragged);
+        if current == Some(position) {
+            return Outcome::Nothing;
+        }
+    } else {
         let taken = channels
             .values()
             .any(|c| c.parent == parent && c.id != dragged && c.name.eq_ignore_ascii_case(&moving.name));
         if taken {
             return Outcome::NotAllowed(Refusal::NameTaken);
-        }
-    } else {
-        let current = siblings_now(channels, dragged);
-        if current == Some(position) {
-            return Outcome::Nothing;
         }
     }
     Outcome::Move(DropTarget { parent, position: position as u32 })

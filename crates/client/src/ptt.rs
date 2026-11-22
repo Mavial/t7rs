@@ -117,11 +117,7 @@ pub fn capture(input: &InputState) -> Option<u16> {
 pub fn label(vk: u16) -> String {
     let known = KEYS.iter().map(|&(v, _, l)| (v, l)).chain(BUTTONS.iter().map(|&(v, _, l)| (v, l)));
     let named = [(CONTROL, "Ctrl"), (SHIFT, "Shift"), (ALT, "Alt")];
-    known
-        .chain(named)
-        .find(|&(v, _)| v == vk)
-        .map(|(_, l)| l.to_owned())
-        .unwrap_or_else(|| format!("Key 0x{vk:02X}"))
+    known.chain(named).find(|&(v, _)| v == vk).map_or_else(|| format!("Key 0x{vk:02X}"), |(_, l)| l.to_owned())
 }
 
 /// Whether the key is held, as far as our own window can tell.
@@ -149,7 +145,7 @@ mod tests {
         let mut codes: Vec<u16> = KEYS.iter().map(|k| k.0).chain(BUTTONS.iter().map(|b| b.0)).collect();
         codes.extend([CONTROL, SHIFT, ALT]);
         let n = codes.len();
-        codes.sort();
+        codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), n);
         assert_eq!(label(0x56), "V");
