@@ -56,7 +56,6 @@ mod tests {
             role: RoleId::EVERYONE,
         };
         assert_eq!(form.override_changes(4, &saved), []);
-        // Moderator's cleared, Admin's left alone, a new role's added.
         let dj = Override::new(RoleId(7), Perms::of(&[Perm::Speak]), Perms::NONE);
         form.overrides = vec![saved[0], saved[2], dj];
         let set = |o: Override| C2S::SetOverride { channel: 4, role: o.role, allow: o.allow(), deny: o.deny() };
@@ -85,7 +84,6 @@ enum Conn {
         address: String,
         password: String,
     },
-    /// `server` keys what is kept per server: `net::canonical_address`.
     Connected {
         server: String,
     },
@@ -155,10 +153,8 @@ struct DragSelf;
 
 struct DragMember(ClientId);
 
-/// Payload while dragging a channel to rearrange the tree.
 struct DragChannel(ChannelId);
 
-/// Payload while dragging a role to reorder the roles.
 struct DragRole(RoleId);
 
 /// Voice is considered blocked when no UDP pong arrived for this long.
@@ -200,16 +196,12 @@ enum Moderation {
     Ban { target: ClientId, name: String, reason: String, length: Option<u64>, include_ip: bool, focused: bool },
 }
 
-/// The Server settings dialog.
 struct ServerSettings {
     tab: SettingsTab,
     /// The ban list; `None` until the server sends it.
     bans: Option<Vec<BanInfo>>,
-    /// The role shown in the Roles tab.
     picked: Pick,
-    /// The picked role's name as typed, saved when the field loses focus.
     name: String,
-    /// A new role's name as typed.
     new_role: String,
 }
 
@@ -258,7 +250,6 @@ struct ChannelForm {
     editing: Option<ChannelId>,
     parent: Option<ChannelId>,
     kind: ChannelKind,
-    /// Which half of the dialog is shown, when editing.
     tab: FormTab,
     name: String,
     topic: String,
@@ -270,9 +261,7 @@ struct ChannelForm {
     password: String,
     temporary: bool,
     focused: bool,
-    /// What the channel sets for each role, as edited here; saved with the rest.
     overrides: Vec<Override>,
-    /// The role the Permissions tab shows.
     role: RoleId,
 }
 
@@ -283,7 +272,6 @@ enum FormTab {
 }
 
 impl ChannelForm {
-    /// What to send for the overrides as edited, against the `saved` ones of `channel`.
     fn override_changes(&self, channel: ChannelId, saved: &[Override]) -> Vec<C2S> {
         let of = |list: &[Override], role| {
             list.iter().find(|o| o.role == role).copied().unwrap_or(Override::new(role, Perms::NONE, Perms::NONE))
@@ -489,7 +477,6 @@ impl App {
     fn open_edit_channel(&mut self, channel: ChannelId) {
         let Some(view) = &self.view else { return };
         let Some(ch) = view.channels.get(&channel) else { return };
-        // Those who may only change its permissions start there.
         let tab = if view.may_in(channel, Perm::Rename) { FormTab::Channel } else { FormTab::Permissions };
         self.channel_dialog = Some(ChannelDialog::Form(ChannelForm {
             editing: Some(channel),
@@ -525,8 +512,6 @@ impl App {
         self.channel_dialog = Some(ChannelDialog::Delete { channel, name: ch.name.clone(), occupants });
     }
 
-    /// Folds the category of that name in the channel tree, or unfolds it,
-    /// remembering that for this server.
     fn fold(&mut self, name: String) {
         let Conn::Connected { server } = &self.conn else { return };
         let folded = self.settings.folded.entry(server.clone()).or_default();
@@ -1257,7 +1242,6 @@ impl App {
                         _ => "",
                     };
                     let folded = self.settings.folded.get(server);
-                    // Whether the top-level channel drawn last is a folded category.
                     let mut in_fold = false;
                     for (row, &(depth, ch_id)) in view.tree().iter().enumerate() {
                         let ch = &view.channels[&ch_id];
@@ -1272,11 +1256,9 @@ impl App {
                             ui.add_space(6.0);
                         }
                         let manages_it = manages(view, Some(ch_id));
-                        // Moving it renumbers its siblings.
                         let may_rearrange = manages_it && manages(view, ch.parent);
                         let clients = view.clients_in(ch_id);
                         let indent = depth as f32 * 18.0;
-                        // A folded category stands in for the channels in it.
                         let inside = |channel| channel == ch_id || (in_fold && view.within(channel, ch_id));
                         let is_mine = mine.is_some_and(inside);
                         let full = ch.max_clients.is_some_and(|m| clients.len() as u32 >= m);
@@ -1370,7 +1352,6 @@ impl App {
                             )
                         };
                         let mut after = name_rect.right() + 6.0;
-                        // Hidden from people without a role, or from them.
                         let hidden = manages_it && view.hidden(ch_id);
                         if hidden {
                             let r = egui::Rect::from_center_size(
@@ -2321,7 +2302,6 @@ impl App {
                 .map(|(tab, label, _)| (tab, label))
                 .collect();
         let Some(&(first, _)) = tabs.first() else {
-            // They may no longer do either.
             self.server_settings = None;
             return;
         };
@@ -2461,8 +2441,6 @@ impl App {
             _ => None,
         };
         let may_create_permanent = view.is_some_and(|v| manages(v, parent));
-        // Who moderates the channel being edited, by nickname when online, for
-        // those who may change that.
         let editing = match dialog {
             ChannelDialog::Form(f) => f.editing,
             _ => None,
@@ -2535,7 +2513,6 @@ impl App {
                     match (form.tab, view.zip(form.editing)) {
                         (FormTab::Permissions, Some((view, channel))) => {
                             permissions_tab(ui, view, channel, form);
-                            // Moderators are picked among the people in a channel, and nobody is in a category.
                             if let Some(list) = moderators.as_ref().filter(|l| !category || !l.is_empty()) {
                                 moderator_list(ui, list, &mut unmoderate);
                             }
@@ -2647,7 +2624,6 @@ impl App {
     }
 }
 
-/// The name, topic, password and limit of a channel being made or edited:
 /// a category has only the first two, and only those who manage the channel
 /// change the last two.
 fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, may_create_permanent: bool, may_manage: bool) {
@@ -2697,9 +2673,6 @@ fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, may_create_permanen
     }
 }
 
-/// The Permissions tab of the channel dialog: for the picked role, whether
-/// the channel allows, denies or inherits each permission a channel can set,
-/// and what inheriting gives. Only roles below your own can be changed.
 fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, form: &mut ChannelForm) {
     let (Some(roles), Some(saved)) = (&view.roles, view.channels.get(&channel)) else {
         ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
@@ -2708,7 +2681,6 @@ fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, for
     if form.role != RoleId::EVERYONE && roles.role(form.role).is_none() {
         form.role = RoleId::EVERYONE;
     }
-    // Moderators of the channel hold the Moderator role in it.
     let me = view.me();
     let mut mine = me.map_or(Rank::EVERYONE, |me| roles.rank(me.identity));
     if me.is_some_and(|me| view.moderates(me.identity, channel)) {
@@ -2718,7 +2690,6 @@ fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, for
     row(ui, "Role", |ui| {
         egui::ComboBox::from_id_salt("override-role").selected_text(name(form.role)).width(220.0).show_ui(ui, |ui| {
             for role in roles.ranked.iter().map(|r| r.id).chain([RoleId::EVERYONE]) {
-                // A dot marks the roles this channel sets something for.
                 let set = form.overrides.iter().any(|o| o.role == role);
                 let label = if set { format!("{}  •", name(role)) } else { name(role).to_owned() };
                 ui.selectable_value(&mut form.role, role, label);
@@ -2764,7 +2735,6 @@ fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, for
     }
 }
 
-/// Deny, inherit or allow, as three segments: a cross, a dash and a check.
 fn tri_state(ui: &mut egui::Ui, setting: &mut Setting, perm: Perm) {
     let options = [
         (Setting::Allow, Icon::Check, theme::GREEN, "Allow"),
@@ -2780,7 +2750,6 @@ fn tri_state(ui: &mut egui::Ui, setting: &mut Setting, perm: Perm) {
         Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Inside,
     );
-    // Laid out right to left: Allow is rightmost.
     for (i, (option, icon, color, tip)) in options.into_iter().enumerate() {
         let min = egui::pos2(track.right() - 2.0 - segment.x * (i + 1) as f32, track.top() + 2.0);
         let rect = egui::Rect::from_min_size(min, segment);
@@ -2802,7 +2771,6 @@ fn tri_state(ui: &mut egui::Ui, setting: &mut Setting, perm: Perm) {
     }
 }
 
-/// Who moderates a channel, by nickname when online, each with Remove.
 fn moderator_list(ui: &mut egui::Ui, list: &[(Identity, Option<String>)], unmoderate: &mut Option<Identity>) {
     section(ui, "Moderators");
     if list.is_empty() {
@@ -2826,8 +2794,6 @@ fn moderator_list(ui: &mut egui::Ui, list: &[(Identity, Option<String>)], unmode
     }
 }
 
-/// Whether the server lets this client manage channels in `place`: a channel
-/// and those below it, or the top level with `None`.
 fn manages(view: &ServerView, place: Option<ChannelId>) -> bool {
     match place {
         Some(p) => view.may_in(p, Perm::ManageChannels),
@@ -3155,7 +3121,6 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color:
     clicked
 }
 
-/// The Bans tab: everyone banned, each with Unban. The server answers an unban with the new list.
 fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
     match bans {
         None => {
@@ -3177,9 +3142,6 @@ fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
     }
 }
 
-/// The Roles tab: the roles in order on the left, highest first, and what the
-/// picked one may do and who holds it on the right. Only roles below your
-/// own can be changed.
 fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut ServerSettings, send: &mut Vec<C2S>) {
     let mine = view.me().map_or(Rank::EVERYONE, |me| roles.rank(me.identity));
     let below = |role: RoleId| mine > roles.height(role);
@@ -3209,7 +3171,6 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
                 if below(role.id) {
                     resp.dnd_set_drag_payload(DragRole(role.id));
                 }
-                // Dropped here, it takes this row's place, if that is below their own role.
                 let fits = mine > roles.height_at(position);
                 if let Some(dragged) = dragging.filter(|d| *d != role.id && fits && resp.contains_pointer()) {
                     let y = if roles.height(dragged) > roles.height(role.id) {
@@ -3319,8 +3280,6 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
     });
 }
 
-/// A row in the role list: the name, a faint note on the right, and a grip
-/// cursor when it can be dragged.
 fn role_row(ui: &mut egui::Ui, name: &str, note: &str, picked: bool, draggable: bool) -> egui::Response {
     let sense = if draggable { Sense::click_and_drag() } else { Sense::click() };
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), sense);
@@ -3348,7 +3307,6 @@ fn role_row(ui: &mut egui::Ui, name: &str, note: &str, picked: bool, draggable: 
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A switch per permission, in two columns; `changed` gets the new set when one flips.
 fn perm_switches(ui: &mut egui::Ui, perms: Perms, enabled: bool, mut changed: impl FnMut(Perms)) {
     ui.add_enabled_ui(enabled, |ui| {
         ui.columns(2, |columns| {

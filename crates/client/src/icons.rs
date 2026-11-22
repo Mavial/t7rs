@@ -143,7 +143,6 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::ChevronRight => pen.poly(&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)], false),
         Icon::ChevronDown => pen.poly(&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)], false),
         Icon::Eye => {
-            // Two lids meeting at the corners, and the pupil.
             let mut lids = Pen::arc_points(12.0, 21.0, 12.0, 225.0, 315.0);
             lids.extend(Pen::arc_points(12.0, 4.0, 12.0, 45.0, 135.0));
             pen.poly(&lids, true);

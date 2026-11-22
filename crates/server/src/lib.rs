@@ -81,10 +81,7 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
     }
 }
 
-/// The roles saved in `data_dir`, else a fresh server's. Until someone owns
-/// the server there is a claim token, which the log shows.
 fn roles(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<RoleStore> {
-    // Admin tokens came before roles: the claim token replaces them.
     if cfg.admin_token.is_some() {
         tracing::warn!("the config's admin_token is no longer used and can be deleted; claim ownership instead");
     }
@@ -125,7 +122,6 @@ pub fn reset_owner_claim(data_dir: &Path) -> std::io::Result<String> {
     Ok(token)
 }
 
-/// Whoever enters it first in T7 becomes the server's owner.
 fn claim_token() -> std::io::Result<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(format!("no system randomness: {e}")))?;

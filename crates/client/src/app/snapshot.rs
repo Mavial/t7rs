@@ -49,7 +49,6 @@ fn view() -> ServerView {
     afk.temporary = true;
     afk.owner = Some(7);
     let music = channel(6, None, "Music", 4);
-    // Only moderators see it.
     let mut staff = channel(7, None, "Staff", 5);
     staff.kind = ChannelKind::Category;
     let view_only = Perms::of(&[Perm::View]);
@@ -330,11 +329,8 @@ const SCENES: &[Scene] = &[
     }),
 ];
 
-/// Where the pointer goes in a frame, and whether the right button goes down
-/// (`Some(true)`) or up there.
 type Step = (f32, f32, Option<bool>);
 
-/// A scene that moves the pointer first, one step a frame, to open a menu.
 type Menu = (&'static str, (u32, u32), fn(&egui::Context) -> App, &'static [Step]);
 
 const MENUS: &[Menu] = &[
@@ -366,8 +362,6 @@ fn render(
     let mut px = vec![[0u8; 4]; (w * h) as usize];
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w as f32 / scale, h as f32 / scale));
     // Enough frames for layout to settle and fades to finish.
-    // Steps start once there is a layout to point at, and frames come quickly
-    // enough for a press and release to make a click.
     for frame in 0..6 + steps.len() {
         let time = Some(frame as f64 / 4.0);
         let mut raw = egui::RawInput { screen_rect: Some(screen), time, ..Default::default() };

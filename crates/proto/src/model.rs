@@ -16,7 +16,6 @@ pub struct ServerView {
     /// Every role and who holds them, while this client may edit them or
     /// channel permissions.
     pub roles: Option<Roles>,
-    /// What the server lets this client do, and where.
     permissions: Permissions,
     /// Channel tree in display order: (depth, channel id).
     tree: Vec<(usize, ChannelId)>,

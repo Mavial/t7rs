@@ -353,7 +353,6 @@ fn id_of(list: &[ChannelInfo], name: &str) -> ChannelId {
     list.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no channel {name}")).id
 }
 
-/// An empty directory of its own for a test's server files.
 fn data_dir(test: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("t7-e2e-{test}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -361,14 +360,12 @@ fn data_dir(test: &str) -> PathBuf {
     dir
 }
 
-/// The claim token the server keeping its files in `dir` printed.
 fn claim_token(dir: &Path) -> String {
     let text = std::fs::read_to_string(dir.join("roles.toml")).expect("roles.toml");
     let file: toml::Table = toml::from_str(&text).unwrap();
     file.get("claim_token").and_then(|t| t.as_str()).unwrap_or_else(|| panic!("no claim token: {text}")).to_owned()
 }
 
-/// Connects as "admin" from `from` and claims the server keeping its files in `dir`.
 async fn claim(addr: SocketAddr, dir: &Path, from: Ipv4Addr) -> (TestClient, ClientId, Vec<ChannelInfo>) {
     let (mut owner, welcome) = TestClient::connect_from(addr, from, "admin", &key("admin")).await;
     let S2C::Welcome { your_id, channels, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
@@ -377,8 +374,6 @@ async fn claim(addr: SocketAddr, dir: &Path, from: Ipv4Addr) -> (TestClient, Cli
     (owner, your_id, channels)
 }
 
-/// A server of the default config keeping its files in a directory for
-/// `test`, and its owner "admin", connected from `from`.
 async fn start_owned(test: &str, from: Ipv4Addr) -> (SocketAddr, TestClient, ClientId, Vec<ChannelInfo>) {
     let dir = data_dir(test);
     let (addr, _) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
@@ -407,7 +402,6 @@ async fn error(c: &mut TestClient) -> String {
     }
 }
 
-/// What a welcomed client may do in `channel`.
 fn may_in(welcome: &S2C, channel: ChannelId) -> Perms {
     let S2C::Welcome { permissions, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
     *permissions.channels.get(&channel).unwrap_or_else(|| panic!("no channel {channel}"))
@@ -419,17 +413,15 @@ async fn the_first_to_claim_owns_the_server() {
     let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
     let (mut alice, wa) = TestClient::connect(addr, "alice", None).await;
     let (mut bob, wb) = TestClient::connect(addr, "bob", None).await;
-    // Saved before the server took connections.
     let token = claim_token(&dir);
     let alice_id = welcomed_id(&wa);
     let S2C::Welcome { permissions, .. } = &wb else { unreachable!() };
     assert!(!permissions.server.has(Perm::ManageRoles));
-    alice.recv().await; // bob joined
+    alice.recv().await;
 
     bob.send(C2S::ClaimOwnership { token: "guess".into() }).await;
     assert!(error(&mut bob).await.contains("wrong"));
 
-    // Alice may do everything now and gets the roles, and everyone sees she owns the server.
     alice.send(C2S::ClaimOwnership { token: token.clone() }).await;
     let S2C::Permissions(mine) = alice.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
     assert_eq!(mine.server, Perms::ALL);
@@ -439,7 +431,6 @@ async fn the_first_to_claim_owns_the_server() {
     let owner = S2C::ClientRole { id: alice_id, role: Some("Owner".into()) };
     assert_eq!(bob.until(|m| matches!(m, S2C::ClientRole { .. })).await, owner);
 
-    // The token is used up, for good.
     bob.send(C2S::ClaimOwnership { token: token.clone() }).await;
     assert!(error(&mut bob).await.contains("already used"));
     let saved = std::fs::read_to_string(dir.join("roles.toml")).unwrap();
@@ -462,7 +453,6 @@ async fn the_first_to_claim_owns_the_server() {
 #[tokio::test]
 async fn clients_from_before_roles_are_told_to_update() {
     let addr = start(DEFAULT_CONFIG).await;
-    // Protocol 5 said Hello the same way, so it gets the reason.
     let (_, reply) = TestClient::connect_as(addr, "old", None, 5).await;
     assert!(rejected(&reply).contains("please update your T7"), "{reply:?}");
 }
@@ -470,7 +460,6 @@ async fn clients_from_before_roles_are_told_to_update() {
 #[tokio::test]
 async fn installs_from_before_roles_keep_their_moderators() {
     let dir = data_dir("migrate");
-    // What 0.4 left: an admin token, in its file and in the config, and a moderated channel.
     std::fs::write(dir.join("admin_token.txt"), "old-token").unwrap();
     let moderator = key("mod").identity().to_hex();
     let channels = format!(
@@ -484,7 +473,6 @@ async fn installs_from_before_roles_keep_their_moderators() {
     assert!(!dir.join("admin_token.txt").exists(), "the admin token is gone");
     assert!(!claim_token(&dir).is_empty(), "a claim token replaces it");
 
-    // The moderator moderates Gaming and below, as before.
     let S2C::Welcome { channels, .. } = &wm else { unreachable!() };
     let [gaming, squad, afk] = ["Gaming", "Squad", "AFK"].map(|name| id_of(channels, name));
     assert_eq!(channels.iter().find(|c| c.id == gaming).unwrap().moderators, [key("mod").identity()]);
@@ -500,7 +488,6 @@ async fn installs_from_before_roles_keep_their_moderators() {
         matches!(user.until(|m| matches!(m, S2C::ClientKicked { .. })).await, S2C::ClientKicked { id, .. } if id == user_id)
     );
 
-    // The old token claims nothing.
     moder.send(C2S::ClaimOwnership { token: "old-token".into() }).await;
     assert!(error(&mut moder).await.contains("wrong"));
     task.abort();
@@ -550,7 +537,6 @@ async fn channels_are_managed_with_permissions() {
     let list = user.channels().await;
     assert!(list.iter().any(|c| c.name == "Raid Night" && c.has_password));
 
-    // The owner skips channel passwords; others need them.
     let (mut admin, admin_id, _) = claim(addr, &dir, HOME).await;
     admin.send(C2S::JoinChannel { channel: raid, password: None }).await;
     assert_eq!(
@@ -558,7 +544,6 @@ async fn channels_are_managed_with_permissions() {
         S2C::ClientMoved { id: admin_id, channel: raid }
     );
 
-    // The owner makes permanent channels, rearranges them and picks the default.
     admin
         .send(C2S::CreateChannel {
             parent: None,
@@ -584,7 +569,6 @@ async fn channels_are_managed_with_permissions() {
     );
     assert!(user.channels().await.iter().all(|c| c.id != lobby));
 
-    // The temporary channel vanished when the owner (its last occupant) left it.
     admin.send(C2S::JoinChannel { channel: music, password: None }).await;
     let list = admin.channels().await;
     assert!(list.iter().all(|c| c.id != raid), "empty temporary channel should be gone");
@@ -671,7 +655,6 @@ async fn moderators_kick_from_their_channels_only() {
     user.send(C2S::JoinChannel { channel: squad, password: None }).await;
     moder.until(|m| *m == S2C::ClientMoved { id: user_id, channel: squad }).await;
 
-    // Nobody else may kick, and a moderator may not kick off the server, nor the owner.
     user.send(C2S::Kick { target: mod_id, from_server: false, reason: String::new() }).await;
     assert!(error(&mut user).await.contains("can't kick"));
     moder.send(C2S::Kick { target: user_id, from_server: true, reason: "bye".into() }).await;
@@ -690,7 +673,6 @@ async fn moderators_kick_from_their_channels_only() {
     admin.send(C2S::Kick { target: user_id, from_server: false, reason: String::new() }).await;
     assert!(error(&mut admin).await.contains("nowhere to kick"));
 
-    // An owner's server kick: the notice arrives before the connection closes.
     admin.send(C2S::Kick { target: user_id, from_server: true, reason: "x".repeat(MAX_REASON_LEN + 1) }).await;
     assert!(error(&mut admin).await.contains("at most"));
     admin.send(C2S::Kick { target: user_id, from_server: true, reason: "enough".into() }).await;
@@ -735,7 +717,6 @@ async fn kicked_people_land_where_a_joining_client_would() {
 
 #[tokio::test]
 async fn bans_keep_identities_and_addresses_out() {
-    // The owner comes from another address than the people it bans.
     let (addr, mut admin, admin_id, _) = start_owned("bans", ADMIN_IP).await;
     let (mut mallory, wm) = TestClient::connect(addr, "mallory", None).await;
     let mallory_id = welcomed_id(&wm);
@@ -766,7 +747,6 @@ async fn bans_keep_identities_and_addresses_out() {
     let ends = ["59 minutes", "1 hour"].map(|left| format!("You are banned from this server. The ban ends in {left}."));
     assert!(ends.iter().any(|e| e == rejected(&reply)), "{reply:?}");
 
-    // Banning the address the owner is on would lock the owner out too.
     // Held open: a dropped connection could leave before the ban arrives.
     let (_flatmate, wb) = TestClient::connect_from(addr, ADMIN_IP, "flatmate", &key("flatmate")).await;
     admin
@@ -791,7 +771,6 @@ async fn bans_keep_identities_and_addresses_out() {
     let (_, reply) = TestClient::connect_from(addr, eve_ip, "eve", &key("eve")).await;
     welcomed_id(&reply);
 
-    // Only those who may ban see or lift bans.
     let (mut user, _) = TestClient::connect(addr, "user", None).await;
     user.send(C2S::ListBans).await;
     assert!(error(&mut user).await.contains("can't see the ban list"));
@@ -823,7 +802,6 @@ async fn ip_bans_eject_everyone_at_that_address() {
 async fn moderators_dont_rearrange_channels() {
     let (addr, mut admin, _, channels) = start_owned("rearrange", HOME).await;
     let afk = id_of(&channels, "AFK");
-    // Not even of the channel itself.
     let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
     admin.send(C2S::SetModerator { channel: afk, identity: key("mod").identity(), moderator: true }).await;
     let mut before = moder.channels().await;
@@ -872,10 +850,8 @@ async fn temporary_bans_end() {
 async fn moderators_and_bans_survive_a_restart() {
     let dir = data_dir("moderation");
     let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
-    // Off the banned address, to connect again after the restart.
     let (mut admin, _, channels) = claim(addr, &dir, ADMIN_IP).await;
     let gaming = id_of(&channels, "Gaming");
-    // Not everyone chooses moderators.
     let (mut user, _) = TestClient::connect(addr, "user", None).await;
     user.send(C2S::SetModerator { channel: gaming, identity: key("user").identity(), moderator: true }).await;
     assert!(error(&mut user).await.contains("can't choose who moderates"));
@@ -916,9 +892,7 @@ async fn moderators_and_bans_survive_a_restart() {
 }
 
 impl TestClient {
-    /// Changes the roles and waits for the roles the change led to.
     async fn change_roles(&mut self, change: RoleChange) -> Roles {
-        // Skips the roles sent before.
         self.send(C2S::Ping { nonce: 0 }).await;
         self.until(|m| matches!(m, S2C::Pong { .. })).await;
         self.send(C2S::ChangeRoles(change)).await;
@@ -944,7 +918,6 @@ async fn people_act_only_on_those_below_their_role() {
     owner.change_roles(assign("boss", RoleId::ADMIN, true)).await;
     let roles = owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
     assert_eq!(roles.members[&key("mod").identity()].roles, [RoleId::MODERATOR]);
-    // Everyone sees who holds which role.
     let retitled = S2C::ClientRole { id: mod_id, role: Some("Moderator".into()) };
     assert_eq!(user.until(|m| matches!(m, S2C::ClientRole { id, .. } if *id == mod_id)).await, retitled);
     let S2C::Permissions(mine) = moder.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
@@ -955,7 +928,6 @@ async fn people_act_only_on_those_below_their_role() {
     moder.until(|m| *m == S2C::ClientMoved { id: admin_id, channel: hangout }).await;
     moder.until(|m| *m == S2C::ClientMoved { id: user_id, channel: hangout }).await;
 
-    // A moderator kicks people without a role, but not an admin or the owner.
     let kick = |target| C2S::Kick { target, from_server: false, reason: String::new() };
     moder.send(kick(admin_id)).await;
     assert!(error(&mut moder).await.contains("their role isn't below yours"));
@@ -965,13 +937,11 @@ async fn people_act_only_on_those_below_their_role() {
     assert!(error(&mut moder).await.contains("can't ban"));
     moder.send(kick(user_id)).await;
     user.until(|m| matches!(m, S2C::ClientKicked { id, .. } if *id == user_id)).await;
-    // An admin kicks the moderator.
     moder.send(C2S::JoinChannel { channel: hangout, password: None }).await;
     admin.until(|m| *m == S2C::ClientMoved { id: mod_id, channel: hangout }).await;
     admin.send(kick(mod_id)).await;
     moder.until(|m| matches!(m, S2C::ClientKicked { id, .. } if *id == mod_id)).await;
 
-    // An admin hands out and changes only the roles below theirs.
     let refused = [
         assign("user", RoleId::ADMIN, true),
         assign("boss", RoleId::ADMIN, false),
@@ -986,10 +956,8 @@ async fn people_act_only_on_those_below_their_role() {
     let dj = roles.ranked.last().unwrap().id;
     let roles = admin.change_roles(assign("user", dj, true)).await;
     assert_eq!(roles.members[&key("user").identity()].roles, [dj]);
-    // Moderators may not manage roles at all.
     moder.send(C2S::ChangeRoles(assign("user", dj, false))).await;
     assert!(error(&mut moder).await.contains("can't manage roles"));
-    // Nor may anyone choose moderators of a higher role than theirs.
     let (mut nobody, _) = TestClient::connect(addr, "nobody", None).await;
     nobody.send(C2S::SetModerator { channel: hangout, identity: key("boss").identity(), moderator: true }).await;
     assert!(error(&mut nobody).await.contains("can't choose who moderates"));
@@ -1012,7 +980,6 @@ async fn roles_and_who_holds_them_survive_a_restart() {
     task.abort();
     drop((owner, bob));
 
-    // Bob still holds both, DJ shows as the higher one, and his new nickname is remembered.
     let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
     let (mut owner, _) = TestClient::connect(addr, "admin", None).await;
     let S2C::Roles(roles) = owner.until(|m| matches!(m, S2C::Roles(_))).await else { unreachable!() };
@@ -1024,7 +991,6 @@ async fn roles_and_who_holds_them_survive_a_restart() {
     let S2C::Roles(roles) = owner.until(|m| matches!(m, S2C::Roles(_))).await else { unreachable!() };
     assert_eq!(roles.members[&key("bob").identity()].nickname, "Bobby");
 
-    // Taken while he is offline, and that sticks too.
     drop(bob);
     owner.until(|m| matches!(m, S2C::ClientLeft { .. })).await;
     owner.change_roles(assign("bob", dj, false)).await;
@@ -1053,7 +1019,6 @@ async fn an_owner_reset_hands_the_server_to_the_next_claimer() {
     task.abort();
     drop(owner);
 
-    // The owner lost their key: the host makes a new claim token.
     let token = t7_server::reset_owner_claim(&dir).unwrap();
     assert_eq!(claim_token(&dir), token);
     let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
@@ -1071,8 +1036,6 @@ async fn an_owner_reset_hands_the_server_to_the_next_claimer() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Lobby, then Staff with Office in it, which Everyone may not view but the
-/// Moderator role may, and AFK.
 const PRIVATE: &str = r#"
 [[channels]]
 name = "Lobby"
@@ -1103,8 +1066,6 @@ fn names(list: &[ChannelInfo]) -> Vec<&str> {
 }
 
 impl TestClient {
-    /// Everything that arrives until the answer to a ping: what the server
-    /// sent this client before it handled the ping.
     async fn drain(&mut self) -> Vec<S2C> {
         self.send(C2S::Ping { nonce: 9 }).await;
         let mut got = Vec::new();
@@ -1122,7 +1083,6 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     let dir = data_dir("hidden");
     let (addr, task) = start_in(PRIVATE, Some(dir.clone())).await;
     let (mut owner, _, _) = claim(addr, &dir, HOME).await;
-    // The owner sees every channel, once it is the owner.
     let S2C::Welcome { channels, .. } = TestClient::connect(addr, "admin", None).await.1 else { unreachable!() };
     let [lobby, staff, office] = ["Lobby", "Staff", "Office"].map(|name| id_of(&channels, name));
     let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
@@ -1133,17 +1093,14 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     assert!(!permissions.sees(staff) && !permissions.sees(office));
     assert!(channels.iter().all(|c| c.overrides.is_empty()), "only editors get overrides");
 
-    // Moderators hold Everyone too, and there the Moderator role's allow beats its deny.
     owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
     assert_eq!(names(&moder.channels().await), ["AFK", "Lobby", "Office", "Staff"]);
 
-    // In there, the moderator vanishes for the user, not for the owner.
     moder.send(C2S::JoinChannel { channel: office, password: None }).await;
     assert_eq!(user.until(|m| matches!(m, S2C::ClientHidden { .. })).await, S2C::ClientHidden { id: mod_id });
     for c in [&mut owner, &mut moder] {
         c.until(|m| *m == S2C::ClientMoved { id: mod_id, channel: office }).await;
     }
-    // Someone connecting now doesn't see them either, nor what they say to the server.
     let (mut late, wl) = TestClient::connect(addr, "late", None).await;
     let S2C::Welcome { clients, .. } = &wl else { unreachable!() };
     assert!(clients.iter().all(|c| c.id != mod_id), "{clients:?}");
@@ -1152,15 +1109,11 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     let heard = late.drain().await;
     assert!(heard.iter().all(|m| !matches!(m, S2C::Text { from, .. } if *from == mod_id)), "{heard:?}");
 
-    // The user can't join it, or reach the moderator.
     user.send(C2S::JoinChannel { channel: office, password: None }).await;
     assert_eq!(error(&mut user).await, "channel does not exist");
     user.send(C2S::SendText { target: TextTarget::Client(mod_id), text: "hi".into() }).await;
     assert!(error(&mut user).await.contains("no longer online"));
 
-    // Without the role, the moderator may not view where they are, so they
-    // go to the default channel, back in everyone's view. They hear of that
-    // before the moderator who stays goes out of their view.
     let (mut stays, ws) = TestClient::connect(addr, "mod2", None).await;
     let stays_id = welcomed_id(&ws);
     owner.change_roles(assign("mod2", RoleId::MODERATOR, true)).await;
@@ -1179,8 +1132,6 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Games denies Everyone Speak and Send, and allows the Moderator role Speak;
-/// Squad in it allows Everyone Send again; Duo in Squad sets nothing.
 const LAYERED: &str = r#"
 [[channels]]
 name = "Lobby"
@@ -1208,7 +1159,6 @@ name = "Games"
     name = "Duo"
 "#;
 
-/// Whether `permissions` let them speak and send messages in `channel`.
 fn talks(permissions: &perms::Permissions, channel: ChannelId) -> (bool, bool) {
     (permissions.may_in(channel, Perm::Speak), permissions.may_in(channel, Perm::SendMessages))
 }
@@ -1223,12 +1173,9 @@ async fn the_closest_setting_wins_inherit_takes_the_parents_and_allow_beats_deny
     let S2C::Welcome { permissions, .. } = &wu else { unreachable!() };
     assert_eq!(talks(permissions, lobby), (true, true));
     assert_eq!(talks(permissions, games), (false, false));
-    // Squad says nothing about Speak, so Games' deny holds; its own allow
-    // of Send is closer than Games' deny.
     assert_eq!(talks(permissions, squad), (false, true));
     assert_eq!(talks(permissions, duo), (false, true), "Duo inherits Squad");
 
-    // Holding Everyone and Moderator, Games' allow for Moderator beats its deny for Everyone.
     let (mut moder, _) = TestClient::connect(addr, "mod", None).await;
     owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
     let S2C::Permissions(p) = moder.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
@@ -1267,14 +1214,12 @@ async fn a_category_is_never_joined_or_nested() {
     admin.send(temporary).await;
     assert!(error(&mut admin).await.contains("can't be temporary"));
 
-    // Channels go inside it, and people into those.
     admin.send(new_channel("Squad", Some(games), ChannelKind::Voice)).await;
     let list = admin.channels().await;
     let squad = id_of(&list, "Squad");
     assert_eq!(list.iter().find(|c| c.id == squad).unwrap().parent, Some(games));
     let moved = admin.until(|m| matches!(m, S2C::ClientMoved { .. })).await;
     assert_eq!(moved, S2C::ClientMoved { id: admin_id, channel: squad });
-    // Someone who may only make temporary channels makes no categories.
     let (mut user, _) = TestClient::connect(addr, "user", None).await;
     user.send(new_channel("Mine", None, ChannelKind::Category)).await;
     assert!(error(&mut user).await.contains("can't create permanent channels"));
@@ -1284,13 +1229,11 @@ fn set(channel: ChannelId, role: RoleId, allow: &[Perm], deny: &[Perm]) -> C2S {
     C2S::SetOverride { channel, role, allow: Perms::of(allow), deny: Perms::of(deny) }
 }
 
-/// What `channel` sets per role, in `list`.
 fn overrides_in(list: &[ChannelInfo], channel: ChannelId) -> Vec<perms::Override> {
     list.iter().find(|c| c.id == channel).unwrap_or_else(|| panic!("no channel {channel}")).overrides.clone()
 }
 
 impl TestClient {
-    /// Waits for a channel list in which `channel` sets something.
     async fn overrides(&mut self, channel: ChannelId) -> Vec<perms::Override> {
         let list = self
             .until(|m| matches!(m, S2C::Channels(l) if l.iter().any(|c| c.id == channel && !c.overrides.is_empty())))
@@ -1313,13 +1256,11 @@ async fn overrides_take_effect_at_once_and_survive_a_restart() {
         c.until(|m| *m == S2C::ClientMoved { id: user_id, channel: hangout }).await;
     }
 
-    // Hidden from Everyone, the channel is gone for the user, who lands in the default channel.
     owner.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::View])).await;
     let hidden = perms::Override::new(RoleId::EVERYONE, Perms::NONE, Perms::of(&[Perm::View]));
     assert_eq!(owner.overrides(hangout).await, [hidden]);
     assert!(user.channels().await.iter().all(|c| c.id != hangout));
     assert_eq!(user.recv().await, S2C::ClientMoved { id: user_id, channel: lobby });
-    // Nobody may hide the default channel.
     owner.send(set(lobby, RoleId::EVERYONE, &[], &[Perm::View])).await;
     assert!(error(&mut owner).await.contains("see the default channel"));
     task.abort();
@@ -1345,10 +1286,8 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     owner.change_roles(assign("boss", RoleId::ADMIN, true)).await;
     owner.change_roles(assign("mod", RoleId::MODERATOR, true)).await;
 
-    // Moderators may not manage permissions.
     moder.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::Speak])).await;
     assert!(error(&mut moder).await.contains("can't change this channel's permissions"));
-    // Admins may, for roles below theirs.
     boss.send(set(hangout, RoleId::ADMIN, &[], &[Perm::Speak])).await;
     assert!(error(&mut boss).await.contains("roles below your own"));
     boss.send(set(hangout, RoleId(99), &[], &[Perm::Speak])).await;
@@ -1357,8 +1296,6 @@ async fn people_set_permissions_only_where_they_may_and_for_roles_below_theirs()
     let granted = perms::Override::new(RoleId::MODERATOR, Perms::of(&[Perm::ManagePermissions]), Perms::NONE);
     assert_eq!(owner.overrides(hangout).await, [granted]);
 
-    // Now moderators may there, and so get the roles to pick from, but only
-    // for the roles below theirs, and only there.
     let S2C::Permissions(p) = moder.until(|m| matches!(m, S2C::Permissions(_))).await else { unreachable!() };
     assert!(p.may_in(hangout, Perm::ManagePermissions) && !p.may_in(lobby, Perm::ManagePermissions));
     moder.until(|m| matches!(m, S2C::Roles(_))).await;
