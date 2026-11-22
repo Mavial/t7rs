@@ -405,7 +405,7 @@ pub trait ChannelTree {
     fn channels(&self) -> impl Iterator<Item = &ChannelInfo>;
 }
 
-fn path(scope: Scope, tree: &impl ChannelTree) -> Vec<&ChannelInfo> {
+fn self_then_ancestors(scope: Scope, tree: &impl ChannelTree) -> Vec<&ChannelInfo> {
     let mut path = Vec::new();
     let mut at = match scope {
         Scope::Server => None,
@@ -474,7 +474,7 @@ impl Roles {
         if self.owner == Some(who.identity) {
             return Standing { perms: Perms::ALL, rank: Rank::OWNER };
         }
-        let path = path(scope, tree);
+        let path = self_then_ancestors(scope, tree);
         let owns_room = path.iter().any(|c| c.temporary && c.creator == Some(who.client));
         let moderates = path.iter().any(|c| c.moderators.contains(&who.identity));
 
@@ -510,7 +510,7 @@ impl Roles {
 
     /// What someone with no role may do in `channel`.
     pub fn everyone_in(&self, channel: ChannelId, tree: &impl ChannelTree) -> Perms {
-        self.grant(&[RoleId::EVERYONE], &path(Scope::Channel(channel), tree))
+        self.grant(&[RoleId::EVERYONE], &self_then_ancestors(Scope::Channel(channel), tree))
     }
 
     /// What someone holding just `role` would get in `channel`, as given, if
@@ -518,7 +518,7 @@ impl Roles {
     pub fn inherited(&self, role: RoleId, channel: &ChannelInfo, tree: &impl ChannelTree) -> Perms {
         let mut here = channel.clone();
         here.overrides.retain(|o| o.role != role);
-        let mut path = path(Scope::within(here.parent), tree);
+        let mut path = self_then_ancestors(Scope::within(here.parent), tree);
         path.insert(0, &here);
         let held = if role == RoleId::EVERYONE { vec![role] } else { vec![RoleId::EVERYONE, role] };
         self.grant(&held, &path)
@@ -531,7 +531,7 @@ impl Roles {
         let all: BTreeMap<ChannelId, Perms> =
             tree.channels().map(|c| (c.id, self.resolve(who, Scope::Channel(c.id), tree).perms)).collect();
         let shows = |id| all.get(&id).is_some_and(|p| p.has(Perm::View) || p.has(Perm::ManageChannels));
-        let sees = |c: &ChannelInfo| path(Scope::Channel(c.id), tree).iter().all(|c| shows(c.id));
+        let sees = |c: &ChannelInfo| self_then_ancestors(Scope::Channel(c.id), tree).iter().all(|c| shows(c.id));
         let channels = tree.channels().filter(|c| sees(c)).map(|c| (c.id, all[&c.id])).collect();
         Permissions { server: self.resolve(who, Scope::Server, tree).perms, channels }
     }
