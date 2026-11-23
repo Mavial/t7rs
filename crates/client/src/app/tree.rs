@@ -268,7 +268,7 @@ impl<'a> Tree<'a> {
         let view = self.view;
         let manages_it = manages(view, Scope::Channel(ch.id));
         let clients = view.clients_in(ch.id);
-        let stands_for = |channel| channel == ch.id || (folded && view.within(channel, ch.id));
+        let stands_for = |channel| channel == ch.id || (folded && t7_proto::tree::within(view, channel, ch.id));
         let people =
             if folded { view.clients.values().filter(|c| stands_for(c.channel)).count() } else { clients.len() };
         ChannelRow {
@@ -325,7 +325,7 @@ impl<'a> Tree<'a> {
             if let Outcome::NotAllowed(why) = outcome {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
                 egui::Tooltip::for_widget(&resp).at_pointer().show(|ui| {
-                    ui.label(RichText::new(why.message()).color(theme::TEXT_DIM));
+                    ui.label(RichText::new(channel_drop::refusal(why)).color(theme::TEXT_DIM));
                 });
             }
             if let (Dragging::Channel(dragged), Outcome::Move(target)) = (self.dragging, outcome)

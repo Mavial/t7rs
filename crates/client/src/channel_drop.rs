@@ -1,10 +1,7 @@
-//! Where a dragged channel lands in the tree, checked against the same rules
-//! the server applies in `Channels::move_to`, so a drop it would refuse is
-//! shown as not allowed instead of failing after the fact.
-
 use std::collections::HashMap;
 
-use t7_proto::{ChannelId, ChannelInfo, ChannelKind, MAX_CHANNEL_DEPTH};
+use t7_proto::tree::{self, Misplaced};
+use t7_proto::{ChannelId, ChannelInfo, MAX_CHANNEL_DEPTH};
 
 /// Which part of the hovered row the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,33 +24,20 @@ impl Zone {
     }
 }
 
-/// The arguments of `C2S::MoveChannel`: `position` is the index among the new
-/// siblings once the dragged channel has left its old place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DropTarget {
     pub parent: Option<ChannelId>,
     pub position: u32,
 }
 
-/// Why the server would refuse a drop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refusal {
-    CategoryPlacement,
-    IntoItself,
-    PermanentUnderTemporary,
-    TooDeep,
-    NameTaken,
-}
-
-impl Refusal {
-    pub fn message(self) -> String {
-        match self {
-            Refusal::CategoryPlacement => "Categories stay at the top level".into(),
-            Refusal::IntoItself => "A channel can't go inside itself".into(),
-            Refusal::PermanentUnderTemporary => "Permanent channels can't go inside a temporary one".into(),
-            Refusal::TooDeep => format!("Channels nest at most {MAX_CHANNEL_DEPTH} levels deep"),
-            Refusal::NameTaken => "A channel with that name is already there".into(),
-        }
+pub fn refusal(why: Misplaced) -> String {
+    match why {
+        Misplaced::CategoryPlacement => "Categories stay at the top level".into(),
+        Misplaced::IntoItself => "A channel can't go inside itself".into(),
+        Misplaced::PermanentUnderTemporary => "Permanent channels can't go inside a temporary one".into(),
+        Misplaced::TooDeep => format!("Channels nest at most {MAX_CHANNEL_DEPTH} levels deep"),
+        Misplaced::HidesDefault => "Everyone must be able to see the default channel".into(),
+        Misplaced::NameTaken => "A channel with that name is already there".into(),
     }
 }
 
@@ -62,7 +46,7 @@ pub enum Outcome {
     Move(DropTarget),
     /// Dropping here leaves the tree as it is.
     Nothing,
-    NotAllowed(Refusal),
+    NotAllowed(Misplaced),
 }
 
 /// What dropping `dragged` on `zone` of the row for `hovered` would do.
@@ -82,84 +66,29 @@ pub fn drop_target(
         Zone::Into => Some(hovered),
         Zone::Before | Zone::After => row.parent,
     };
-    let siblings: Vec<ChannelId> = children_of(channels, parent).into_iter().filter(|&s| s != dragged).collect();
+    let siblings: Vec<ChannelId> = tree::children_of(channels, parent).into_iter().filter(|&s| s != dragged).collect();
     let position = match zone {
         Zone::Into => siblings.len(),
         Zone::Before => siblings.iter().position(|&s| s == hovered).unwrap_or(0),
         Zone::After => siblings.iter().position(|&s| s == hovered).map_or(siblings.len(), |i| i + 1),
     };
 
-    if let Some(p) = parent {
-        if moving.kind == ChannelKind::Category {
-            return Outcome::NotAllowed(Refusal::CategoryPlacement);
-        }
-        if is_within(channels, p, dragged) {
-            return Outcome::NotAllowed(Refusal::IntoItself);
-        }
-        if channels[&p].temporary && !moving.temporary {
-            return Outcome::NotAllowed(Refusal::PermanentUnderTemporary);
-        }
-        if depth(channels, p) + height(channels, dragged) > MAX_CHANNEL_DEPTH {
-            return Outcome::NotAllowed(Refusal::TooDeep);
-        }
+    if let Err(why) = tree::check_move(channels, moving, parent) {
+        return Outcome::NotAllowed(why);
     }
-    if parent == moving.parent {
-        let current = siblings_now(channels, dragged);
-        if current == Some(position) {
-            return Outcome::Nothing;
-        }
-    } else {
-        let taken = channels
-            .values()
-            .any(|c| c.parent == parent && c.id != dragged && c.name.eq_ignore_ascii_case(&moving.name));
-        if taken {
-            return Outcome::NotAllowed(Refusal::NameTaken);
-        }
+    if parent == moving.parent
+        && tree::children_of(channels, parent).iter().position(|&s| s == dragged) == Some(position)
+    {
+        return Outcome::Nothing;
     }
     Outcome::Move(DropTarget { parent, position: position as u32 })
 }
 
-fn children_of(channels: &HashMap<ChannelId, ChannelInfo>, parent: Option<ChannelId>) -> Vec<ChannelId> {
-    let mut kids: Vec<&ChannelInfo> = channels.values().filter(|c| c.parent == parent).collect();
-    kids.sort_by_key(|c| (c.order, c.id));
-    kids.into_iter().map(|c| c.id).collect()
-}
-
-/// `id`'s index among its current siblings.
-fn siblings_now(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> Option<usize> {
-    children_of(channels, channels[&id].parent).iter().position(|&s| s == id)
-}
-
-/// Whether `id` is `ancestor` or somewhere below it.
-fn is_within(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId, ancestor: ChannelId) -> bool {
-    let mut cur = Some(id);
-    while let Some(c) = cur {
-        if c == ancestor {
-            return true;
-        }
-        cur = channels.get(&c).and_then(|c| c.parent);
-    }
-    false
-}
-
-/// Top level is depth 1.
-fn depth(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
-    let mut depth = 1;
-    let mut cur = channels.get(&id).and_then(|c| c.parent);
-    while let Some(p) = cur {
-        depth += 1;
-        cur = channels.get(&p).and_then(|c| c.parent);
-    }
-    depth
-}
-
-fn height(channels: &HashMap<ChannelId, ChannelInfo>, id: ChannelId) -> usize {
-    let below = children_of(channels, Some(id)).into_iter().map(|k| height(channels, k)).max().unwrap_or(0);
-    (1 + below).max(channels.get(&id).map_or(1, |c| c.kind.levels_including_rooms()))
-}
-
 #[cfg(test)]
 mod tests {
+    use t7_proto::ChannelKind;
+    use t7_proto::perms::{Override, Perm, Perms, RoleId};
+
     use super::*;
 
     fn ch(id: ChannelId, parent: Option<ChannelId>, order: u32, name: &str) -> ChannelInfo {
@@ -233,25 +162,25 @@ mod tests {
 
     #[test]
     fn refuses_nesting_past_the_depth_limit() {
-        assert_eq!(drop_target(&tree(), 5, 4, Zone::Into), Outcome::NotAllowed(Refusal::TooDeep));
+        assert_eq!(drop_target(&tree(), 5, 4, Zone::Into), Outcome::NotAllowed(Misplaced::TooDeep));
         // Squad carries Duo with it, so it can't go under Lobby's child.
         let mut t = tree();
         t.insert(7, ch(7, Some(1), 0, "Quiet"));
-        assert_eq!(drop_target(&t, 3, 7, Zone::Into), Outcome::NotAllowed(Refusal::TooDeep));
+        assert_eq!(drop_target(&t, 3, 7, Zone::Into), Outcome::NotAllowed(Misplaced::TooDeep));
         assert_eq!(drop_target(&t, 3, 7, Zone::Before), to(Some(1), 0));
     }
 
     #[test]
     fn refuses_its_own_subtree() {
-        assert_eq!(drop_target(&tree(), 2, 3, Zone::Into), Outcome::NotAllowed(Refusal::IntoItself));
-        assert_eq!(drop_target(&tree(), 2, 4, Zone::Before), Outcome::NotAllowed(Refusal::IntoItself));
+        assert_eq!(drop_target(&tree(), 2, 3, Zone::Into), Outcome::NotAllowed(Misplaced::IntoItself));
+        assert_eq!(drop_target(&tree(), 2, 4, Zone::Before), Outcome::NotAllowed(Misplaced::IntoItself));
     }
 
     #[test]
     fn refuses_permanent_under_temporary() {
         let mut t = tree();
         t.get_mut(&5).unwrap().temporary = true;
-        assert_eq!(drop_target(&t, 6, 5, Zone::Into), Outcome::NotAllowed(Refusal::PermanentUnderTemporary));
+        assert_eq!(drop_target(&t, 6, 5, Zone::Into), Outcome::NotAllowed(Misplaced::PermanentUnderTemporary));
         t.get_mut(&6).unwrap().temporary = true;
         assert_eq!(drop_target(&t, 6, 5, Zone::Into), to(Some(5), 0));
     }
@@ -260,15 +189,15 @@ mod tests {
     fn refuses_a_name_already_under_the_new_parent() {
         let mut t = tree();
         t.insert(7, ch(7, Some(2), 1, "afk"));
-        assert_eq!(drop_target(&t, 5, 2, Zone::Into), Outcome::NotAllowed(Refusal::NameTaken));
+        assert_eq!(drop_target(&t, 5, 2, Zone::Into), Outcome::NotAllowed(Misplaced::NameTaken));
     }
 
     #[test]
     fn categories_stay_at_the_top_and_take_channels_in() {
         let mut t = tree();
         t.get_mut(&5).unwrap().kind = ChannelKind::Category;
-        assert_eq!(drop_target(&t, 5, 3, Zone::Before), Outcome::NotAllowed(Refusal::CategoryPlacement));
-        assert_eq!(drop_target(&t, 5, 1, Zone::Into), Outcome::NotAllowed(Refusal::CategoryPlacement));
+        assert_eq!(drop_target(&t, 5, 3, Zone::Before), Outcome::NotAllowed(Misplaced::CategoryPlacement));
+        assert_eq!(drop_target(&t, 5, 1, Zone::Into), Outcome::NotAllowed(Misplaced::CategoryPlacement));
         assert_eq!(drop_target(&t, 5, 1, Zone::Before), to(None, 0));
         assert_eq!(drop_target(&t, 6, 5, Zone::Into), to(Some(5), 0));
     }
@@ -277,8 +206,17 @@ mod tests {
     fn a_lobby_keeps_a_level_for_its_rooms() {
         let mut t = tree();
         t.get_mut(&6).unwrap().kind = ChannelKind::Lobby;
-        assert_eq!(drop_target(&t, 6, 3, Zone::Into), Outcome::NotAllowed(Refusal::TooDeep));
+        assert_eq!(drop_target(&t, 6, 3, Zone::Into), Outcome::NotAllowed(Misplaced::TooDeep));
         assert_eq!(drop_target(&t, 6, 2, Zone::Into), to(Some(2), 1));
+    }
+
+    #[test]
+    fn refuses_hiding_the_default_channel() {
+        let mut t = tree();
+        t.get_mut(&1).unwrap().default = true;
+        t.get_mut(&6).unwrap().overrides = vec![Override::denying(RoleId::EVERYONE, Perms::of(&[Perm::View]))];
+        assert_eq!(drop_target(&t, 1, 6, Zone::Into), Outcome::NotAllowed(Misplaced::HidesDefault));
+        assert_eq!(drop_target(&t, 5, 6, Zone::Into), to(Some(6), 0));
     }
 
     #[test]

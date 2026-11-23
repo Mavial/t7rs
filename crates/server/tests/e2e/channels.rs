@@ -198,6 +198,29 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
 }
 
 #[tokio::test]
+async fn a_move_counts_only_the_channels_the_mover_sees() {
+    let (addr, mut owner, _, _) = start_owned("hidden-sibling", HOME).await;
+    owner.send(new_channel("Vault", None, ChannelKind::Voice)).await;
+    let vault = id_of(&owner.channels().await, "Vault");
+    owner.send(C2S::MoveChannel { id: vault, parent: None, position: 0 }).await;
+    owner.send(set(vault, RoleId::ADMIN, &[], &[Perm::View, Perm::ManageChannels])).await;
+    owner.sync().await;
+    let (mut boss, _) = TestClient::connect(addr, "boss", None).await;
+    owner.change_roles(assign("boss", RoleId::ADMIN, true)).await;
+    let list = boss.channels().await;
+    assert!(list.iter().all(|c| c.id != vault), "{list:?}");
+    let top = |list: &[ChannelInfo]| {
+        let mut top: Vec<&ChannelInfo> = list.iter().filter(|c| c.parent.is_none()).collect();
+        top.sort_by_key(|c| c.order);
+        top.into_iter().map(|c| c.name.clone()).take(3).collect::<Vec<_>>()
+    };
+    assert_eq!(top(&list), ["Lobby", "Hangout", "Gaming"]);
+
+    boss.send(C2S::MoveChannel { id: id_of(&list, "Gaming"), parent: None, position: 1 }).await;
+    assert_eq!(top(&boss.channels().await), ["Lobby", "Gaming", "Hangout"], "one place up");
+}
+
+#[tokio::test]
 async fn people_who_lose_their_channel_land_in_an_open_one() {
     let (addr, mut owner, _, channels) = start_owned("landing", HOME).await;
     let [lobby, hangout, gaming] = ["Lobby", "Hangout", "Gaming"].map(|name| id_of(&channels, name));
