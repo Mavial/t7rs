@@ -15,6 +15,7 @@ pub mod identity;
 pub mod model;
 pub mod perms;
 pub mod tls;
+pub mod tree;
 pub mod update;
 pub mod voice;
 

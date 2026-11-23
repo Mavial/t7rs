@@ -7,6 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use t7_proto::perms::{ChannelTree, Override, Perm, Perms, RoleId};
+use t7_proto::tree::{self, Misplaced};
 use t7_proto::{
     ChannelId, ChannelInfo, ChannelKind, ChannelSettings, ClientId, Identity, MAX_CHANNEL_DEPTH, MAX_CHANNEL_NAME_LEN,
     MAX_CHANNEL_TOPIC_LEN, MAX_CHANNELS, PasswordChange,
@@ -38,6 +39,19 @@ pub enum ChannelError {
     KindSettings(ChannelKind),
     DefaultKind(ChannelKind),
     HidesDefault,
+}
+
+impl From<Misplaced> for ChannelError {
+    fn from(m: Misplaced) -> Self {
+        match m {
+            Misplaced::CategoryPlacement => ChannelError::CategoryPlacement,
+            Misplaced::IntoItself => ChannelError::IntoItself,
+            Misplaced::PermanentUnderTemporary => ChannelError::PermanentUnderTemporary,
+            Misplaced::TooDeep => ChannelError::TooDeep,
+            Misplaced::HidesDefault => ChannelError::HidesDefault,
+            Misplaced::NameTaken => ChannelError::NameTaken,
+        }
+    }
 }
 
 impl ChannelError {
@@ -112,7 +126,7 @@ impl Channels {
             let refusal = if c.kind == ChannelKind::Category && parent.is_some() {
                 Some(ChannelError::CategoryPlacement)
             } else if c.kind == ChannelKind::Lobby
-                && parent.is_some_and(|p| self.depth(p) + c.kind.levels_including_rooms() > MAX_CHANNEL_DEPTH)
+                && parent.is_some_and(|p| tree::depth(self, p) + c.kind.levels_including_rooms() > MAX_CHANNEL_DEPTH)
             {
                 Some(ChannelError::TooDeep)
             } else if c.kind != ChannelKind::Voice && (password.is_some() || c.max_clients.is_some()) {
@@ -166,7 +180,7 @@ impl Channels {
 
     /// Permanent channels in the saved format, siblings in display order.
     pub fn to_config(&self) -> Vec<ChannelConfig> {
-        self.children_of(None).into_iter().filter_map(|id| self.config_of(id)).collect()
+        tree::children_of(self, None).into_iter().filter_map(|id| self.config_of(id)).collect()
     }
 
     fn config_of(&self, id: ChannelId) -> Option<ChannelConfig> {
@@ -183,7 +197,7 @@ impl Channels {
             moderators: c.info.moderators.clone(),
             kind: c.info.kind,
             overrides: c.info.overrides.clone(),
-            children: self.children_of(Some(id)).into_iter().filter_map(|k| self.config_of(k)).collect(),
+            children: tree::children_of(self, Some(id)).into_iter().filter_map(|k| self.config_of(k)).collect(),
         })
     }
 
@@ -198,10 +212,10 @@ impl Channels {
     /// All channel ids, parents before children, siblings in order.
     pub fn ids_in_order(&self) -> Vec<ChannelId> {
         let mut out = Vec::with_capacity(self.map.len());
-        let mut stack: Vec<ChannelId> = self.children_of(None).into_iter().rev().collect();
+        let mut stack: Vec<ChannelId> = tree::children_of(self, None).into_iter().rev().collect();
         while let Some(id) = stack.pop() {
             out.push(id);
-            stack.extend(self.children_of(Some(id)).into_iter().rev());
+            stack.extend(tree::children_of(self, Some(id)).into_iter().rev());
         }
         out
     }
@@ -235,7 +249,7 @@ impl Channels {
             if parent.info.temporary && !temporary {
                 return Err(ChannelError::PermanentUnderTemporary);
             }
-            if self.depth(p) + kind.levels_including_rooms() > MAX_CHANNEL_DEPTH {
+            if tree::depth(self, p) + kind.levels_including_rooms() > MAX_CHANNEL_DEPTH {
                 return Err(ChannelError::TooDeep);
             }
         }
@@ -252,7 +266,7 @@ impl Channels {
             name,
             topic,
             max_clients: limit,
-            order: self.children_of(parent).len() as u32,
+            order: tree::children_of(self, parent).len() as u32,
             temporary,
             has_password: password.is_some(),
             default: false,
@@ -292,41 +306,20 @@ impl Channels {
         position: u32,
         sees: impl Fn(ChannelId) -> bool,
     ) -> Result<(), ChannelError> {
-        let moving = self.map.get(&id).ok_or(ChannelError::NotFound)?;
-        let temporary = moving.info.temporary;
-        let old_parent = moving.info.parent;
-        if moving.info.kind == ChannelKind::Category && parent.is_some() {
-            return Err(ChannelError::CategoryPlacement);
+        let moving = &self.map.get(&id).ok_or(ChannelError::NotFound)?.info;
+        let old_parent = moving.parent;
+        if parent.is_some_and(|p| !self.map.contains_key(&p)) {
+            return Err(ChannelError::NotFound);
         }
-        if let Some(p) = parent {
-            let target = self.map.get(&p).ok_or(ChannelError::NotFound)?;
-            if self.subtree(id).contains(&p) {
-                return Err(ChannelError::IntoItself);
-            }
-            if target.info.temporary && !temporary {
-                return Err(ChannelError::PermanentUnderTemporary);
-            }
-            if self.depth(p) + self.height(id) > MAX_CHANNEL_DEPTH {
-                return Err(ChannelError::TooDeep);
-            }
-            if self.hides_from_some_role(p) && self.subtree(id).contains(&self.default) {
-                return Err(ChannelError::HidesDefault);
-            }
-        }
-        if parent != old_parent {
-            let name = self.map[&id].info.name.clone();
-            if self.name_taken(&name, parent, Some(id)) {
-                return Err(ChannelError::NameTaken);
-            }
-        }
-        let mut siblings: Vec<ChannelId> = self.children_of(parent).into_iter().filter(|&s| s != id).collect();
+        tree::check_move(self, moving, parent)?;
+        let mut siblings: Vec<ChannelId> = tree::children_of(self, parent).into_iter().filter(|&s| s != id).collect();
         let before = siblings.iter().copied().filter(|&s| sees(s)).nth(position as usize);
         let at = before.and_then(|b| siblings.iter().position(|&s| s == b)).unwrap_or(siblings.len());
         siblings.insert(at, id);
         self.map.get_mut(&id).expect("checked").info.parent = parent;
         self.renumber(&siblings);
         if parent != old_parent {
-            let old_siblings = self.children_of(old_parent);
+            let old_siblings = tree::children_of(self, old_parent);
             self.renumber(&old_siblings);
         }
         Ok(())
@@ -342,7 +335,7 @@ impl Channels {
         for r in &removed {
             self.map.remove(r);
         }
-        let siblings = self.children_of(parent);
+        let siblings = tree::children_of(self, parent);
         self.renumber(&siblings);
         Ok(removed)
     }
@@ -355,7 +348,7 @@ impl Channels {
         if c.info.kind != ChannelKind::Voice {
             return Err(ChannelError::DefaultKind(c.info.kind));
         }
-        if self.hides_from_some_role(id) {
+        if tree::hides_from_some_role(self, id) {
             return Err(ChannelError::HidesDefault);
         }
         if let Some(old) = self.map.get_mut(&self.default) {
@@ -380,7 +373,7 @@ impl Channels {
 
     pub fn set_override(&mut self, id: ChannelId, set: Override) -> Result<bool, ChannelError> {
         let set = Override::allowing(set.role, set.allow() & Perms::CHANNEL).and_denying(set.deny() & Perms::CHANNEL);
-        if set.deny().has(Perm::View) && self.self_then_ancestors(self.default).contains(&id) {
+        if set.deny().has(Perm::View) && tree::within(self, self.default, id) {
             return Err(ChannelError::HidesDefault);
         }
         let list = &mut self.map.get_mut(&id).ok_or(ChannelError::NotFound)?.info.overrides;
@@ -416,20 +409,6 @@ impl Channels {
         ids.iter().any(|id| self.map.get(id).is_some_and(|c| !c.info.temporary))
     }
 
-    fn self_then_ancestors(&self, id: ChannelId) -> Vec<ChannelId> {
-        let mut out = Vec::new();
-        let mut at = self.map.get(&id);
-        while let Some(c) = at {
-            out.push(c.info.id);
-            at = c.info.parent.and_then(|p| self.map.get(&p));
-        }
-        out
-    }
-
-    fn hides_from_some_role(&self, id: ChannelId) -> bool {
-        self.self_then_ancestors(id).iter().any(|c| self.map[c].info.overrides.iter().any(|o| o.deny().has(Perm::View)))
-    }
-
     /// `id` and all channels below it.
     pub fn subtree(&self, id: ChannelId) -> Vec<ChannelId> {
         let mut out = vec![id];
@@ -449,7 +428,7 @@ impl Channels {
                 let fits = MAX_CHANNEL_NAME_LEN - room.chars().count();
                 format!("{}{room}", nickname.chars().take(fits).collect::<String>())
             })
-            .find(|name| !self.name_taken(name, Some(lobby), None))
+            .find(|name| !tree::name_taken(self, name, Some(lobby), None))
             .expect("some number is free")
     }
 
@@ -474,40 +453,12 @@ impl Channels {
             .collect()
     }
 
-    fn children_of(&self, parent: Option<ChannelId>) -> Vec<ChannelId> {
-        let mut kids: Vec<&ChannelInfo> = self.map.values().map(|c| &c.info).filter(|c| c.parent == parent).collect();
-        kids.sort_by_key(|c| (c.order, c.id));
-        kids.into_iter().map(|c| c.id).collect()
-    }
-
     fn renumber(&mut self, ordered: &[ChannelId]) {
         for (i, id) in ordered.iter().enumerate() {
             if let Some(c) = self.map.get_mut(id) {
                 c.info.order = i as u32;
             }
         }
-    }
-
-    /// Top level is depth 1.
-    fn depth(&self, id: ChannelId) -> usize {
-        let mut depth = 1;
-        let mut cur = self.map.get(&id).and_then(|c| c.info.parent);
-        while let Some(p) = cur {
-            depth += 1;
-            cur = self.map.get(&p).and_then(|c| c.info.parent);
-        }
-        depth
-    }
-
-    fn height(&self, id: ChannelId) -> usize {
-        let below = self.children_of(Some(id)).into_iter().map(|k| self.height(k)).max().unwrap_or(0);
-        (1 + below).max(self.map[&id].info.kind.levels_including_rooms())
-    }
-
-    fn name_taken(&self, name: &str, parent: Option<ChannelId>, except: Option<ChannelId>) -> bool {
-        self.map
-            .values()
-            .any(|c| c.info.parent == parent && Some(c.info.id) != except && c.info.name.eq_ignore_ascii_case(name))
     }
 
     fn validate(
@@ -520,7 +471,7 @@ impl Channels {
         if name.is_empty() || name.chars().count() > MAX_CHANNEL_NAME_LEN {
             return Err(ChannelError::BadName);
         }
-        if self.name_taken(&name, parent, except) {
+        if tree::name_taken(self, &name, parent, except) {
             return Err(ChannelError::NameTaken);
         }
         let topic = s.topic.trim().to_owned();
