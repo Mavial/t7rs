@@ -119,7 +119,8 @@ permissions of the roles below it.
   so a private category hides everything inside.
 - **Hidden channels:** without View on a channel you don't see it, the
   channels below it, or the people in them. People who manage channels still
-  see it, with an eye. Everyone always sees the default channel.
+  see it, with an eye. Everyone always sees the default channel. Whoever is in
+  a channel when it is hidden from them moves out, like someone kicked from it.
 - **Lobbies:** joining a lobby opens a temporary room under it, named after
   you, and moves you in. Nobody stays in the lobby itself, and its rooms have
   its permissions. A new server has one, **Create a room**. To make one, pick
@@ -128,8 +129,9 @@ permissions of the roles below it.
 - **Room owners:** whoever makes a temporary channel owns it, and has a crown
   next to their name. In their room they kick, move and mute like a
   moderator, and edit or delete it. They rank just above Everyone, so
-  moderators can still act on them. When the owner leaves, the person who has
-  been in the room longest becomes its owner.
+  moderators can still act on them. The owner keeps the room while they are in
+  it or in a room inside it. When they leave, the person who has been in it
+  longest becomes its owner.
 - **Speak:** the server drops the voice of anyone without Speak in their
   channel. They see "Can't speak here" and a greyed-out microphone button.
   Others see a grey crossed-out microphone next to them.
@@ -212,7 +214,7 @@ The server keeps more files next to its config:
 
 Limits: channel names up to 40 characters, topics up to 200, nesting up to 3
 levels, 200 channels per server. The default channel can't be deleted; deleting
-a channel moves the people inside to the default channel.
+a channel moves the people inside the way a kick does.
 
 Set log verbosity with `RUST_LOG=debug`.
 

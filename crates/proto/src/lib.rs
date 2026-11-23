@@ -235,7 +235,7 @@ pub enum C2S {
         parent: Option<ChannelId>,
         position: u32,
     },
-    /// People inside move to the default channel.
+    /// People inside move out the way a kick from the channel moves them.
     DeleteChannel {
         id: ChannelId,
     },
