@@ -13,6 +13,7 @@ use super::{App, Conn};
 use crate::audio::{AudioSettings, PttKey, TxMode, VoiceSink};
 use crate::sounds::{Pack, Sound};
 use crate::theme::Btn;
+use crate::update::{Status, Updater};
 use crate::{audio, ptt, settings, sounds, theme};
 
 /// Voice is considered blocked when no UDP pong arrived for this long.
@@ -202,143 +203,14 @@ impl App {
             let body_height = (ui.ctx().content_rect().height() - 150.0).max(120.0);
             egui::ScrollArea::vertical().max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
                 ui.spacing_mut().interact_size.x = SLIDER_VALUE_W;
-                section(ui, "Devices");
-                row(ui, "Microphone", |ui| restart |= device_combo(ui, "mic", &mut a.input_device, &dlg.inputs));
-                row(ui, "Speakers", |ui| restart |= device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs));
-
-                section(ui, "Transmit");
-                match speech {
-                    Speech::Allowed => {}
-                    Speech::NotHere => hint(ui, "You can't speak in this channel, so nothing is sent."),
-                    Speech::ServerMuted => hint(ui, "A moderator muted you on the server, so nothing is sent."),
-                }
-                row(ui, "Mode", |ui| {
-                    theme::segmented(
-                        ui,
-                        &mut a.mode,
-                        &[(TxMode::VoiceActivation, "Voice activation"), (TxMode::PushToTalk, "Push to talk")],
-                    );
-                });
-                match a.mode {
-                    TxMode::VoiceActivation => {
-                        row(ui, "Input level", |ui| level_meter(ui, level, a.threshold_db, open));
-                        row(ui, "Activate at", |ui| {
-                            slider(ui, &mut a.threshold_db, METER_MIN_DB..=METER_MAX_DB, Unit::Db);
-                        });
-                        hint(
-                            ui,
-                            "Talk normally: the bar should cross the line, and stay left of it when you're quiet.",
-                        );
-                    }
-                    TxMode::PushToTalk => {
-                        row(ui, "Key", |ui| {
-                            let text = match (dlg.binding, a.ptt_key) {
-                                (true, _) => "Press a key or mouse button…".to_owned(),
-                                (false, Some(k)) => ptt::label(k.vk),
-                                (false, None) => "Click to set a key".to_owned(),
-                            };
-                            if ui.add(Btn::secondary(&text).min_width(200.0)).clicked() {
-                                dlg.binding = true;
-                            }
-                            if open {
-                                ui.label(RichText::new("Transmitting").size(12.5).color(theme::GREEN));
-                            }
-                        });
-                        hint(
-                            ui,
-                            if cfg!(windows) {
-                                "Works while other apps, like games, are focused."
-                            } else {
-                                "Works while T7 is focused."
-                            },
-                        );
-                    }
-                }
-
-                section(ui, "Sound cleanup");
-                theme::switch(ui, &mut a.cleanup.noise_suppression, "Noise suppression")
-                    .on_hover_text("Removes fans, hum, traffic and other background noise");
-                theme::switch(ui, &mut a.cleanup.echo_cancellation, "Echo cancellation")
-                    .on_hover_text("Stops others from hearing themselves when you use speakers instead of headphones");
-                theme::switch(ui, &mut a.cleanup.auto_gain, "Automatic volume")
-                    .on_hover_text("Brings a quiet microphone up to a normal level");
-
-                section(ui, "Volume");
-                row(ui, "Microphone", |ui| {
-                    slider(ui, &mut a.input_gain_db, -20.0..=20.0, Unit::Db);
-                });
-                row(ui, "Speakers", |ui| slider(ui, &mut a.output_volume, 0.0..=2.0, Unit::Percent));
-
-                section(ui, "Notifications");
-                theme::switch(ui, &mut a.sounds, "Notification sounds")
-                    .on_hover_text("Chimes for connecting, people joining and leaving, pokes and private messages");
-                ui.add_enabled_ui(a.sounds, |ui| {
-                    row(ui, "Volume", |ui| slider(ui, &mut a.sounds_volume, 0.0..=1.0, Unit::Percent));
-                    row(ui, "Sound pack", |ui| {
-                        let shown = match &a.sound_pack {
-                            None => "Built-in".to_owned(),
-                            Some(dir) => dlg
-                                .packs
-                                .iter()
-                                .find(|(_, d)| d == dir)
-                                .map_or_else(|| dir.display().to_string(), |(label, _)| label.clone()),
-                        };
-                        let width = ui.available_width() - 64.0;
-                        egui::ComboBox::from_id_salt("sound-pack").width(width).selected_text(shown).show_ui(
-                            ui,
-                            |ui| {
-                                ui.selectable_value(&mut a.sound_pack, None, "Built-in");
-                                for (label, dir) in &dlg.packs {
-                                    ui.selectable_value(&mut a.sound_pack, Some(dir.clone()), label);
-                                }
-                            },
-                        );
-                        if ui.add(Btn::secondary("Test").min_width(56.0)).clicked() {
-                            test_sound = true;
-                        }
-                    });
-                    if a.sound_pack.is_some() && a.sound_pack == sounds_dir() {
-                        let names: Vec<&str> = Sound::ALL.iter().map(|s| s.file_name()).collect();
-                        row(ui, "", |ui| {
-                            if ui
-                                .add(Btn::secondary("Open custom folder…").small())
-                                .on_hover_text(format!(
-                                    "WAV files with these names replace the built-in sounds: {}",
-                                    names.join(", ")
-                                ))
-                                .clicked()
-                            {
-                                open_sounds_folder();
-                            }
-                        });
-                    }
-                });
+                restart = devices_section(ui, &mut a, dlg);
+                transmit_section(ui, &mut a, dlg, speech, Level { db: level, open });
+                cleanup_section(ui, &mut a);
+                volume_section(ui, &mut a);
+                test_sound = notifications_section(ui, &mut a, dlg);
             });
-
             ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let version = format!("T7 {}", crate::update::VERSION);
-                ui.label(RichText::new(version).size(12.0).color(theme::TEXT_FAINT));
-                if self.updater.enabled() {
-                    let state = match self.updater.status() {
-                        crate::update::Status::Idle | crate::update::Status::UpToDate => "up to date".to_owned(),
-                        crate::update::Status::Checking => "checking for updates…".to_owned(),
-                        crate::update::Status::Downloading(v) => format!("downloading {v}…"),
-                        crate::update::Status::Ready(v) => format!("{v} ready, restart to update"),
-                        crate::update::Status::Failed(e) => e,
-                    };
-                    ui.label(RichText::new(format!("· {state}")).size(12.0).color(theme::TEXT_FAINT));
-                    if ui.add(Btn::ghost("Check now").small()).clicked() {
-                        self.updater.check_now();
-                    }
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(Btn::primary("Done")).clicked() {
-                        close = true;
-                    }
-                });
-            });
+            close = version_footer(ui, &self.updater);
         });
         if modal.should_close() && !dlg.binding {
             close = true;
@@ -363,4 +235,157 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(50)); // live level meter
         }
     }
+}
+
+/// The microphone's live level, and whether it is sending.
+#[derive(Clone, Copy)]
+struct Level {
+    db: f32,
+    open: bool,
+}
+
+/// Returns whether a device changed, so the engine reopens.
+fn devices_section(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &AudioDialog) -> bool {
+    section(ui, "Devices");
+    let mic = row(ui, "Microphone", |ui| device_combo(ui, "mic", &mut a.input_device, &dlg.inputs));
+    let speakers = row(ui, "Speakers", |ui| device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs));
+    mic | speakers
+}
+
+fn transmit_section(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &mut AudioDialog, speech: Speech, level: Level) {
+    section(ui, "Transmit");
+    match speech {
+        Speech::Allowed => {}
+        Speech::NotHere => hint(ui, "You can't speak in this channel, so nothing is sent."),
+        Speech::ServerMuted => hint(ui, "A moderator muted you on the server, so nothing is sent."),
+    }
+    row(ui, "Mode", |ui| {
+        theme::segmented(
+            ui,
+            &mut a.mode,
+            &[(TxMode::VoiceActivation, "Voice activation"), (TxMode::PushToTalk, "Push to talk")],
+        );
+    });
+    match a.mode {
+        TxMode::VoiceActivation => {
+            row(ui, "Input level", |ui| level_meter(ui, level.db, a.threshold_db, level.open));
+            row(ui, "Activate at", |ui| {
+                slider(ui, &mut a.threshold_db, METER_MIN_DB..=METER_MAX_DB, Unit::Db);
+            });
+            hint(ui, "Talk normally: the bar should cross the line, and stay left of it when you're quiet.");
+        }
+        TxMode::PushToTalk => {
+            row(ui, "Key", |ui| {
+                let text = match (dlg.binding, a.ptt_key) {
+                    (true, _) => "Press a key or mouse button…".to_owned(),
+                    (false, Some(k)) => ptt::label(k.vk),
+                    (false, None) => "Click to set a key".to_owned(),
+                };
+                if ui.add(Btn::secondary(&text).min_width(200.0)).clicked() {
+                    dlg.binding = true;
+                }
+                if level.open {
+                    ui.label(RichText::new("Transmitting").size(12.5).color(theme::GREEN));
+                }
+            });
+            hint(
+                ui,
+                if cfg!(windows) {
+                    "Works while other apps, like games, are focused."
+                } else {
+                    "Works while T7 is focused."
+                },
+            );
+        }
+    }
+}
+
+fn cleanup_section(ui: &mut egui::Ui, a: &mut AudioSettings) {
+    section(ui, "Sound cleanup");
+    theme::switch(ui, &mut a.cleanup.noise_suppression, "Noise suppression")
+        .on_hover_text("Removes fans, hum, traffic and other background noise");
+    theme::switch(ui, &mut a.cleanup.echo_cancellation, "Echo cancellation")
+        .on_hover_text("Stops others from hearing themselves when you use speakers instead of headphones");
+    theme::switch(ui, &mut a.cleanup.auto_gain, "Automatic volume")
+        .on_hover_text("Brings a quiet microphone up to a normal level");
+}
+
+fn volume_section(ui: &mut egui::Ui, a: &mut AudioSettings) {
+    section(ui, "Volume");
+    row(ui, "Microphone", |ui| {
+        slider(ui, &mut a.input_gain_db, -20.0..=20.0, Unit::Db);
+    });
+    row(ui, "Speakers", |ui| slider(ui, &mut a.output_volume, 0.0..=2.0, Unit::Percent));
+}
+
+/// Returns whether Test was clicked.
+fn notifications_section(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &AudioDialog) -> bool {
+    let mut test = false;
+    section(ui, "Notifications");
+    theme::switch(ui, &mut a.sounds, "Notification sounds")
+        .on_hover_text("Chimes for connecting, people joining and leaving, pokes and private messages");
+    ui.add_enabled_ui(a.sounds, |ui| {
+        row(ui, "Volume", |ui| slider(ui, &mut a.sounds_volume, 0.0..=1.0, Unit::Percent));
+        row(ui, "Sound pack", |ui| {
+            let shown = match &a.sound_pack {
+                None => "Built-in".to_owned(),
+                Some(dir) => dlg
+                    .packs
+                    .iter()
+                    .find(|(_, d)| d == dir)
+                    .map_or_else(|| dir.display().to_string(), |(label, _)| label.clone()),
+            };
+            let width = ui.available_width() - 64.0;
+            egui::ComboBox::from_id_salt("sound-pack").width(width).selected_text(shown).show_ui(ui, |ui| {
+                ui.selectable_value(&mut a.sound_pack, None, "Built-in");
+                for (label, dir) in &dlg.packs {
+                    ui.selectable_value(&mut a.sound_pack, Some(dir.clone()), label);
+                }
+            });
+            test = ui.add(Btn::secondary("Test").min_width(56.0)).clicked();
+        });
+        if a.sound_pack.is_some() && a.sound_pack == sounds_dir() {
+            let names: Vec<&str> = Sound::ALL.iter().map(|s| s.file_name()).collect();
+            row(ui, "", |ui| {
+                if ui
+                    .add(Btn::secondary("Open custom folder…").small())
+                    .on_hover_text(format!(
+                        "WAV files with these names replace the built-in sounds: {}",
+                        names.join(", ")
+                    ))
+                    .clicked()
+                {
+                    open_sounds_folder();
+                }
+            });
+        }
+    });
+    test
+}
+
+/// The version and update state, and the Done button. Returns whether Done was clicked.
+fn version_footer(ui: &mut egui::Ui, updater: &Updater) -> bool {
+    let mut done = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let version = format!("T7 {}", crate::update::VERSION);
+        ui.label(RichText::new(version).size(12.0).color(theme::TEXT_FAINT));
+        if updater.enabled() {
+            let state = match updater.status() {
+                Status::Idle | Status::UpToDate => "up to date".to_owned(),
+                Status::Checking => "checking for updates…".to_owned(),
+                Status::Downloading(v) => format!("downloading {v}…"),
+                Status::Ready(v) => format!("{v} ready, restart to update"),
+                Status::Failed(e) => e,
+            };
+            ui.label(RichText::new(format!("· {state}")).size(12.0).color(theme::TEXT_FAINT));
+            if ui.add(Btn::ghost("Check now").small()).clicked() {
+                updater.check_now();
+            }
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            done = ui.add(Btn::primary("Done")).clicked();
+        });
+    });
+    done
 }

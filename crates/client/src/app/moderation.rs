@@ -3,9 +3,9 @@
 use egui::{CornerRadius, Margin, RichText, Stroke};
 use t7_proto::{C2S, ClientId, MAX_REASON_LEN};
 
-use super::App;
 use super::chat::LineKind;
 use super::widgets::{dialog_footer, dialog_header, section, text_input};
+use super::{App, default_channel_name};
 use crate::sounds::Sound;
 use crate::theme;
 use crate::theme::Btn;
@@ -150,8 +150,7 @@ impl App {
             self.moderation = None;
         }
         let (Some(dialog), Some(view)) = (&mut self.moderation, &self.view) else { return };
-        let default_name =
-            view.channels.values().find(|c| c.default).map_or_else(|| "the default channel".into(), |c| c.name.clone());
+        let default_name = default_channel_name(view);
         let mut send: Option<C2S> = None;
         let mut cancel = false;
         let modal = theme::modal("moderation").show(ctx, |ui| {

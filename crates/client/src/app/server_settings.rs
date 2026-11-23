@@ -58,141 +58,144 @@ fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
 
 fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut ServerSettings, send: &mut Vec<C2S>) {
     let mine = view.me().map_or(Rank::EVERYONE, |me| roles.rank(me.identity));
-    let below = |role: RoleId| mine > roles.height(role);
     if let Pick::Role(id) = s.picked
         && roles.role(id).is_none()
     {
         s.picked = Pick::Everyone;
     }
-    let change = |send: &mut Vec<C2S>, change| send.push(C2S::ChangeRoles(change));
     ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width(190.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
-            let owner = roles.owner.and_then(|o| roles.members.get(&o)).map_or("nobody yet", |m| m.nickname.as_str());
-            if role_row(ui, "Owner", owner, s.picked == Pick::Owner, false).clicked() {
-                s.picked = Pick::Owner;
+        ui.vertical(|ui| role_list(ui, roles, mine, s, send));
+        ui.add_space(16.0);
+        ui.vertical(|ui| role_details(ui, view, roles, mine, s, send));
+    });
+}
+
+/// The roles from the owner down to everyone: pick one, drag to rank, or add one.
+fn role_list(ui: &mut egui::Ui, roles: &Roles, mine: Rank, s: &mut ServerSettings, send: &mut Vec<C2S>) {
+    let below = |role: RoleId| mine > roles.height(role);
+    let change = |send: &mut Vec<C2S>, change| send.push(C2S::ChangeRoles(change));
+    ui.set_width(190.0);
+    ui.spacing_mut().item_spacing.y = 2.0;
+    let owner = roles.owner.and_then(|o| roles.members.get(&o)).map_or("nobody yet", |m| m.nickname.as_str());
+    if role_row(ui, "Owner", owner, s.picked == Pick::Owner, false).clicked() {
+        s.picked = Pick::Owner;
+    }
+    let dragging = egui::DragAndDrop::payload::<DragRole>(ui.ctx()).map(|d| d.0);
+    for (position, role) in roles.ranked.iter().enumerate() {
+        let holders = roles.members.values().filter(|m| m.roles.contains(&role.id)).count();
+        let count = if holders == 0 { String::new() } else { holders.to_string() };
+        let picked = s.picked == Pick::Role(role.id);
+        let resp = role_row(ui, &role.name, &count, picked, below(role.id));
+        if resp.clicked() {
+            s.picked = Pick::Role(role.id);
+        }
+        if below(role.id) {
+            resp.dnd_set_drag_payload(DragRole(role.id));
+        }
+        let below_mine_at_position = mine > roles.height_at(position);
+        if let Some(dragged) = dragging.filter(|d| *d != role.id && below_mine_at_position && resp.contains_pointer()) {
+            let y = if roles.height(dragged) > roles.height(role.id) { resp.rect.bottom() } else { resp.rect.top() };
+            let line = [egui::pos2(resp.rect.left() + 4.0, y), egui::pos2(resp.rect.right() - 4.0, y)];
+            ui.painter().line_segment(line, Stroke::new(2.0, theme::ACCENT));
+            if resp.dnd_release_payload::<DragRole>().is_some() {
+                change(send, RoleChange::Move { id: dragged, position: position as u32 });
             }
-            let dragging = egui::DragAndDrop::payload::<DragRole>(ui.ctx()).map(|d| d.0);
-            for (position, role) in roles.ranked.iter().enumerate() {
-                let holders = roles.members.values().filter(|m| m.roles.contains(&role.id)).count();
-                let count = if holders == 0 { String::new() } else { holders.to_string() };
-                let picked = s.picked == Pick::Role(role.id);
-                let resp = role_row(ui, &role.name, &count, picked, below(role.id));
-                if resp.clicked() {
-                    s.picked = Pick::Role(role.id);
-                }
-                if below(role.id) {
-                    resp.dnd_set_drag_payload(DragRole(role.id));
-                }
-                let below_mine_at_position = mine > roles.height_at(position);
-                if let Some(dragged) =
-                    dragging.filter(|d| *d != role.id && below_mine_at_position && resp.contains_pointer())
-                {
-                    let y = if roles.height(dragged) > roles.height(role.id) {
-                        resp.rect.bottom()
-                    } else {
-                        resp.rect.top()
-                    };
-                    let line = [egui::pos2(resp.rect.left() + 4.0, y), egui::pos2(resp.rect.right() - 4.0, y)];
-                    ui.painter().line_segment(line, Stroke::new(2.0, theme::ACCENT));
-                    if resp.dnd_release_payload::<DragRole>().is_some() {
-                        change(send, RoleChange::Move { id: dragged, position: position as u32 });
-                    }
-                }
+        }
+    }
+    if role_row(ui, "Everyone", "", s.picked == Pick::Everyone, false).clicked() {
+        s.picked = Pick::Everyone;
+    }
+    if mine > Rank::EVERYONE {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            let width = ui.available_width() - 56.0;
+            let field = ui.add(
+                text_input(&mut s.new_role).desired_width(width).hint_text("New role").char_limit(MAX_ROLE_NAME_LEN),
+            );
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let ready = !s.new_role.trim().is_empty();
+            if ui.add_enabled(ready, Btn::secondary("Add").min_width(48.0)).clicked() || (ready && enter) {
+                change(send, RoleChange::Create { name: std::mem::take(&mut s.new_role).trim().to_owned() });
             }
-            if role_row(ui, "Everyone", "", s.picked == Pick::Everyone, false).clicked() {
-                s.picked = Pick::Everyone;
+        });
+    }
+}
+
+/// The picked role: its name, permissions and members.
+fn role_details(
+    ui: &mut egui::Ui,
+    view: &ServerView,
+    roles: &Roles,
+    mine: Rank,
+    s: &mut ServerSettings,
+    send: &mut Vec<C2S>,
+) {
+    let below = |role: RoleId| mine > roles.height(role);
+    let change = |send: &mut Vec<C2S>, change| send.push(C2S::ChangeRoles(change));
+    egui::ScrollArea::vertical().max_height(440.0).auto_shrink([false, true]).show(ui, |ui| match s.picked {
+        Pick::Owner => {
+            hint(
+                ui,
+                "The owner may do everything. Only a claim token from the server's host makes \
+                 someone else the owner.",
+            );
+        }
+        Pick::Everyone => {
+            hint(ui, "Everyone has this role, below all the others.");
+            section(ui, "Permissions");
+            perm_switches(ui, roles.everyone, below(RoleId::EVERYONE), |perms| {
+                change(send, RoleChange::SetPermissions { id: RoleId::EVERYONE, perms });
+            });
+        }
+        Pick::Role(id) => {
+            let role = roles.role(id).expect("checked above");
+            let editable = below(id);
+            field_label(ui, "Name");
+            let name_id = egui::Id::unique(("role-name", id));
+            if !ui.memory(|m| m.has_focus(name_id)) {
+                s.name_draft.clone_from(&role.name);
             }
-            if mine > Rank::EVERYONE {
-                ui.add_space(10.0);
+            let field =
+                ui.add_enabled(editable, text_input(&mut s.name_draft).id(name_id).char_limit(MAX_ROLE_NAME_LEN));
+            let name = s.name_draft.trim();
+            if field.lost_focus() && !name.is_empty() && name != role.name {
+                change(send, RoleChange::Rename { id, name: name.to_owned() });
+            }
+            if id == RoleId::MODERATOR {
+                ui.add_space(4.0);
+                hint(ui, "Channel moderators and owners of temporary channels also hold it, where they moderate.");
+            }
+            section(ui, "Permissions");
+            perm_switches(ui, role.perms, editable, |perms| {
+                change(send, RoleChange::SetPermissions { id, perms });
+            });
+            section(ui, "Members");
+            let holders: Vec<_> = roles.members.iter().filter(|(_, m)| m.roles.contains(&id)).collect();
+            if holders.is_empty() {
+                hint(ui, "Nobody yet. Right-click someone in the channel tree, then Roles.");
+            }
+            for (identity, member) in holders {
                 ui.horizontal(|ui| {
-                    let width = ui.available_width() - 56.0;
-                    let field = ui.add(
-                        text_input(&mut s.new_role)
-                            .desired_width(width)
-                            .hint_text("New role")
-                            .char_limit(MAX_ROLE_NAME_LEN),
-                    );
-                    let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let ready = !s.new_role.trim().is_empty();
-                    if ui.add_enabled(ready, Btn::secondary("Add").min_width(48.0)).clicked() || (ready && enter) {
-                        change(send, RoleChange::Create { name: std::mem::take(&mut s.new_role).trim().to_owned() });
+                    ui.set_min_height(28.0);
+                    ui.label(RichText::new(&member.nickname).color(theme::TEXT));
+                    if !view.clients.values().any(|c| c.identity == *identity) {
+                        ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT));
                     }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let may = editable && mine > roles.rank(*identity);
+                        if ui.add_enabled(may, Btn::secondary("Remove").small()).clicked() {
+                            change(send, RoleChange::Assign { identity: *identity, role: id, held: false });
+                        }
+                    });
                 });
             }
-        });
-        ui.add_space(16.0);
-        ui.vertical(|ui| {
-            egui::ScrollArea::vertical().max_height(440.0).auto_shrink([false, true]).show(ui, |ui| match s.picked {
-                Pick::Owner => {
-                    hint(
-                        ui,
-                        "The owner may do everything. Only a claim token from the server's host makes \
-                         someone else the owner.",
-                    );
+            if editable && id != RoleId::MODERATOR {
+                ui.add_space(14.0);
+                if ui.add(Btn::danger("Delete role").small()).clicked() {
+                    change(send, RoleChange::Delete { id });
                 }
-                Pick::Everyone => {
-                    hint(ui, "Everyone has this role, below all the others.");
-                    section(ui, "Permissions");
-                    perm_switches(ui, roles.everyone, below(RoleId::EVERYONE), |perms| {
-                        change(send, RoleChange::SetPermissions { id: RoleId::EVERYONE, perms });
-                    });
-                }
-                Pick::Role(id) => {
-                    let role = roles.role(id).expect("checked above");
-                    let editable = below(id);
-                    field_label(ui, "Name");
-                    let name_id = egui::Id::unique(("role-name", id));
-                    if !ui.memory(|m| m.has_focus(name_id)) {
-                        s.name_draft.clone_from(&role.name);
-                    }
-                    let field = ui
-                        .add_enabled(editable, text_input(&mut s.name_draft).id(name_id).char_limit(MAX_ROLE_NAME_LEN));
-                    let name = s.name_draft.trim();
-                    if field.lost_focus() && !name.is_empty() && name != role.name {
-                        change(send, RoleChange::Rename { id, name: name.to_owned() });
-                    }
-                    if id == RoleId::MODERATOR {
-                        ui.add_space(4.0);
-                        hint(
-                            ui,
-                            "Channel moderators and owners of temporary channels also hold it, where they moderate.",
-                        );
-                    }
-                    section(ui, "Permissions");
-                    perm_switches(ui, role.perms, editable, |perms| {
-                        change(send, RoleChange::SetPermissions { id, perms });
-                    });
-                    section(ui, "Members");
-                    let holders: Vec<_> = roles.members.iter().filter(|(_, m)| m.roles.contains(&id)).collect();
-                    if holders.is_empty() {
-                        hint(ui, "Nobody yet. Right-click someone in the channel tree, then Roles.");
-                    }
-                    for (identity, member) in holders {
-                        ui.horizontal(|ui| {
-                            ui.set_min_height(28.0);
-                            ui.label(RichText::new(&member.nickname).color(theme::TEXT));
-                            if !view.clients.values().any(|c| c.identity == *identity) {
-                                ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT));
-                            }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let may = editable && mine > roles.rank(*identity);
-                                if ui.add_enabled(may, Btn::secondary("Remove").small()).clicked() {
-                                    change(send, RoleChange::Assign { identity: *identity, role: id, held: false });
-                                }
-                            });
-                        });
-                    }
-                    if editable && id != RoleId::MODERATOR {
-                        ui.add_space(14.0);
-                        if ui.add(Btn::danger("Delete role").small()).clicked() {
-                            change(send, RoleChange::Delete { id });
-                        }
-                    }
-                }
-            });
-        });
+            }
+        }
     });
 }
 

@@ -211,6 +211,11 @@ impl App {
     }
 }
 
+/// Where kicked people and those in a deleted channel go.
+fn default_channel_name(view: &ServerView) -> String {
+    view.channels.values().find(|c| c.default).map_or_else(|| "the default channel".into(), |c| c.name.clone())
+}
+
 fn manages(view: &ServerView, scope: Scope) -> bool {
     match scope {
         Scope::Channel(id) => view.may_in(id, Perm::ManageChannels),

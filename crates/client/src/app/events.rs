@@ -1,7 +1,10 @@
 //! What the network thread reports, applied to the app state and the chat.
 
 use t7_proto::model::ServerView;
-use t7_proto::{C2S, ClientStatus, LeaveReason, S2C, Speech, TextTarget};
+use t7_proto::perms::Permissions;
+use t7_proto::{
+    C2S, ChannelId, ChannelInfo, ClientId, ClientInfo, ClientStatus, LeaveReason, S2C, ServerInfo, Speech, TextTarget,
+};
 
 use super::chat::{LineKind, TabKind, base_tabs};
 use super::connect::{CertChange, MAX_RECENT};
@@ -69,39 +72,7 @@ impl App {
     fn on_message(&mut self, msg: S2C) {
         match msg {
             S2C::Welcome { your_id, server, channels, clients, permissions, .. } => {
-                let address = match &self.conn {
-                    Conn::Connecting { address, .. } => address.clone(),
-                    _ => String::new(),
-                };
-                let server_key = ServerKey::of(&address);
-                let recent = Recent { address, server_name: server.name.clone() };
-                self.settings.recent.retain(|r| r.address != recent.address);
-                self.settings.recent.insert(0, recent);
-                self.settings.recent.truncate(MAX_RECENT);
-
-                let name = server.name.clone();
-                let welcome = server.welcome.clone();
-                for c in &clients {
-                    self.apply_user_volume(c.id, &c.nickname);
-                }
-                self.view = Some(ServerView::new(your_id, server, channels, clients, permissions));
-                self.conn = Conn::Connected { server: server_key };
-                self.voice.connected();
-                self.tabs = base_tabs();
-                self.active_tab = 1;
-                self.sync_channel_tab_title();
-                self.push(0, LineKind::System, format!("Connected to {name}"));
-                self.sound(Sound::Connected);
-                if !welcome.is_empty() {
-                    self.push(0, LineKind::System, welcome);
-                }
-                let ch = self.tabs[1].title.clone();
-                self.push(1, LineKind::System, format!("You joined {ch}"));
-                self.tabs[0].unread = 0;
-                self.focus_input = true;
-                if self.settings.status != ClientStatus::default() {
-                    self.net.send(C2S::SetStatus(self.settings.status));
-                }
+                self.on_welcome(your_id, server, channels, clients, permissions);
             }
             S2C::ClientJoined(info) => {
                 self.apply_user_volume(info.id, &info.nickname);
@@ -114,53 +85,8 @@ impl App {
                     self.sound(Sound::UserConnected);
                 }
             }
-            S2C::ClientLeft { id, reason } => {
-                let Some(view) = &self.view else { return };
-                let Some(c) = view.clients.get(&id) else { return };
-                let name = c.nickname.clone();
-                let here = Some(c.channel) == view.my_channel();
-                let verb = match reason {
-                    LeaveReason::Disconnected => Some("disconnected"),
-                    LeaveReason::TimedOut => Some("timed out"),
-                    // The kick notice already said so.
-                    LeaveReason::Kicked => None,
-                };
-                self.apply(&S2C::ClientLeft { id, reason });
-                if let Some(verb) = verb {
-                    self.push(0, LineKind::System, format!("{name} {verb}"));
-                }
-                if here {
-                    self.push(1, LineKind::System, format!("{name} left the channel"));
-                    self.sound(match reason {
-                        LeaveReason::TimedOut => Sound::UserLostConnection,
-                        LeaveReason::Disconnected | LeaveReason::Kicked => Sound::UserDisconnected,
-                    });
-                }
-                if let Some(i) = self.tabs.iter().position(|t| t.kind == TabKind::Private(id)) {
-                    self.push(i, LineKind::System, format!("{name} went offline"));
-                }
-            }
-            S2C::ClientMoved { id, channel } => {
-                let Some(view) = &self.view else { return };
-                let Some(c) = view.clients.get(&id) else { return };
-                let name = c.nickname.clone();
-                let from = c.channel;
-                let mine = view.my_channel();
-                let is_me = id == view.my_id;
-                self.apply(&S2C::ClientMoved { id, channel });
-                if is_me {
-                    self.sync_channel_tab_title();
-                    let ch = self.channel_name(channel);
-                    self.push(1, LineKind::System, format!("You joined {ch}"));
-                    self.sound(Sound::ChannelSwitched);
-                } else if Some(channel) == mine {
-                    self.push(1, LineKind::System, format!("{name} joined the channel"));
-                    self.sound(Sound::UserJoined);
-                } else if Some(from) == mine {
-                    self.push(1, LineKind::System, format!("{name} left the channel"));
-                    self.sound(Sound::UserLeft);
-                }
-            }
+            S2C::ClientLeft { id, reason } => self.on_client_left(id, reason),
+            S2C::ClientMoved { id, channel } => self.on_client_moved(id, channel),
             S2C::ClientShown(ref info) => {
                 self.apply_user_volume(info.id, &info.nickname);
                 let here = self.view.as_ref().and_then(ServerView::my_channel) == Some(info.channel);
@@ -241,6 +167,98 @@ impl App {
                 self.push(tab, LineKind::Error, message);
             }
             S2C::Rejected { .. } | S2C::Pong { .. } => {} // handled by the net layer
+        }
+    }
+
+    fn on_welcome(
+        &mut self,
+        your_id: ClientId,
+        server: ServerInfo,
+        channels: Vec<ChannelInfo>,
+        clients: Vec<ClientInfo>,
+        permissions: Permissions,
+    ) {
+        let address = match &self.conn {
+            Conn::Connecting { address, .. } => address.clone(),
+            _ => String::new(),
+        };
+        let server_key = ServerKey::of(&address);
+        let recent = Recent { address, server_name: server.name.clone() };
+        self.settings.recent.retain(|r| r.address != recent.address);
+        self.settings.recent.insert(0, recent);
+        self.settings.recent.truncate(MAX_RECENT);
+
+        let name = server.name.clone();
+        let welcome = server.welcome.clone();
+        for c in &clients {
+            self.apply_user_volume(c.id, &c.nickname);
+        }
+        self.view = Some(ServerView::new(your_id, server, channels, clients, permissions));
+        self.conn = Conn::Connected { server: server_key };
+        self.voice.connected();
+        self.tabs = base_tabs();
+        self.active_tab = 1;
+        self.sync_channel_tab_title();
+        self.push(0, LineKind::System, format!("Connected to {name}"));
+        self.sound(Sound::Connected);
+        if !welcome.is_empty() {
+            self.push(0, LineKind::System, welcome);
+        }
+        let ch = self.tabs[1].title.clone();
+        self.push(1, LineKind::System, format!("You joined {ch}"));
+        self.tabs[0].unread = 0;
+        self.focus_input = true;
+        if self.settings.status != ClientStatus::default() {
+            self.net.send(C2S::SetStatus(self.settings.status));
+        }
+    }
+
+    fn on_client_left(&mut self, id: ClientId, reason: LeaveReason) {
+        let Some(view) = &self.view else { return };
+        let Some(c) = view.clients.get(&id) else { return };
+        let name = c.nickname.clone();
+        let here = Some(c.channel) == view.my_channel();
+        let verb = match reason {
+            LeaveReason::Disconnected => Some("disconnected"),
+            LeaveReason::TimedOut => Some("timed out"),
+            // The kick notice already said so.
+            LeaveReason::Kicked => None,
+        };
+        self.apply(&S2C::ClientLeft { id, reason });
+        if let Some(verb) = verb {
+            self.push(0, LineKind::System, format!("{name} {verb}"));
+        }
+        if here {
+            self.push(1, LineKind::System, format!("{name} left the channel"));
+            self.sound(match reason {
+                LeaveReason::TimedOut => Sound::UserLostConnection,
+                LeaveReason::Disconnected | LeaveReason::Kicked => Sound::UserDisconnected,
+            });
+        }
+        if let Some(i) = self.tabs.iter().position(|t| t.kind == TabKind::Private(id)) {
+            self.push(i, LineKind::System, format!("{name} went offline"));
+        }
+    }
+
+    fn on_client_moved(&mut self, id: ClientId, channel: ChannelId) {
+        let Some(view) = &self.view else { return };
+        let Some(c) = view.clients.get(&id) else { return };
+        let name = c.nickname.clone();
+        let from = c.channel;
+        let mine = view.my_channel();
+        let is_me = id == view.my_id;
+        self.apply(&S2C::ClientMoved { id, channel });
+        if is_me {
+            self.sync_channel_tab_title();
+            let ch = self.channel_name(channel);
+            self.push(1, LineKind::System, format!("You joined {ch}"));
+            self.sound(Sound::ChannelSwitched);
+        } else if Some(channel) == mine {
+            self.push(1, LineKind::System, format!("{name} joined the channel"));
+            self.sound(Sound::UserJoined);
+        } else if Some(from) == mine {
+            self.push(1, LineKind::System, format!("{name} left the channel"));
+            self.sound(Sound::UserLeft);
         }
     }
 

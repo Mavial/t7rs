@@ -13,7 +13,7 @@ use t7_proto::{
 
 use super::server_settings::perm_label;
 use super::widgets::{dialog_footer, dialog_header, field_label, hint, row, section, text_input};
-use super::{App, manages};
+use super::{App, default_channel_name, manages};
 use crate::icons::Icon;
 use crate::theme::Btn;
 use crate::{icons, theme};
@@ -79,8 +79,9 @@ impl ChannelForm {
     }
 }
 
-/// a category has only the first two, and only those who manage the channel
-/// change the last two.
+/// The channel tab: name, topic, password and size limit. A category or lobby
+/// has only the first two, and only those who manage the channel change the
+/// last two.
 fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, may_create_permanent: bool, may_manage: bool) {
     field_label(ui, "Name");
     let name = ui.add(text_input(&mut form.name).char_limit(MAX_CHANNEL_NAME_LEN));
@@ -225,17 +226,13 @@ fn tri_state(ui: &mut egui::Ui, setting: &mut Setting, perm: Perm) {
     }
 }
 
-fn moderator_list(
-    ui: &mut egui::Ui,
-    kind: ChannelKind,
-    list: &[(Identity, Option<String>)],
-    unmoderate: &mut Option<Identity>,
-) {
+fn moderator_list(ui: &mut egui::Ui, kind: ChannelKind, list: &[(Identity, Option<String>)]) -> Option<Identity> {
     let joinable = kind != ChannelKind::Category;
     if !joinable && list.is_empty() {
-        return;
+        return None;
     }
     section(ui, "Moderators");
+    let mut removed = None;
     if list.is_empty() {
         hint(ui, "Nobody yet. Right-click someone in this channel to make them a moderator.");
     }
@@ -250,11 +247,12 @@ fn moderator_list(
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(Btn::secondary("Remove").small()).clicked() {
-                    *unmoderate = Some(*identity);
+                    removed = Some(*identity);
                 }
             });
         });
     }
+    removed
 }
 
 impl App {
@@ -352,19 +350,100 @@ impl App {
         }
         let Some(dialog) = &mut self.channel_dialog else { return };
         let view = self.view.as_ref();
-        let parent = match dialog {
-            ChannelDialog::Form(f) => f.parent,
+        let form_context = match dialog {
+            ChannelDialog::Form(form) => Some(FormContext::new(view, form)),
             _ => None,
         };
+        let wide = form_context.as_ref().is_some_and(|cx| cx.moderators.is_some());
+        let mut reply = Reply::default();
+        let modal = theme::modal("channel-dialog").show(ctx, |ui| {
+            ui.set_width(if wide { 420.0 } else { 380.0 });
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            match dialog {
+                ChannelDialog::Form(form) => {
+                    let cx = form_context.as_ref().expect("made for the form");
+                    channel_form(ui, view, form, cx, enter, &mut reply);
+                }
+                ChannelDialog::Password { channel, name, password, focused } => {
+                    dialog_header(ui, &format!("Join {name}"), "This channel has a password.");
+                    let field = ui.add(text_input(password).password(true).hint_text("Password"));
+                    if !*focused {
+                        field.request_focus();
+                        *focused = true;
+                    }
+                    dialog_footer(ui, |ui| {
+                        if ui.add(Btn::primary("Join")).clicked() || enter {
+                            reply.send.push(C2S::JoinChannel { channel: *channel, password: Some(password.clone()) });
+                        }
+                        reply.close |= ui.add(Btn::secondary("Cancel")).clicked();
+                    });
+                }
+                ChannelDialog::Delete { channel, name, occupants } => {
+                    let mut text = "Its sub-channels are deleted too.".to_owned();
+                    if *occupants > 0 {
+                        let who =
+                            if *occupants == 1 { "The 1 person".to_owned() } else { format!("The {occupants} people") };
+                        let default = view.map_or_else(|| "the default channel".to_owned(), default_channel_name);
+                        let _ = write!(text, " {who} inside will move to {default}.");
+                    }
+                    dialog_header(ui, &format!("Delete {name}?"), &text);
+                    dialog_footer(ui, |ui| {
+                        if ui.add(Btn::danger("Delete")).clicked() {
+                            reply.send.push(C2S::DeleteChannel { id: *channel });
+                        }
+                        reply.close |= ui.add(Btn::secondary("Cancel")).clicked();
+                    });
+                }
+                ChannelDialog::ClaimOwnership { token, focused } => {
+                    claim_ownership(ui, token, focused, enter, &mut reply);
+                }
+            }
+        });
+        if let Some(message) = reply.now {
+            self.net.send(message);
+        }
+        if !reply.send.is_empty() {
+            for msg in reply.send {
+                self.net.send(msg);
+            }
+            reply.close = true;
+        }
+        if reply.close || modal.should_close() {
+            self.channel_dialog = None;
+        }
+    }
+}
+
+/// What a frame of the channel dialog asks for.
+#[derive(Default)]
+struct Reply {
+    /// Sent, and then the dialog closes.
+    send: Vec<C2S>,
+    /// Sent while the dialog stays open.
+    now: Option<C2S>,
+    close: bool,
+}
+
+/// What the channel form offers, worked out from the view before drawing it.
+struct FormContext {
+    may_create_permanent: bool,
+    may_rename: bool,
+    may_manage: bool,
+    saved_overrides: Option<Vec<Override>>,
+    /// The channel's moderators, with nicknames for those online; `None`
+    /// unless you may change them, which also adds the Permissions tab.
+    moderators: Option<Vec<(Identity, Option<String>)>>,
+    parent_name: Option<String>,
+    /// The kinds a new channel may be; empty when there is no choice.
+    kinds: Vec<(ChannelKind, &'static str)>,
+}
+
+impl FormContext {
+    fn new(view: Option<&ServerView>, form: &ChannelForm) -> Self {
+        let (parent, editing) = (form.parent, form.editing);
         let may_create_permanent = view.is_some_and(|v| manages(v, Scope::within(parent)));
-        let editing = match dialog {
-            ChannelDialog::Form(f) => f.editing,
-            _ => None,
-        };
-        let may_rename = editing.is_none_or(|id| view.is_some_and(|v| v.may_rename(id)));
-        let may_manage = editing.is_none_or(|id| view.is_some_and(|v| v.may_in(id, Perm::ManageChannels)));
         let saved_overrides = view.zip(editing).and_then(|(v, id)| v.channels.get(&id)).map(|c| c.overrides.clone());
-        let moderators: Option<Vec<(Identity, Option<String>)>> = view
+        let moderators = view
             .zip(editing)
             .filter(|(v, id)| v.may_in(*id, Perm::ManagePermissions))
             .and_then(|(v, id)| v.channels.get(&id).map(|ch| (v, ch)))
@@ -372,19 +451,11 @@ impl App {
                 let online = |m: &Identity| v.clients.values().find(|c| c.identity == *m).map(|c| c.nickname.clone());
                 ch.moderators.iter().map(|m| (*m, online(m))).collect()
             });
-        let mut unmoderate: Option<Identity> = None;
-        let channel_name =
-            |id: Option<ChannelId>| id.and_then(|id| self.view.as_ref()?.channels.get(&id).map(|c| c.name.clone()));
-        let parent_name = match dialog {
-            ChannelDialog::Form(f) if f.editing.is_none() => channel_name(f.parent),
-            _ => None,
+        let parent_name = match editing {
+            None => parent.and_then(|id| view?.channels.get(&id).map(|c| c.name.clone())),
+            Some(_) => None,
         };
-        let default_name = self
-            .view
-            .as_ref()
-            .and_then(|v| v.channels.values().find(|c| c.default).map(|c| c.name.clone()))
-            .unwrap_or_else(|| "the default channel".into());
-        let kinds: Vec<(ChannelKind, &str)> = match (view, editing) {
+        let kinds = match (view, editing) {
             (Some(v), None) if may_create_permanent => {
                 let above = parent.and_then(|p| v.tree().iter().find(|(_, id)| *id == p));
                 let parent_depth = above.map_or(0, |(d, _)| d + 1);
@@ -396,148 +467,107 @@ impl App {
             }
             _ => Vec::new(),
         };
-
-        let mut send: Vec<C2S> = Vec::new();
-        let mut close = false;
-        let modal = theme::modal("channel-dialog").show(ctx, |ui| {
-            ui.set_width(if moderators.is_some() { 420.0 } else { 380.0 });
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            match dialog {
-                ChannelDialog::Form(form) => {
-                    let (noun, general) = match form.kind {
-                        ChannelKind::Voice => ("channel", "Channel"),
-                        ChannelKind::Category => ("category", "Category"),
-                        ChannelKind::Lobby => ("lobby", "Lobby"),
-                    };
-                    let title = match (&form.editing, &parent_name) {
-                        (Some(_), _) => format!("Edit {}", form.name),
-                        (None, Some(parent)) => format!("New {noun} in {parent}"),
-                        (None, None) => format!("New {noun}"),
-                    };
-                    dialog_header(ui, &title, "");
-                    if moderators.is_some() {
-                        theme::segmented(
-                            ui,
-                            &mut form.tab,
-                            &[(FormTab::Channel, general), (FormTab::Permissions, "Permissions")],
-                        );
-                        ui.add_space(14.0);
-                    } else if kinds.len() > 1 {
-                        theme::segmented(ui, &mut form.kind, &kinds);
-                        ui.add_space(14.0);
-                    }
-                    match (form.tab, view.zip(form.editing)) {
-                        (FormTab::Permissions, Some((view, channel))) => {
-                            permissions_tab(ui, view, channel, form);
-                            if let Some(list) = &moderators {
-                                moderator_list(ui, form.kind, list, &mut unmoderate);
-                            }
-                        }
-                        _ => {
-                            ui.add_enabled_ui(may_rename, |ui| {
-                                channel_fields(ui, form, may_create_permanent, may_manage);
-                                if may_rename && !may_manage {
-                                    hint(ui, "As its moderator you can change the name and topic.");
-                                }
-                            });
-                        }
-                    }
-                    let ready = !form.name.trim().is_empty();
-                    dialog_footer(ui, |ui| {
-                        let label = if form.editing.is_some() { "Save" } else { "Create" };
-                        if ui.add_enabled(ready, Btn::primary(label)).clicked() || (ready && enter) {
-                            let settings = form.settings();
-                            match form.editing {
-                                Some(id) => {
-                                    if may_rename {
-                                        send.push(C2S::EditChannel { id, settings });
-                                    }
-                                    let saved = saved_overrides.as_deref().unwrap_or_default();
-                                    send.extend(form.override_changes(id, saved));
-                                }
-                                None => send.push(C2S::CreateChannel {
-                                    parent: form.parent,
-                                    settings,
-                                    temporary: form.temporary && form.kind == ChannelKind::Voice,
-                                    kind: form.kind,
-                                }),
-                            }
-                        }
-                        if ui.add(Btn::secondary("Cancel")).clicked() {
-                            close = true;
-                        }
-                    });
-                }
-                ChannelDialog::Password { channel, name, password, focused } => {
-                    dialog_header(ui, &format!("Join {name}"), "This channel has a password.");
-                    let field = ui.add(text_input(password).password(true).hint_text("Password"));
-                    if !*focused {
-                        field.request_focus();
-                        *focused = true;
-                    }
-                    dialog_footer(ui, |ui| {
-                        if ui.add(Btn::primary("Join")).clicked() || enter {
-                            send.push(C2S::JoinChannel { channel: *channel, password: Some(password.clone()) });
-                        }
-                        if ui.add(Btn::secondary("Cancel")).clicked() {
-                            close = true;
-                        }
-                    });
-                }
-                ChannelDialog::Delete { channel, name, occupants } => {
-                    let mut text = "Its sub-channels are deleted too.".to_owned();
-                    if *occupants > 0 {
-                        let who =
-                            if *occupants == 1 { "The 1 person".to_owned() } else { format!("The {occupants} people") };
-                        let _ = write!(text, " {who} inside will move to {default_name}.");
-                    }
-                    dialog_header(ui, &format!("Delete {name}?"), &text);
-                    dialog_footer(ui, |ui| {
-                        if ui.add(Btn::danger("Delete")).clicked() {
-                            send.push(C2S::DeleteChannel { id: *channel });
-                        }
-                        if ui.add(Btn::secondary("Cancel")).clicked() {
-                            close = true;
-                        }
-                    });
-                }
-                ChannelDialog::ClaimOwnership { token, focused } => {
-                    dialog_header(
-                        ui,
-                        "Claim ownership",
-                        "The owner can do everything and hands out roles. The server shows a claim token in its \
-                         log until someone claims it; it works once.",
-                    );
-                    let field = ui.add(text_input(token).password(true).hint_text("Claim token"));
-                    if !*focused {
-                        field.request_focus();
-                        *focused = true;
-                    }
-                    let ready = !token.trim().is_empty();
-                    dialog_footer(ui, |ui| {
-                        if ui.add_enabled(ready, Btn::primary("Claim")).clicked() || (ready && enter) {
-                            send.push(C2S::ClaimOwnership { token: token.trim().to_owned() });
-                        }
-                        if ui.add(Btn::secondary("Cancel")).clicked() {
-                            close = true;
-                        }
-                    });
-                }
-            }
-        });
-        if let (Some(identity), Some(channel)) = (unmoderate, editing) {
-            self.net.send(C2S::SetModerator { channel, identity, moderator: false });
-        }
-        if !send.is_empty() {
-            for msg in send {
-                self.net.send(msg);
-            }
-            close = true;
-        }
-        if close || modal.should_close() {
-            self.channel_dialog = None;
+        Self {
+            may_create_permanent,
+            may_rename: editing.is_none_or(|id| view.is_some_and(|v| v.may_rename(id))),
+            may_manage: editing.is_none_or(|id| view.is_some_and(|v| v.may_in(id, Perm::ManageChannels))),
+            saved_overrides,
+            moderators,
+            parent_name,
+            kinds,
         }
     }
+}
+
+/// Creating or editing a channel: its settings, or its permissions and moderators.
+fn channel_form(
+    ui: &mut egui::Ui,
+    view: Option<&ServerView>,
+    form: &mut ChannelForm,
+    cx: &FormContext,
+    enter: bool,
+    reply: &mut Reply,
+) {
+    let (noun, general) = match form.kind {
+        ChannelKind::Voice => ("channel", "Channel"),
+        ChannelKind::Category => ("category", "Category"),
+        ChannelKind::Lobby => ("lobby", "Lobby"),
+    };
+    let title = match (&form.editing, &cx.parent_name) {
+        (Some(_), _) => format!("Edit {}", form.name),
+        (None, Some(parent)) => format!("New {noun} in {parent}"),
+        (None, None) => format!("New {noun}"),
+    };
+    dialog_header(ui, &title, "");
+    if cx.moderators.is_some() {
+        theme::segmented(ui, &mut form.tab, &[(FormTab::Channel, general), (FormTab::Permissions, "Permissions")]);
+        ui.add_space(14.0);
+    } else if cx.kinds.len() > 1 {
+        theme::segmented(ui, &mut form.kind, &cx.kinds);
+        ui.add_space(14.0);
+    }
+    match (form.tab, view.zip(form.editing)) {
+        (FormTab::Permissions, Some((view, channel))) => {
+            permissions_tab(ui, view, channel, form);
+            if let Some(list) = &cx.moderators
+                && let Some(identity) = moderator_list(ui, form.kind, list)
+            {
+                reply.now = Some(C2S::SetModerator { channel, identity, moderator: false });
+            }
+        }
+        _ => {
+            ui.add_enabled_ui(cx.may_rename, |ui| {
+                channel_fields(ui, form, cx.may_create_permanent, cx.may_manage);
+                if cx.may_rename && !cx.may_manage {
+                    hint(ui, "As its moderator you can change the name and topic.");
+                }
+            });
+        }
+    }
+    let ready = !form.name.trim().is_empty();
+    dialog_footer(ui, |ui| {
+        let label = if form.editing.is_some() { "Save" } else { "Create" };
+        if ui.add_enabled(ready, Btn::primary(label)).clicked() || (ready && enter) {
+            let settings = form.settings();
+            match form.editing {
+                Some(id) => {
+                    if cx.may_rename {
+                        reply.send.push(C2S::EditChannel { id, settings });
+                    }
+                    let saved = cx.saved_overrides.as_deref().unwrap_or_default();
+                    reply.send.extend(form.override_changes(id, saved));
+                }
+                None => reply.send.push(C2S::CreateChannel {
+                    parent: form.parent,
+                    settings,
+                    temporary: form.temporary && form.kind == ChannelKind::Voice,
+                    kind: form.kind,
+                }),
+            }
+        }
+        reply.close |= ui.add(Btn::secondary("Cancel")).clicked();
+    });
+}
+
+fn claim_ownership(ui: &mut egui::Ui, token: &mut String, focused: &mut bool, enter: bool, reply: &mut Reply) {
+    dialog_header(
+        ui,
+        "Claim ownership",
+        "The owner can do everything and hands out roles. The server shows a claim token in its \
+         log until someone claims it; it works once.",
+    );
+    let field = ui.add(text_input(token).password(true).hint_text("Claim token"));
+    if !*focused {
+        field.request_focus();
+        *focused = true;
+    }
+    let ready = !token.trim().is_empty();
+    dialog_footer(ui, |ui| {
+        if ui.add_enabled(ready, Btn::primary("Claim")).clicked() || (ready && enter) {
+            reply.send.push(C2S::ClaimOwnership { token: token.trim().to_owned() });
+        }
+        reply.close |= ui.add(Btn::secondary("Cancel")).clicked();
+    });
 }
 
 #[cfg(test)]
