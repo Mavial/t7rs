@@ -229,7 +229,8 @@ pub enum C2S {
         id: ChannelId,
         settings: ChannelSettings,
     },
-    /// `position` is the index among the new siblings.
+    /// `position` is the index among the new siblings the client sees, not
+    /// counting the moved channel.
     MoveChannel {
         id: ChannelId,
         parent: Option<ChannelId>,

@@ -285,8 +285,13 @@ impl Channels {
         Ok(())
     }
 
-    /// Moves `id` under `parent`, at `position` among its new siblings.
-    pub fn move_to(&mut self, id: ChannelId, parent: Option<ChannelId>, position: u32) -> Result<(), ChannelError> {
+    pub fn move_to(
+        &mut self,
+        id: ChannelId,
+        parent: Option<ChannelId>,
+        position: u32,
+        sees: impl Fn(ChannelId) -> bool,
+    ) -> Result<(), ChannelError> {
         let moving = self.map.get(&id).ok_or(ChannelError::NotFound)?;
         let temporary = moving.info.temporary;
         let old_parent = moving.info.parent;
@@ -315,7 +320,8 @@ impl Channels {
             }
         }
         let mut siblings: Vec<ChannelId> = self.children_of(parent).into_iter().filter(|&s| s != id).collect();
-        let at = (position as usize).min(siblings.len());
+        let before = siblings.iter().copied().filter(|&s| sees(s)).nth(position as usize);
+        let at = before.and_then(|b| siblings.iter().position(|&s| s == b)).unwrap_or(siblings.len());
         siblings.insert(at, id);
         self.map.get_mut(&id).expect("checked").info.parent = parent;
         self.renumber(&siblings);
@@ -670,13 +676,13 @@ mod tests {
     #[test]
     fn move_reorders_and_refuses_nonsense() {
         let mut ch = three();
-        ch.move_to(4, None, 0).unwrap(); // AFK to the top
+        ch.move_to(4, None, 0, |_| true).unwrap();
         assert_eq!(names(&ch), ["AFK", "Lobby", "Gaming", "Squad"]);
-        ch.move_to(3, None, 99).unwrap(); // Squad out of Gaming, to the end
+        ch.move_to(3, None, 99, |_| true).unwrap();
         assert_eq!(names(&ch), ["AFK", "Lobby", "Gaming", "Squad"]);
         assert_eq!(ch.get(3).unwrap().parent, None);
-        ch.move_to(3, Some(2), 0).unwrap();
-        assert_eq!(ch.move_to(2, Some(3), 0), Err(ChannelError::IntoItself));
+        ch.move_to(3, Some(2), 0, |_| true).unwrap();
+        assert_eq!(ch.move_to(2, Some(3), 0, |_| true), Err(ChannelError::IntoItself));
         let saved = ch.to_config();
         assert_eq!(saved.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["AFK", "Lobby", "Gaming"]);
         assert_eq!(saved[2].children[0].name, "Squad");
@@ -736,9 +742,9 @@ mod tests {
             Err(ChannelError::KindSettings(ChannelKind::Category))
         );
         assert_eq!(ch.edit(games, &limited), Err(ChannelError::KindSettings(ChannelKind::Category)));
-        assert_eq!(ch.move_to(games, Some(2), 0), Err(ChannelError::CategoryPlacement));
-        ch.move_to(games, None, 0).unwrap();
-        ch.move_to(2, Some(games), 0).unwrap();
+        assert_eq!(ch.move_to(games, Some(2), 0, |_| true), Err(ChannelError::CategoryPlacement));
+        ch.move_to(games, None, 0, |_| true).unwrap();
+        ch.move_to(2, Some(games), 0, |_| true).unwrap();
         assert_eq!(names(&ch), ["Games", "Gaming", "Squad", "Duo", "Lobby", "AFK"]);
         assert_eq!(ch.set_default(games), Err(ChannelError::DefaultKind(ChannelKind::Category)));
         let back = Channels::from_config(&ch.to_config()).unwrap();
@@ -769,9 +775,9 @@ mod tests {
 
         ch.delete(rooms).unwrap();
         let rooms = ch.create(Some(2), &lobby("Rooms", None), false, ChannelKind::Lobby, 1).unwrap();
-        assert_eq!(ch.move_to(rooms, Some(3), 0), Err(ChannelError::TooDeep));
-        assert_eq!(ch.move_to(2, Some(4), 0), Err(ChannelError::TooDeep), "nor does the channel it is in");
-        ch.move_to(rooms, None, 0).unwrap();
+        assert_eq!(ch.move_to(rooms, Some(3), 0, |_| true), Err(ChannelError::TooDeep));
+        assert_eq!(ch.move_to(2, Some(4), 0, |_| true), Err(ChannelError::TooDeep), "nor does the channel it is in");
+        ch.move_to(rooms, None, 0, |_| true).unwrap();
 
         let lobbies = ChannelError::KindSettings(ChannelKind::Lobby);
         assert_eq!(ch.create(None, &lobby("Pop-up", None), true, ChannelKind::Lobby, 1), Err(lobbies));
@@ -829,7 +835,7 @@ deny = [\"view\"]"
         assert_eq!(ch.set_override(1, deny_view(RoleId::MODERATOR)), Err(ChannelError::HidesDefault));
         ch.set_override(1, Override::denying(RoleId::EVERYONE, Perms::of(&[Perm::Speak]))).unwrap();
         ch.set_override(2, deny_view(RoleId::EVERYONE)).unwrap();
-        assert_eq!(ch.move_to(1, Some(2), 0), Err(ChannelError::HidesDefault));
+        assert_eq!(ch.move_to(1, Some(2), 0, |_| true), Err(ChannelError::HidesDefault));
         assert_eq!(ch.set_default(3), Err(ChannelError::HidesDefault), "below a hidden channel");
         ch.set_default(4).unwrap();
         assert_eq!(ch.set_override(4, deny_view(RoleId::EVERYONE)), Err(ChannelError::HidesDefault));

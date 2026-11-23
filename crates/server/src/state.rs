@@ -403,7 +403,8 @@ impl Server {
                 {
                     return self.error(id, "you can't move this channel there");
                 }
-                match self.channels.move_to(channel, parent, position) {
+                let sees = |c| self.clients[&id].last_sent_permissions.sees(c);
+                match self.channels.move_to(channel, parent, position, sees) {
                     Ok(()) => {
                         self.channels_changed();
                         self.save_channels();
