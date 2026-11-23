@@ -96,7 +96,10 @@ async fn a_full_server_opens_no_room() {
     assert_eq!(channels.len(), MAX_CHANNELS);
     ana.send(C2S::JoinChannel { channel: id_of(channels, "Rooms"), password: None }).await;
     let refusal = error(&mut ana).await;
-    assert!(refusal.contains("no room for you there") && refusal.contains("maximum of 200 channels"), "{refusal}");
+    assert!(
+        refusal.contains("no room for you there") && refusal.contains(&format!("maximum of {MAX_CHANNELS} channels")),
+        "{refusal}"
+    );
     let after = ana.sync().await;
     assert!(after.iter().all(|m| !matches!(m, S2C::ClientMoved { .. } | S2C::Channels(_))), "{after:?}");
 }

@@ -17,7 +17,7 @@ fn may_in(welcome: &S2C, channel: ChannelId) -> Perms {
 #[tokio::test]
 async fn the_first_to_claim_owns_the_server() {
     let dir = data_dir("claim");
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (mut alice, wa) = TestClient::connect(addr, "alice", None).await;
     let (mut bob, wb) = TestClient::connect(addr, "bob", None).await;
     let token = claim_token(&dir);
@@ -45,7 +45,7 @@ async fn the_first_to_claim_owns_the_server() {
     task.abort();
     drop((alice, bob));
 
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (_, welcome) = TestClient::connect(addr, "alice", None).await;
     let S2C::Welcome { your_id, clients, permissions, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
     assert_eq!(clients.iter().find(|c| c.id == your_id).unwrap().role.as_deref(), Some("Owner"));
@@ -54,13 +54,15 @@ async fn the_first_to_claim_owns_the_server() {
     bob.send(C2S::ClaimOwnership { token }).await;
     assert!(error(&mut bob).await.contains("already used"));
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// The last protocol before roles.
+const BEFORE_ROLES: u16 = 5;
 
 #[tokio::test]
 async fn clients_from_before_roles_are_told_to_update() {
     let addr = start(DEFAULT_CONFIG).await;
-    let (_, reply) = TestClient::connect_as(addr, "old", None, 5).await;
+    let (_, reply) = TestClient::connect_as(addr, "old", None, BEFORE_ROLES).await;
     assert!(rejected(&reply).contains("please update your T7"), "{reply:?}");
 }
 
@@ -75,7 +77,7 @@ async fn installs_from_before_roles_keep_their_moderators() {
     );
     std::fs::write(dir.join("channels.toml"), channels).unwrap();
     let cfg = format!("admin_token = \"old-token\"\n{DEFAULT_CONFIG}");
-    let (addr, task) = start_in(&cfg, Some(dir.clone())).await;
+    let (addr, task) = start_in(&cfg, Some(dir.to_path_buf())).await;
     let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
     assert!(!dir.join("admin_token.txt").exists(), "the admin token is gone");
     assert!(!claim_token(&dir).is_empty(), "a claim token replaces it");
@@ -98,7 +100,6 @@ async fn installs_from_before_roles_keep_their_moderators() {
     moder.send(C2S::ClaimOwnership { token: "old-token".into() }).await;
     assert!(error(&mut moder).await.contains("wrong"));
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
@@ -160,7 +161,7 @@ async fn people_act_only_on_those_below_their_role() {
 #[tokio::test]
 async fn roles_and_who_holds_them_survive_a_restart() {
     let dir = data_dir("roles");
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (mut owner, _, _) = claim(addr, &dir, HOME).await;
     let (bob, _) = TestClient::connect(addr, "bob", None).await;
     let roles = owner.change_roles(RoleChange::Create { name: "DJ".into() }).await;
@@ -174,7 +175,7 @@ async fn roles_and_who_holds_them_survive_a_restart() {
     task.abort();
     drop((owner, bob));
 
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (mut owner, _) = TestClient::connect(addr, "admin", None).await;
     let S2C::Roles(roles) = owner.until(|m| matches!(m, S2C::Roles(_))).await else { unreachable!() };
     assert_eq!(roles.ranked[0], perms::Role { id: dj, name: "DJ".into(), perms });
@@ -193,7 +194,7 @@ async fn roles_and_who_holds_them_survive_a_restart() {
     task.abort();
     drop(owner);
 
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (mut owner, _) = TestClient::connect(addr, "admin", None).await;
     let (_, welcome) = TestClient::connect(addr, "bob", None).await;
     let S2C::Welcome { your_id, clients, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
@@ -202,20 +203,19 @@ async fn roles_and_who_holds_them_survive_a_restart() {
     let roles = owner.change_roles(RoleChange::Delete { id: dj }).await;
     assert!(roles.role(dj).is_none() && !roles.members.contains_key(&key("bob").identity()));
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
 async fn an_owner_reset_hands_the_server_to_the_next_claimer() {
     let dir = data_dir("owner-reset");
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (owner, _, _) = claim(addr, &dir, HOME).await;
     task.abort();
     drop(owner);
 
     let token = t7_server::reset_owner_claim(&dir).unwrap();
     assert_eq!(claim_token(&dir), token);
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (mut old, welcome) = TestClient::connect(addr, "admin", None).await;
     let S2C::Welcome { permissions, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
     assert_eq!(permissions.server, Perms::ALL, "the owner stays until the token is redeemed");
@@ -227,5 +227,4 @@ async fn an_owner_reset_hands_the_server_to_the_next_claimer() {
     let owner = S2C::ClientRole { id: new_id, role: Some("Owner".into()) };
     assert_eq!(old.until(|m| matches!(m, S2C::ClientRole { id, .. } if *id == new_id)).await, owner);
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }

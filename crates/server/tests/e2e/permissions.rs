@@ -43,7 +43,7 @@ fn talks(permissions: &perms::Permissions, channel: ChannelId) -> (bool, bool) {
 #[tokio::test]
 async fn the_closest_setting_wins_inherit_takes_the_parents_and_allow_beats_deny() {
     let dir = data_dir("layered");
-    let (addr, task) = start_in(LAYERED, Some(dir.clone())).await;
+    let (addr, task) = start_in(LAYERED, Some(dir.to_path_buf())).await;
     let (mut owner, _, channels) = claim(addr, &dir, HOME).await;
     let [lobby, games, squad, duo] = ["Lobby", "Games", "Squad", "Duo"].map(|name| id_of(&channels, name));
     let (_, wu) = TestClient::connect(addr, "user", None).await;
@@ -60,13 +60,12 @@ async fn the_closest_setting_wins_inherit_takes_the_parents_and_allow_beats_deny
     assert_eq!(talks(&p, squad), (true, true));
     assert_eq!(talks(&p, duo), (true, true));
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
 async fn overrides_take_effect_at_once_and_survive_a_restart() {
     let dir = data_dir("override-restart");
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (mut owner, _, channels) = claim(addr, &dir, HOME).await;
     let [lobby, hangout] = ["Lobby", "Hangout"].map(|name| id_of(&channels, name));
     let (mut user, wu) = TestClient::connect(addr, "user", None).await;
@@ -86,7 +85,7 @@ async fn overrides_take_effect_at_once_and_survive_a_restart() {
     task.abort();
     drop((owner, user));
 
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (_, welcome) = TestClient::connect(addr, "user", None).await;
     let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
     assert!(channels.iter().all(|c| c.name != "Hangout"), "{channels:?}");
@@ -94,7 +93,6 @@ async fn overrides_take_effect_at_once_and_survive_a_restart() {
     let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed: {welcome:?}") };
     assert_eq!(overrides_in(&channels, id_of(&channels, "Hangout")), [hidden]);
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]

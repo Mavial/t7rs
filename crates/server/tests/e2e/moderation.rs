@@ -220,7 +220,7 @@ async fn temporary_bans_end() {
 #[tokio::test]
 async fn moderators_and_bans_survive_a_restart() {
     let dir = data_dir("moderation");
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (mut admin, _, channels) = claim(addr, &dir, ADMIN_IP).await;
     let gaming = id_of(&channels, "Gaming");
     let (mut user, _) = TestClient::connect(addr, "user", None).await;
@@ -239,7 +239,7 @@ async fn moderators_and_bans_survive_a_restart() {
     task.abort();
     drop(admin);
 
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (_, reply) = TestClient::connect(addr, "mallory", None).await;
     assert!(rejected(&reply).contains("spam"), "the ban was lost: {reply:?}");
     let (mut admin, welcome) = TestClient::connect_from(addr, ADMIN_IP, "admin", &key("admin")).await;
@@ -258,7 +258,6 @@ async fn moderators_and_bans_survive_a_restart() {
     let saved = std::fs::read_to_string(dir.join("channels.toml")).unwrap();
     assert!(!saved.contains("moderators"), "{saved}");
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
@@ -309,7 +308,7 @@ async fn voice_is_dropped_from_those_who_may_not_speak_or_are_server_muted() {
 #[tokio::test]
 async fn a_server_mute_holds_across_reconnects_until_lifted_or_a_restart() {
     let dir = data_dir("server-mute");
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (mut owner, owner_id, _) = claim(addr, &dir, HOME).await;
     let (mut moder, wm) = TestClient::connect(addr, "mod", None).await;
     let (user, wu) = TestClient::connect(addr, "user", None).await;
@@ -343,18 +342,17 @@ async fn a_server_mute_holds_across_reconnects_until_lifted_or_a_restart() {
     user.until(|m| *m == S2C::ClientSpeech { id: user_id, speech: Speech::ServerMuted }).await;
     task.abort();
     drop((owner, moder, user));
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (_, wu) = TestClient::connect(addr, "user", None).await;
     let S2C::Welcome { your_id, clients, .. } = &wu else { panic!("not welcomed: {wu:?}") };
     assert_eq!(clients.iter().find(|c| c.id == *your_id).unwrap().speech, Speech::Allowed);
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
 async fn people_move_only_those_below_them_into_channels_they_can_see() {
     let dir = data_dir("move-members");
-    let (addr, task) = start_in(PRIVATE, Some(dir.clone())).await;
+    let (addr, task) = start_in(PRIVATE, Some(dir.to_path_buf())).await;
     let (mut owner, _, _) = claim(addr, &dir, HOME).await;
     let S2C::Welcome { channels, .. } = TestClient::connect(addr, "admin", None).await.1 else { unreachable!() };
     let [lobby, office, afk] = ["Lobby", "Office", "AFK"].map(|name| id_of(&channels, name));
@@ -396,5 +394,4 @@ async fn people_move_only_those_below_them_into_channels_they_can_see() {
     moder.send(C2S::MoveMember { target: user_id, channel: afk }).await;
     user.until(|m| *m == S2C::ClientMoved { id: user_id, channel: afk }).await;
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }

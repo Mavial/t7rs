@@ -132,6 +132,16 @@ pub(crate) async fn start(cfg_text: &str) -> SocketAddr {
 
 /// A server keeping its files in `dir`; abort the task to stop it.
 pub(crate) async fn start_in(cfg_text: &str, dir: Option<PathBuf>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    serve(cfg_text, dir, None).await
+}
+
+/// Starts a server; `owned` is removed once the server task ends, which at the
+/// latest is when the test's runtime shuts down.
+async fn serve(
+    cfg_text: &str,
+    dir: Option<PathBuf>,
+    owned: Option<DataDir>,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let cfg: Config = toml::from_str(cfg_text).unwrap();
     // The server also binds UDP on the TCP port's number, so pick a port free for both.
     let listener = loop {
@@ -142,6 +152,7 @@ pub(crate) async fn start_in(cfg_text: &str, dir: Option<PathBuf>) -> (SocketAdd
     };
     let addr = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
+        let _owned = owned;
         if let Err(e) = t7_server::serve(listener, &cfg, dir.as_deref()).await {
             panic!("test server failed: {e}");
         }
@@ -198,11 +209,29 @@ pub(crate) fn id_of(list: &[ChannelInfo], name: &str) -> ChannelId {
     list.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no channel {name}")).id
 }
 
-pub(crate) fn data_dir(test: &str) -> PathBuf {
+/// A test's own data directory in the temp folder, removed when dropped, so
+/// also when the test fails.
+pub(crate) struct DataDir(PathBuf);
+
+impl std::ops::Deref for DataDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for DataDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+pub(crate) fn data_dir(test: &str) -> DataDir {
     let dir = std::env::temp_dir().join(format!("t7-e2e-{test}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    DataDir(dir)
 }
 
 pub(crate) fn claim_token(dir: &Path) -> String {
@@ -221,8 +250,9 @@ pub(crate) async fn claim(addr: SocketAddr, dir: &Path, from: Ipv4Addr) -> (Test
 
 pub(crate) async fn start_owned(test: &str, from: Ipv4Addr) -> (SocketAddr, TestClient, ClientId, Vec<ChannelInfo>) {
     let dir = data_dir(test);
-    let (addr, _) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
-    let (owner, id, channels) = claim(addr, &dir, from).await;
+    let path = dir.to_path_buf();
+    let (addr, _) = serve(DEFAULT_CONFIG, Some(path.clone()), Some(dir)).await;
+    let (owner, id, channels) = claim(addr, &path, from).await;
     (addr, owner, id, channels)
 }
 

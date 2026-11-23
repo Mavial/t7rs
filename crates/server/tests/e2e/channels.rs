@@ -20,7 +20,7 @@ async fn fingerprint(addr: SocketAddr) -> tls::Fingerprint {
 #[tokio::test]
 async fn channels_are_managed_with_permissions() {
     let dir = data_dir("manage");
-    let (addr, _) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, _) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let (mut user, wu) = TestClient::connect(addr, "user", None).await;
     let user_id = welcomed_id(&wu);
     let S2C::Welcome { channels, .. } = &wu else { unreachable!() };
@@ -101,7 +101,7 @@ async fn channels_are_managed_with_permissions() {
 async fn channel_edits_and_the_certificate_survive_a_restart() {
     let dir = data_dir("restart");
     let cfg: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     let first = fingerprint(addr).await;
     let cert = std::fs::read(dir.join("tls_cert.der")).expect("certificate saved");
     assert_eq!(tls::Fingerprint::of(&cert), first);
@@ -118,14 +118,13 @@ async fn channel_edits_and_the_certificate_survive_a_restart() {
     task.abort();
     drop(admin);
 
-    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.clone())).await;
+    let (addr, task) = start_in(DEFAULT_CONFIG, Some(dir.to_path_buf())).await;
     assert_eq!(fingerprint(addr).await, first, "a restart must keep the certificate");
     let (_, welcome) = TestClient::connect(addr, "later", None).await;
     let S2C::Welcome { channels, .. } = welcome else { panic!("not welcomed") };
     assert!(channels.iter().any(|c| c.name == "Saved"), "channel lost on restart");
     assert_eq!(channels.len(), Channels::count(&cfg) + 1);
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 /// Channel count of a config, for comparisons.
@@ -148,7 +147,7 @@ fn names(list: &[ChannelInfo]) -> Vec<&str> {
 #[tokio::test]
 async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators() {
     let dir = data_dir("hidden");
-    let (addr, task) = start_in(PRIVATE, Some(dir.clone())).await;
+    let (addr, task) = start_in(PRIVATE, Some(dir.to_path_buf())).await;
     let (mut owner, _, _) = claim(addr, &dir, HOME).await;
     let S2C::Welcome { channels, .. } = TestClient::connect(addr, "admin", None).await.1 else { unreachable!() };
     let [lobby, staff, office] = ["Lobby", "Staff", "Office"].map(|name| id_of(&channels, name));
@@ -196,7 +195,6 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     let S2C::Welcome { channels, .. } = TestClient::connect(addr, "mod", None).await.1 else { unreachable!() };
     assert_eq!(names(&channels), ["AFK", "Lobby"]);
     task.abort();
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
