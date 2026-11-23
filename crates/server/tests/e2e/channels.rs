@@ -2,14 +2,14 @@
 
 use std::net::SocketAddr;
 
-use t7_proto::perms::RoleId;
+use t7_proto::perms::{Perm, RoleId};
 use t7_proto::*;
 use t7_server::config::{Config, DEFAULT_CONFIG};
 use tokio::net::TcpStream;
 
 use crate::harness::{
-    HOME, PRIVATE, TestClient, assign, claim, data_dir, error, id_of, new_channel, settings, start_in, start_owned,
-    welcomed_id,
+    HOME, PRIVATE, TestClient, assign, claim, data_dir, error, id_of, new_channel, set, settings, start_in,
+    start_owned, welcomed_id,
 };
 
 /// The certificate fingerprint a server presents.
@@ -195,6 +195,32 @@ async fn a_channel_hidden_from_everyone_hides_its_people_but_not_from_moderators
     let S2C::Welcome { channels, .. } = TestClient::connect(addr, "mod", None).await.1 else { unreachable!() };
     assert_eq!(names(&channels), ["AFK", "Lobby"]);
     task.abort();
+}
+
+#[tokio::test]
+async fn people_who_lose_their_channel_land_in_an_open_one() {
+    let (addr, mut owner, _, channels) = start_owned("landing", HOME).await;
+    let [lobby, hangout, gaming] = ["Lobby", "Hangout", "Gaming"].map(|name| id_of(&channels, name));
+    let one = ChannelSettings { max_clients: Some(1), ..settings("Lobby") };
+    owner.send(C2S::EditChannel { id: lobby, settings: one }).await;
+    owner.channels().await;
+    let (mut user, wu) = TestClient::connect(addr, "user", None).await;
+    let user_id = welcomed_id(&wu);
+    let S2C::Welcome { clients, .. } = &wu else { unreachable!() };
+    assert_eq!(clients.iter().find(|c| c.id == user_id).unwrap().channel, hangout, "the owner fills the Lobby");
+
+    owner.send(set(hangout, RoleId::EVERYONE, &[], &[Perm::View])).await;
+    let moved = user.until(|m| matches!(m, S2C::ClientMoved { id, .. } if *id == user_id)).await;
+    assert_eq!(moved, S2C::ClientMoved { id: user_id, channel: gaming }, "hidden from them");
+
+    owner.send(C2S::DeleteChannel { id: gaming }).await;
+    let S2C::ClientMoved { channel, .. } =
+        user.until(|m| matches!(m, S2C::ClientMoved { id, .. } if *id == user_id)).await
+    else {
+        unreachable!()
+    };
+    let S2C::Welcome { channels, .. } = TestClient::connect(addr, "cid", None).await.1 else { unreachable!() };
+    assert_eq!(channels.iter().find(|c| c.id == channel).unwrap().name, "AFK", "deleted under them");
 }
 
 #[tokio::test]

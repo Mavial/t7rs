@@ -103,3 +103,33 @@ async fn a_full_server_opens_no_room() {
     let after = ana.sync().await;
     assert!(after.iter().all(|m| !matches!(m, S2C::ClientMoved { .. } | S2C::Channels(_))), "{after:?}");
 }
+
+#[tokio::test]
+async fn an_owner_keeps_their_room_from_a_room_inside_it() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut ana, wa) = TestClient::connect(addr, "ana", None).await;
+    let (mut ben, wb) = TestClient::connect(addr, "ben", None).await;
+    let (ana_id, ben_id) = (welcomed_id(&wa), welcomed_id(&wb));
+    let S2C::Welcome { channels, .. } = &wa else { unreachable!() };
+    let [lobby, rooms] = ["Lobby", "Create a room"].map(|name| id_of(channels, name));
+    ana.send(C2S::JoinChannel { channel: rooms, password: None }).await;
+    let room = ana.channels().await.into_iter().find(|c| c.parent == Some(rooms)).expect("ana's room").id;
+    let side = C2S::CreateChannel {
+        parent: Some(room),
+        settings: settings("Side"),
+        temporary: true,
+        kind: ChannelKind::Voice,
+    };
+    ana.send(side).await;
+    let side = id_of(&ana.channels().await, "Side");
+    ana.until(|m| *m == S2C::ClientMoved { id: ana_id, channel: side }).await;
+
+    ben.send(C2S::JoinChannel { channel: room, password: None }).await;
+    ana.until(|m| *m == S2C::ClientMoved { id: ben_id, channel: room }).await;
+    let S2C::Welcome { channels, .. } = TestClient::connect(addr, "cid", None).await.1 else { unreachable!() };
+    let owner = |id| channels.iter().find(|c| c.id == id).unwrap().owner;
+    assert_eq!((owner(room), owner(side)), (Some(ana_id), Some(ana_id)));
+
+    ana.send(C2S::JoinChannel { channel: lobby, password: None }).await;
+    until_owned_by(&mut ben, room, Some(ben_id)).await;
+}

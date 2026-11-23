@@ -630,14 +630,14 @@ impl Server {
         } else {
             channel
         };
-        self.move_to(id, channel);
-        self.tidy_rooms();
+        self.move_and_tidy_rooms(id, channel);
         Ok(())
     }
 
-    fn move_to(&mut self, id: ClientId, channel: ChannelId) {
+    fn move_and_tidy_rooms(&mut self, id: ClientId, channel: ChannelId) {
         self.clients.get_mut(&id).expect("exists").place(channel);
         self.sync_about(id);
+        self.tidy_rooms();
     }
 
     fn sync_about(&mut self, subject: ClientId) {
@@ -717,11 +717,14 @@ impl Server {
             client.last_sent_permissions = now;
             client.info.role = role;
         }
-        let default = self.channels.default_id();
-        let mut evicted = Vec::new();
-        for c in self.clients.values_mut().filter(|c| !c.last_sent_permissions.may_in(c.info.channel, Perm::View)) {
-            c.place(default);
-            evicted.push(c.info.id);
+        let evicted: Vec<ClientId> = (self.clients.values())
+            .filter(|c| !c.last_sent_permissions.may_in(c.info.channel, Perm::View))
+            .map(|c| c.info.id)
+            .collect();
+        for &id in &evicted {
+            let c = &self.clients[&id];
+            let landing = self.landing_channel(&c.last_sent_permissions, Some(c.info.channel));
+            self.clients.get_mut(&id).expect("exists").place(landing);
         }
 
         for id in regranted {
@@ -791,9 +794,8 @@ impl Server {
                     self.save_channels();
                 }
                 if kind == ChannelKind::Voice && self.clients[&id].last_sent_permissions.may_in(channel, Perm::View) {
-                    self.move_to(id, channel);
+                    self.move_and_tidy_rooms(id, channel);
                 }
-                self.tidy_rooms();
             }
             Err(e) => self.error(id, &e.message()),
         }
@@ -830,17 +832,16 @@ impl Server {
             Ok(removed) => removed.into_iter().collect(),
             Err(e) => return self.error(id, &e.message()),
         };
-        let default = self.channels.default_id();
         let evicted: Vec<ClientId> =
             self.clients.values().filter(|c| removed.contains(&c.info.channel)).map(|c| c.info.id).collect();
         for client in evicted {
-            self.move_to(client, default);
+            let landing = self.landing_channel(&self.clients[&client].last_sent_permissions, None);
+            self.move_and_tidy_rooms(client, landing);
         }
         self.channels_changed();
         if permanent {
             self.save_channels();
         }
-        self.tidy_rooms();
     }
 
     fn claim(&mut self, id: ClientId, token: &str) {
@@ -902,8 +903,7 @@ impl Server {
         } else {
             let t = &self.clients[&target];
             let landing = self.landing_channel(&t.last_sent_permissions, Some(t.info.channel));
-            self.move_to(target, landing);
-            self.tidy_rooms();
+            self.move_and_tidy_rooms(target, landing);
         }
     }
 
@@ -1036,7 +1036,8 @@ impl Server {
         let mut handed = false;
         for room in self.channels.temporaries() {
             let owner = self.channels.get(room).and_then(|c| c.owner);
-            let inside = |c: &&Client| c.info.channel == room;
+            let below = self.channels.subtree(room);
+            let inside = |c: &&Client| below.contains(&c.info.channel);
             if owner.is_some_and(|o| self.clients.get(&o).is_some_and(|c| inside(&c))) {
                 continue;
             }
