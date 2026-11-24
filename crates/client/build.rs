@@ -13,6 +13,14 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // Screen sharing's libraries load when a share or decoder first needs
+    // them; imported normally, they load at startup and cost idle memory.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        for dll in ["mfplat.dll", "d3d11.dll", "dxgi.dll"] {
+            println!("cargo:rustc-link-arg-bins=/DELAYLOAD:{dll}");
+        }
+        println!("cargo:rustc-link-arg-bins=delayimp.lib");
+    }
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let ico = out.join("t7.ico");
     std::fs::write(&ico, ico_file(&[16, 24, 32, 48, 64, 256])).unwrap();
