@@ -8,6 +8,9 @@ pub use capture::sources;
 pub use decode::Decoder;
 pub use share::Share;
 
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
+
 use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_LITE, MFShutdown, MFStartup};
 use windows::Win32::System::Com::{CO_MTA_USAGE_COOKIE, CoDecrementMTAUsage, CoIncrementMTAUsage};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -41,6 +44,39 @@ impl Drop for Runtime {
             let _ = MFShutdown();
             let _ = CoDecrementMTAUsage(self.0);
         }
+    }
+}
+
+struct Running<T> {
+    objects: ManuallyDrop<T>,
+    _runtime: Runtime,
+}
+
+impl<T> Running<T> {
+    fn start(make: impl FnOnce() -> Result<T, String>) -> Result<Running<T>, String> {
+        let runtime = Runtime::start()?;
+        Ok(Running { objects: ManuallyDrop::new(make()?), _runtime: runtime })
+    }
+}
+
+impl<T> Deref for Running<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.objects
+    }
+}
+
+impl<T> DerefMut for Running<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.objects
+    }
+}
+
+impl<T> Drop for Running<T> {
+    fn drop(&mut self) {
+        // SAFETY: dropped once, here, before the runtime it needs goes.
+        unsafe { ManuallyDrop::drop(&mut self.objects) }
     }
 }
 

@@ -12,17 +12,30 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 
 use super::super::Picture;
 use super::super::nv12::{self, Nv12};
-use super::{Context, Runtime};
+use super::{Context, Running};
 
-pub struct Decoder {
-    transform: IMFTransform,
-    output: Option<Output>,
-    _runtime: Runtime,
-}
+pub struct Decoder(Running<Transform>);
 
 // SAFETY: Microsoft's H.264 decoder is free-threaded, and every object here
 // is only used through `&mut self`.
 unsafe impl Send for Decoder {}
+
+impl Decoder {
+    pub fn new() -> Result<Decoder, String> {
+        Running::start(Transform::new).map(Decoder)
+    }
+
+    /// Feeds one access unit; when it completes a picture, writes the newest
+    /// one into `picture` and returns true.
+    pub fn decode(&mut self, data: &[u8], picture: &mut Picture) -> Result<bool, String> {
+        self.0.decode(data, picture)
+    }
+}
+
+struct Transform {
+    transform: IMFTransform,
+    output: Option<Output>,
+}
 
 struct Output {
     sample: Option<IMFSample>,
@@ -35,9 +48,8 @@ struct Output {
     height: usize,
 }
 
-impl Decoder {
-    pub fn new() -> Result<Decoder, String> {
-        let runtime = Runtime::start()?;
+impl Transform {
+    fn new() -> Result<Transform, String> {
         unsafe {
             let transform: IMFTransform =
                 CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER).context("H.264 decoder")?;
@@ -49,13 +61,11 @@ impl Decoder {
             transform.SetInputType(0, &input, 0).context("decoder input type")?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0).context("starting the decoder")?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).context("starting the decoder")?;
-            Ok(Decoder { transform, output: None, _runtime: runtime })
+            Ok(Transform { transform, output: None })
         }
     }
 
-    /// Feeds one access unit; when it completes a picture, writes the newest
-    /// one into `picture` and returns true.
-    pub fn decode(&mut self, data: &[u8], picture: &mut Picture) -> Result<bool, String> {
+    fn decode(&mut self, data: &[u8], picture: &mut Picture) -> Result<bool, String> {
         let sample = input(data)?;
         let mut decoded = false;
         loop {

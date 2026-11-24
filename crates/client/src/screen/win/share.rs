@@ -14,7 +14,7 @@ use super::super::{AccessUnit, Handle, Params, ShareStats, Source, annexb, fit};
 use super::capture::{self, Capture};
 use super::convert::{Converter, Gpu, SLOTS};
 use super::encode::Encoder;
-use super::{Runtime, now_100ns};
+use super::{Running, now_100ns};
 
 pub enum Wake {
     Frame,
@@ -115,7 +115,7 @@ fn run(
     shared: &Shared,
     ready: &SyncSender<Result<String, String>>,
 ) {
-    let mut pipeline = match Pipeline::new(source, params, wake) {
+    let mut pipeline = match Running::start(|| Pipeline::new(source, params, wake)) {
         Ok(pipeline) => pipeline,
         Err(e) => {
             let _ = ready.send(Err(e));
@@ -136,12 +136,10 @@ struct Pipeline {
     gpu: Gpu,
     size: (u32, u32),
     fps: u32,
-    _runtime: Runtime,
 }
 
 impl Pipeline {
     fn new(source: Source, params: &Params, wake: &Sender<Wake>) -> Result<Pipeline, String> {
-        let runtime = Runtime::start()?;
         let monitor = match source {
             Source::Monitor(Handle(h)) => HMONITOR(h as _),
             Source::Window(Handle(h)) => unsafe { MonitorFromWindow(HWND(h as _), MONITOR_DEFAULTTONEAREST) },
@@ -151,7 +149,7 @@ impl Pipeline {
         let size = fit(capture.size(), params.max);
         let encoder = Encoder::new(&gpu, size, params, wake)?;
         let converter = Converter::new(&gpu, capture.size(), size, params.fps)?;
-        Ok(Pipeline { capture, encoder, converter, gpu, size, fps: params.fps, _runtime: runtime })
+        Ok(Pipeline { capture, encoder, converter, gpu, size, fps: params.fps })
     }
 
     fn run(&mut self, wakes: &Receiver<Wake>, shared: &Shared, sink: &mut dyn FnMut(AccessUnit)) -> Result<(), String> {
