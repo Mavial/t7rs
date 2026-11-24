@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorF
 
 use super::super::{AccessUnit, Handle, Params, ShareStats, Source, annexb, fit};
 use super::capture::{self, Capture};
-use super::convert::{Converter, Gpu, SLOTS};
+use super::convert::{Converter, Gpu};
 use super::encode::Encoder;
 use super::{Running, now_100ns};
 
@@ -161,10 +161,9 @@ impl Pipeline {
         let mut pending: Option<(Direct3D11CaptureFrame, i64)> = None;
         let mut keyframe = true;
         let mut out = Out { inflight: VecDeque::new(), frame: 0 };
-        let mut slot = 0;
         let mut last: Option<usize> = None;
         let is_async = self.encoder.is_async();
-        let ready = |credit: u32, out: &Out| (credit > 0 || !is_async) && out.inflight.len() < SLOTS - 1;
+        let ready = |credit: u32, out: &Out| (credit > 0 || !is_async) && Converter::slot_free(out.inflight.len());
         loop {
             let waiting = ready(credit, &out) && (pending.is_some() || (keyframe && last.is_some()));
             let timeout = if waiting {
@@ -211,10 +210,8 @@ impl Pipeline {
                 if (desc.Width, desc.Height) != self.converter.input_size() {
                     self.converter = Converter::new(&self.gpu, (desc.Width, desc.Height), self.size, self.fps)?;
                 }
-                self.converter.convert(&self.gpu, &texture, content, slot)?;
-                let used = slot;
+                let used = self.converter.convert(&self.gpu, &texture, content)?;
                 last = Some(used);
-                slot = (slot + 1) % SLOTS;
                 (used, time)
             } else if keyframe && let Some(last) = last {
                 (last, now_100ns())

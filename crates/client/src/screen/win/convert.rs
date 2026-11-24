@@ -75,7 +75,7 @@ fn adapter_for(monitor: HMONITOR) -> Option<IDXGIAdapter> {
     }
 }
 
-pub const SLOTS: usize = 4;
+const SLOTS: usize = 4;
 
 pub struct Converter {
     video: ID3D11VideoContext1,
@@ -83,6 +83,7 @@ pub struct Converter {
     input: ID3D11Texture2D,
     input_view: ID3D11VideoProcessorInputView,
     outputs: Vec<(ID3D11Texture2D, ID3D11VideoProcessorOutputView)>,
+    next: usize,
     input_size: (u32, u32),
     output_size: (u32, u32),
 }
@@ -121,7 +122,7 @@ impl Converter {
                 Anonymous: D3D11_VIDEO_COLOR_0 { RGBA: D3D11_VIDEO_COLOR_RGBA { R: 0.0, G: 0.0, B: 0.0, A: 1.0 } },
             };
             video.VideoProcessorSetOutputBackgroundColor(&processor, false, &raw const black);
-            Ok(Converter { video, processor, input, input_view, outputs, input_size, output_size })
+            Ok(Converter { video, processor, input, input_view, outputs, next: 0, input_size, output_size })
         }
     }
 
@@ -130,11 +131,17 @@ impl Converter {
         self.input_size
     }
 
+    pub fn slot_free(in_encoder: usize) -> bool {
+        in_encoder < SLOTS - 1
+    }
+
     pub fn output(&self, slot: usize) -> &ID3D11Texture2D {
         &self.outputs[slot].0
     }
 
-    pub fn convert(&self, gpu: &Gpu, frame: &ID3D11Texture2D, content: (u32, u32), slot: usize) -> Result<(), String> {
+    pub fn convert(&mut self, gpu: &Gpu, frame: &ID3D11Texture2D, content: (u32, u32)) -> Result<usize, String> {
+        let slot = self.next;
+        self.next = (slot + 1) % SLOTS;
         let content = (content.0.min(self.input_size.0), content.1.min(self.input_size.1));
         let source = RECT { left: 0, top: 0, right: content.0 as i32, bottom: content.1 as i32 };
         let dest = letterbox(content, self.output_size);
@@ -155,7 +162,7 @@ impl Converter {
             result.context("scaling the frame")?;
             gpu.context.Flush();
         }
-        Ok(())
+        Ok(slot)
     }
 }
 
