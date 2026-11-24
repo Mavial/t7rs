@@ -2,61 +2,74 @@
 // which `include!` it. Plain std only: build.rs compiles it on its own.
 // Keep in sync with assets/icon.svg.
 
-/// An axis-aligned block on the mark's 64-unit grid, painted in order.
-pub struct Block {
-    pub x: u8,
-    pub y: u8,
-    pub w: u8,
-    pub h: u8,
-    pub rgb: u32,
+pub enum Shape {
+    Rect { x: u8, y: u8, w: u8, h: u8, radius: u8, rgb: u32 },
+    Line { a: (u8, u8), b: (u8, u8), width: u8, rgb: u32 },
 }
 
 pub const GRID: u32 = 64;
 
-const fn b(x: u8, y: u8, w: u8, h: u8, rgb: u32) -> Block {
-    Block { x, y, w, h, rgb }
+const fn rect(x: u8, y: u8, w: u8, h: u8, radius: u8, rgb: u32) -> Shape {
+    Shape::Rect { x, y, w, h, radius, rgb }
 }
 
-/// A "T7" monogram on a stepped tile, after assets/icon.svg.
-pub const MARK: &[Block] = &[
+const fn line(a: (u8, u8), b: (u8, u8), width: u8, rgb: u32) -> Shape {
+    Shape::Line { a, b, width, rgb }
+}
+
+pub const MARK: &[Shape] = &[
     // Tile: border, then fill.
-    b(8, 0, 48, 64, 0x3a3a3a),
-    b(4, 4, 56, 56, 0x3a3a3a),
-    b(0, 8, 64, 48, 0x3a3a3a),
-    b(8, 4, 48, 56, 0x161616),
-    b(4, 8, 56, 48, 0x161616),
-    // T in blue, 7 in white.
-    b(8, 16, 24, 8, 0x2580c3),
-    b(16, 24, 8, 24, 0x2580c3),
-    b(36, 16, 20, 8, 0xededed),
-    b(48, 24, 8, 8, 0xededed),
-    b(44, 32, 8, 8, 0xededed),
-    b(40, 40, 8, 8, 0xededed),
+    rect(0, 0, 64, 64, 14, 0x3a3a3a),
+    rect(3, 3, 58, 58, 11, 0x161616),
+    rect(9, 28, 8, 12, 4, 0xededed),
+    rect(21, 21, 8, 26, 4, 0xededed),
+    line((39, 20), (52, 20), 8, 0x6ab4ea),
+    line((52, 20), (41, 44), 8, 0x6ab4ea),
 ];
+
+impl Shape {
+    pub fn rgb(&self) -> u32 {
+        match *self {
+            Shape::Rect { rgb, .. } | Shape::Line { rgb, .. } => rgb,
+        }
+    }
+
+    pub fn contains(&self, px: f32, py: f32) -> bool {
+        match *self {
+            Shape::Rect { x, y, w, h, radius, .. } => {
+                let (hw, hh, r) = (f32::from(w) / 2.0, f32::from(h) / 2.0, f32::from(radius));
+                let qx = (px - f32::from(x) - hw).abs() - hw + r;
+                let qy = (py - f32::from(y) - hh).abs() - hh + r;
+                let outside = qx.max(0.0).hypot(qy.max(0.0));
+                outside + qx.max(qy).min(0.0) <= r
+            }
+            Shape::Line { a, b, width, .. } => {
+                let (ax, ay) = (f32::from(a.0), f32::from(a.1));
+                let (dx, dy) = (f32::from(b.0) - ax, f32::from(b.1) - ay);
+                let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+                (px - ax - t * dx).hypot(py - ay - t * dy) <= f32::from(width) / 2.0
+            }
+        }
+    }
+}
 
 /// Rasterizes the mark to `size`×`size` straight RGBA, 8×8 samples per pixel.
 pub fn rasterize(size: u32) -> Vec<u8> {
     const SS: u32 = 8;
+    let unit = GRID as f32 / size as f32;
     let mut out = Vec::with_capacity((size * size * 4) as usize);
     for py in 0..size {
         for px in 0..size {
             let (mut r, mut g, mut bl, mut a) = (0u32, 0u32, 0u32, 0u32);
             for sy in 0..SS {
                 for sx in 0..SS {
-                    // Sample point in grid units, scaled by size*SS to stay integral.
-                    let gx = (px * SS + sx) * 2 + 1;
-                    let gy = (py * SS + sy) * 2 + 1;
-                    let scale = size * SS * 2;
-                    let hit = MARK.iter().rev().find(|k| {
-                        let inside = |v: u32, lo: u8, len: u8| {
-                            v * GRID >= u32::from(lo) * scale && v * GRID < (u32::from(lo) + u32::from(len)) * scale
-                        };
-                        inside(gx, k.x, k.w) && inside(gy, k.y, k.h)
-                    });
-                    if let Some(k) = hit {
-                        r += k.rgb >> 16 & 0xff;
-                        g += k.rgb >> 8 & 0xff;
-                        bl += k.rgb & 0xff;
+                    let gx = (px as f32 + (sx as f32 + 0.5) / SS as f32) * unit;
+                    let gy = (py as f32 + (sy as f32 + 0.5) / SS as f32) * unit;
+                    if let Some(k) = MARK.iter().rev().find(|k| k.contains(gx, gy)) {
+                        let rgb = k.rgb();
+                        r += rgb >> 16 & 0xff;
+                        g += rgb >> 8 & 0xff;
+                        bl += rgb & 0xff;
                         a += 1;
                     }
                 }
