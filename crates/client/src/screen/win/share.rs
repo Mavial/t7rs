@@ -177,8 +177,12 @@ impl Pipeline {
         let mut out = Out { inflight: VecDeque::new(), frame: 0 };
         let mut slot = 0;
         let mut last: Option<usize> = None;
+        let is_async = self.encoder.is_async();
+        let ready = |credit: u32, out: &Out| (credit > 0 || !is_async) && out.inflight.len() < SLOTS - 1;
         loop {
-            let waiting = pending.is_some() || (keyframe && last.is_some());
+            // The frame time matters only while the encoder can take a frame.
+            // Until then, its NeedInput or HaveOutput wakes this thread.
+            let waiting = ready(credit, &out) && (pending.is_some() || (keyframe && last.is_some()));
             let timeout = if waiting {
                 due.checked_sub(early).unwrap().saturating_duration_since(Instant::now())
             } else {
@@ -215,8 +219,7 @@ impl Pipeline {
             }
 
             let now = Instant::now();
-            let encoder_ready = (credit > 0 || !self.encoder.is_async()) && out.inflight.len() < SLOTS - 1;
-            if !encoder_ready || now + early < due {
+            if !ready(credit, &out) || now + early < due {
                 continue;
             }
             let (input, time) = if let Some((frame, time)) = pending.take() {
@@ -243,7 +246,7 @@ impl Pipeline {
             credit = credit.saturating_sub(1);
             out.inflight.push_back(time);
             due = if due + interval < now { now + interval } else { due + interval };
-            if !self.encoder.is_async() {
+            if !is_async {
                 while let Some(data) = self.encoder.output()? {
                     out.emit(data, shared, sink);
                 }
