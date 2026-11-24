@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use super::Picture;
 
 const WEIGHT_BITS: u32 = 8;
@@ -17,13 +19,11 @@ impl Scaler {
     pub fn draw(&mut self, picture: &Picture, out: &mut [u32], width: usize, height: usize) {
         let (pw, ph) = (picture.width as usize, picture.height as usize);
         let out = &mut out[..width * height];
-        if out.is_empty() {
-            return;
-        }
+        let (Some(window_w), Some(window_h)) = (NonZeroUsize::new(width), NonZeroUsize::new(height)) else { return };
         if pw == 0 || ph == 0 || picture.pixels.len() < pw * ph {
             return out.fill(0);
         }
-        let (x0, y0, w, h) = fit((pw, ph), (width, height));
+        let (x0, y0, w, h) = fit((pw, ph), (window_w, window_h));
         if self.sizes != (pw, ph, w, h) {
             self.sizes = (pw, ph, w, h);
             self.x = Axis::new(pw, w);
@@ -102,7 +102,8 @@ fn pack(lanes: u64) -> u32 {
     ((bytes & 0xFFFF) | ((bytes >> 16) & 0xFFFF_0000)) as u32
 }
 
-fn fit(picture: (usize, usize), window: (usize, usize)) -> (usize, usize, usize, usize) {
+fn fit(picture: (usize, usize), window: (NonZeroUsize, NonZeroUsize)) -> (usize, usize, usize, usize) {
+    let window = (window.0.get(), window.1.get());
     let scale = (window.0 as f64 / picture.0 as f64).min(window.1 as f64 / picture.1 as f64);
     let w = ((picture.0 as f64 * scale).round() as usize).clamp(1, window.0);
     let h = ((picture.1 as f64 * scale).round() as usize).clamp(1, window.1);
@@ -183,11 +184,19 @@ mod tests {
     fn one_color_stays_that_color_at_any_size() {
         let p = picture(1920, 1080, |_, _| 0x00C8_6432);
         for (w, h) in [(1280, 720), (853, 480), (333, 187), (2560, 1440), (3000, 1000)] {
-            let (x0, y0, fw, fh) = fit((1920, 1080), (w, h));
+            let window = (NonZeroUsize::new(w).unwrap(), NonZeroUsize::new(h).unwrap());
+            let (x0, y0, fw, fh) = fit((1920, 1080), window);
             let out = draw(&p, w, h);
             let inside = (y0..y0 + fh).flat_map(|y| (x0..x0 + fw).map(move |x| y * w + x));
             assert!(inside.map(|i| out[i]).all(|px| px == 0x00C8_6432), "{w}x{h}");
         }
+    }
+
+    #[test]
+    fn a_window_with_no_area_draws_nothing() {
+        let p = picture(4, 3, |_, _| 0x00FF_FFFF);
+        assert_eq!(draw(&p, 0, 3), [0; 0]);
+        assert_eq!(draw(&p, 4, 0), [0; 0]);
     }
 
     #[test]
