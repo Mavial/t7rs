@@ -169,12 +169,12 @@ struct Watched {
     sharer: ClientId,
     sink: ScreenSink,
     assembler: Assembler,
-    asked: Instant,
+    next_ask: Instant,
 }
 
 impl Watched {
-    fn new(sharer: ClientId, sink: ScreenSink, now: Instant) -> Watched {
-        Watched { sharer, sink, assembler: Assembler::default(), asked: now }
+    fn new(sharer: ClientId, sink: ScreenSink, watch_sent: Instant) -> Watched {
+        Watched { sharer, sink, assembler: Assembler::default(), next_ask: watch_sent + voice::KEYFRAME_INTERVAL }
     }
 }
 
@@ -190,7 +190,7 @@ impl Viewer {
 
     fn keyframe_due(&self) -> Option<Instant> {
         let w = self.watched.as_ref()?;
-        w.assembler.waiting_for_keyframe().then(|| w.asked + voice::KEYFRAME_INTERVAL)
+        w.assembler.waiting_for_keyframe().then_some(w.next_ask)
     }
 
     fn ask(&mut self, now: Instant) -> Option<ClientId> {
@@ -198,7 +198,7 @@ impl Viewer {
             return None;
         }
         let w = self.watched.as_mut()?;
-        w.asked = now;
+        w.next_ask = now + voice::KEYFRAME_INTERVAL;
         Some(w.sharer)
     }
 
