@@ -60,15 +60,11 @@ impl Share {
                 }
             })
             .map_err(|e| format!("screen share thread: {e}"))?;
-        match started.recv() {
-            Ok(Ok(encoder)) => Ok(Share { wake, shared, encoder, thread: Some(thread) }),
-            Ok(Err(e)) => {
+        match started.recv().unwrap_or_else(|_| Err("the screen share thread stopped".into())) {
+            Ok(encoder) => Ok(Share { wake, shared, encoder, thread: Some(thread) }),
+            Err(e) => {
                 let _ = thread.join();
                 Err(e)
-            }
-            Err(_) => {
-                let _ = thread.join();
-                Err("the screen share thread stopped".into())
             }
         }
     }
