@@ -293,15 +293,24 @@ fn decode_bench(monitor: Source, seconds: u64) {
         Share::start(monitor, Quality::P1080_60, move |au| recording.lock().unwrap().push(au)).expect("share")
     };
     println!("recording {seconds} s with {}", share.encoder());
+    let cpu = process_cpu();
     std::thread::sleep(Duration::from_secs(seconds));
+    let share_cpu = process_cpu().saturating_sub(cpu);
     drop(share);
     let units = std::mem::take(&mut *recording.lock().unwrap());
     let bytes: usize = units.iter().map(|u| u.data.len()).sum();
     let keys = units.iter().filter(|u| u.key).count();
+    let mut sizes: Vec<usize> = units.iter().filter(|u| !u.key).map(|u| u.data.len()).collect();
+    sizes.sort_unstable();
+    let size = |p: usize| sizes.get(sizes.len().saturating_sub(1) * p / 100).copied().unwrap_or(0) / 1000;
     println!(
-        "recorded {} access units ({keys} keyframes), {:.0} kbit/s",
+        "recorded {} access units ({keys} keyframes), {:.0} kbit/s, delta frames p50 {} KB p99 {} KB max {} KB;          sharing alone: CPU {:.1}% of one core",
         units.len(),
-        bytes as f64 * 8.0 / 1000.0 / seconds as f64
+        bytes as f64 * 8.0 / 1000.0 / seconds as f64,
+        size(50),
+        size(99),
+        size(100),
+        share_cpu.as_secs_f64() / seconds as f64 * 100.0,
     );
 
     for recycle in [true, false] {
