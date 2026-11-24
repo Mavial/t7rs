@@ -87,6 +87,8 @@ fn parse_args() -> Args {
 #[derive(Default)]
 struct Second {
     keyframes: Vec<usize>,
+    /// The largest access unit that is not a keyframe.
+    largest: usize,
     decode: Vec<Duration>,
     /// Access unit out of the encoder to decode start: the channel's queueing.
     queued: Duration,
@@ -109,9 +111,13 @@ fn share_loop(monitor: Source, args: &Args) {
     let share = {
         let second = second.clone();
         Share::start(monitor, args.quality, move |au| {
+            let mut s = second.lock().unwrap();
             if au.key {
-                second.lock().unwrap().keyframes.push(au.data.len());
+                s.keyframes.push(au.data.len());
+            } else {
+                s.largest = s.largest.max(au.data.len());
             }
+            drop(s);
             let _ = units.send((au, Instant::now()));
         })
     };
@@ -185,11 +191,12 @@ fn report(share: &Share, second: &Mutex<Second>, seconds: u64, proxy: &EventLoop
         let decode_avg = s.decode.iter().sum::<Duration>() / (s.decode.len().max(1) as u32);
         let decode_max = s.decode.iter().max().copied().unwrap_or_default();
         println!(
-            "t={t:>2}s capture {:>3} fps | encoded {:>3} fps {:>5} kbit/s, latency avg {:.1} ms max {:.1} ms | \
+            "t={t:>2}s capture {:>3} fps | encoded {:>3} fps {:>5} kbit/s, largest {:>3} KB, latency avg {:.1} ms max {:.1} ms | \
              decode avg {:.1} ms max {:.1} ms, queued max {:.1} ms, shown {} | keyframes {:?} | CPU {:.1}% of one core",
             stats.captured,
             stats.encoded,
             stats.bytes * 8 / 1000,
+            s.largest / 1000,
             ms(stats.latency_total) / f64::from(stats.encoded.max(1)),
             ms(stats.latency_max),
             ms(decode_avg),
@@ -366,19 +373,29 @@ fn decode_bench(monitor: Source, seconds: u64) {
     );
 }
 
-/// User and kernel time of this process so far.
-#[cfg(windows)]
+/// CPU time this process has used so far. Counted in cycles, as tick-based
+/// process times are only sampled every 15.6 ms and swing wildly per second.
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn process_cpu() -> Duration {
-    use windows::Win32::Foundation::FILETIME;
-    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
-    let (mut a, mut b, mut kernel, mut user) = Default::default();
-    // SAFETY: out-pointers to locals.
-    let _ = unsafe { GetProcessTimes(GetCurrentProcess(), &raw mut a, &raw mut b, &raw mut kernel, &raw mut user) };
-    let t = |f: FILETIME| u64::from(f.dwHighDateTime) << 32 | u64::from(f.dwLowDateTime);
-    Duration::from_nanos((t(kernel) + t(user)) * 100)
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn QueryProcessCycleTime(process: isize, cycles: *mut u64) -> i32;
+    }
+    // The cycle counter runs at a fixed rate; measure it once against the clock.
+    static HZ: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    let hz = *HZ.get_or_init(|| {
+        let (start, cycles) = (Instant::now(), unsafe { std::arch::x86_64::_rdtsc() });
+        std::thread::sleep(Duration::from_millis(200));
+        (unsafe { std::arch::x86_64::_rdtsc() } - cycles) as f64 / start.elapsed().as_secs_f64()
+    });
+    let mut cycles = 0;
+    // SAFETY: an out-pointer to a local.
+    unsafe { QueryProcessCycleTime(GetCurrentProcess(), &raw mut cycles) };
+    Duration::from_secs_f64(cycles as f64 / hz)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(all(windows, target_arch = "x86_64")))]
 fn process_cpu() -> Duration {
     Duration::ZERO
 }
