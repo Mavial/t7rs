@@ -306,15 +306,16 @@ fn blit(picture: &Picture, out: &mut [u32], width: usize, height: usize) {
 
 fn decode_bench(monitor: Source, seconds: u64) {
     let recording: Arc<Mutex<Vec<AccessUnit>>> = Arc::default();
-    let share = {
+    // The share stops at the end of this block.
+    let share_cpu = {
         let recording = recording.clone();
-        Share::start(monitor, Quality::P1080_60, move |au| recording.lock().unwrap().push(au)).expect("share")
+        let share = Share::start(monitor, Quality::P1080_60, move |au| recording.lock().unwrap().push(au));
+        let share = share.expect("share");
+        println!("recording {seconds} s with {}", share.encoder());
+        let cpu = process_cpu();
+        std::thread::sleep(Duration::from_secs(seconds));
+        process_cpu().saturating_sub(cpu)
     };
-    println!("recording {seconds} s with {}", share.encoder());
-    let cpu = process_cpu();
-    std::thread::sleep(Duration::from_secs(seconds));
-    let share_cpu = process_cpu().saturating_sub(cpu);
-    drop(share);
     let units = std::mem::take(&mut *recording.lock().unwrap());
     let bytes: usize = units.iter().map(|u| u.data.len()).sum();
     let keys = units.iter().filter(|u| u.key).count();
