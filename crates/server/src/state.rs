@@ -84,6 +84,7 @@ impl Client {
 
 const VIDEO_BITS_PER_SEC: u32 = 12_000_000;
 
+/// Rate limiter: `burst` tokens at once, refilled at `per_sec`.
 struct TokenBucket {
     tokens: f32,
     burst: f32,
@@ -1231,7 +1232,9 @@ fn speech(server_muted: bool, permissions: &Permissions, channel: ChannelId) -> 
 fn forward<'a>(udp: &UdpSocket, buf: &mut Vec<u8>, msg: ToClient<'_>, to: impl Iterator<Item = &'a mut Client>) {
     for client in to {
         let Some(addr) = client.voice_addr else { continue };
+        // Sealed per listener, with their key.
         client.voice.seal(msg, buf);
+        // Non-blocking: a full socket buffer drops the datagram, like any lost packet.
         let _ = udp.try_send_to(buf, addr);
     }
 }
