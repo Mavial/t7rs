@@ -1,7 +1,9 @@
 //! Screen sharing: capture and encode on the sharer, decode and show on viewers.
 //! Frames travel as H.264 access units over the voice link (`t7_proto::voice`).
 
+#[cfg(any(windows, test))]
 mod annexb;
+#[cfg(any(windows, test))]
 mod nv12;
 #[cfg(not(windows))]
 mod unsupported;
@@ -31,6 +33,7 @@ pub struct AccessUnit {
 
 /// What to share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), expect(dead_code, reason = "only the Windows backend lists sources"))]
 pub enum Source {
     Monitor(Handle),
     Window(Handle),
@@ -63,6 +66,7 @@ pub enum Quality {
     P1080_60,
 }
 
+#[cfg_attr(not(windows), expect(dead_code, reason = "only the Windows backend encodes"))]
 struct Params {
     /// Sources larger than this are scaled down to fit; smaller ones are sent as they are.
     max: (u32, u32),
@@ -83,6 +87,7 @@ impl Quality {
 
 /// The encoded size for a `source`-sized picture: scaled down to fit `max`
 /// with its aspect ratio kept, in even dimensions as 4:2:0 needs.
+#[cfg(any(windows, test))]
 fn fit(source: (u32, u32), max: (u32, u32)) -> (u32, u32) {
     let scale =
         (f64::from(max.0) / f64::from(source.0.max(1))).min(f64::from(max.1) / f64::from(source.1.max(1))).min(1.0);
