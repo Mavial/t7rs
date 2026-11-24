@@ -173,6 +173,7 @@ async fn main() {
                             e.1 += energy / samples.max(1) as f64;
                         }
                         Some(ToClient::Pong { .. }) => pongs += 1,
+                        Some(ToClient::Video { .. }) => {}
                         None => unreadable += 1,
                     }
                 }

@@ -79,6 +79,11 @@ impl ServerView {
                     c.speech = *speech;
                 }
             }
+            S2C::ClientSharing { id, sharing } => {
+                if let Some(c) = self.clients.get_mut(id) {
+                    c.sharing = *sharing;
+                }
+            }
             S2C::Permissions(permissions) => self.set_permissions(permissions.clone()),
             S2C::Roles(roles) => self.roles = Some(roles.clone()),
             S2C::Channels(list) => {
@@ -241,6 +246,7 @@ mod tests {
             role: None,
             identity: Identity([1; 32]),
             speech: crate::Speech::Allowed,
+            sharing: false,
         };
         let kick = ChannelPerms { perms: Perms::of(&[Perm::Kick]), rename: false };
         let channels = [1, 3].map(|c| (c, ChannelPerms::default())).into_iter().chain([(2, kick)]).collect();
@@ -258,6 +264,10 @@ mod tests {
         assert!(v.may(Perm::Kick) && !v.may_in(2, Perm::Kick) && v.roles.is_some());
         v.apply(&S2C::Permissions(Permissions::default()));
         assert!(v.roles.is_none(), "dropped when that ends");
+
+        assert!(v.apply(&S2C::ClientSharing { id: 1, sharing: true }));
+        assert!(v.me().unwrap().sharing);
+        assert!(!v.apply(&S2C::SendKeyframe), "no state of the view");
 
         v.apply(&S2C::ClientMoved { id: 1, channel: 3 });
         assert_eq!(v.my_channel(), Some(3));

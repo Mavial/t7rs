@@ -32,7 +32,16 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
 
 fn client(id: u32, name: &str, channel: u32, status: ClientStatus) -> ClientInfo {
     let identity = Identity([id as u8; 32]);
-    ClientInfo { id, nickname: name.into(), channel, status, role: None, identity, speech: Speech::Allowed }
+    ClientInfo {
+        id,
+        nickname: name.into(),
+        channel,
+        status,
+        role: None,
+        identity,
+        speech: Speech::Allowed,
+        sharing: false,
+    }
 }
 
 fn view() -> ServerView {

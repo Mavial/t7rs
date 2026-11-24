@@ -230,6 +230,7 @@ impl Server {
                     let _ = self.udp.try_send_to(&self.datagram, addr);
                 }
             }
+            ToServer::Video { .. } => {}
         }
     }
 
@@ -283,7 +284,7 @@ impl Server {
         let channel = self.landing_channel(&permissions, None);
         let status = ClientStatus::default();
         let speech = speech(self.mutes.contains(&identity), &permissions, channel);
-        let info = ClientInfo { id, nickname, channel, status, role, identity, speech };
+        let info = ClientInfo { id, nickname, channel, status, role, identity, speech, sharing: false };
         let editor = permissions.edits_permissions();
 
         let seen = self.clients.values().filter(|c| permissions.sees(c.info.channel));
@@ -458,6 +459,7 @@ impl Server {
             }
             C2S::ServerMute { target, muted } => self.server_mute(id, target, muted),
             C2S::MoveMember { target, channel } => self.move_member(id, target, channel),
+            C2S::SetSharing(_) | C2S::Watch(_) | C2S::NeedKeyframe { .. } => {}
         }
     }
 

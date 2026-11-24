@@ -348,7 +348,7 @@ async fn session(
                             let sent = Duration::from_micros(nonce);
                             events.emit(NetEvent::VoicePing(id, epoch.elapsed().saturating_sub(sent)));
                         }
-                        None => {}
+                        Some(ToClient::Video { .. }) | None => {}
                     }
                 }
             }

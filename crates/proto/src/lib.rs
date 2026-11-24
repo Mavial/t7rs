@@ -20,9 +20,9 @@ pub mod voice;
 
 /// This build's protocol. New messages are only ever appended to the enums
 /// below, so older clients keep working for everything they know about.
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 /// Oldest client protocol a server still accepts.
-pub const MIN_PROTOCOL_VERSION: u16 = 6;
+pub const MIN_PROTOCOL_VERSION: u16 = 7;
 /// Default port of a T7 server (TCP for control, UDP for voice).
 pub const DEFAULT_PORT: u16 = 9988;
 /// Upper bound for a single frame. Protects both sides from memory abuse.
@@ -141,6 +141,8 @@ pub struct ClientInfo {
     /// The same on every connection with the same key; two connections may share one.
     pub identity: Identity,
     pub speech: Speech,
+    /// Sharing their screen: people in their channel may watch it.
+    pub sharing: bool,
 }
 
 /// Whether the server passes someone's voice on, and if not, why.
@@ -295,6 +297,16 @@ pub enum C2S {
         target: ClientId,
         channel: ChannelId,
     },
+    /// Starts or stops sharing your screen. Starting needs Speak where you
+    /// are. Moving to another channel stops it.
+    SetSharing(bool),
+    /// Whose screen to watch, of those sharing in your channel. The server
+    /// forwards their video to you until either of you moves or they stop.
+    Watch(Option<ClientId>),
+    /// Video from `from` can't be decoded until its next keyframe.
+    NeedKeyframe {
+        from: ClientId,
+    },
 }
 
 /// Server → client.
@@ -382,6 +394,14 @@ pub enum S2C {
         id: ClientId,
         speech: Speech,
     },
+    /// Someone started or stopped sharing their screen.
+    ClientSharing {
+        id: ClientId,
+        sharing: bool,
+    },
+    /// To a sharer: make the next frame a keyframe, because someone started
+    /// watching or lost frames.
+    SendKeyframe,
 }
 
 #[derive(Debug)]

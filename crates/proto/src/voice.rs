@@ -8,15 +8,22 @@
 //! client -> server   [kind u8][client_id u32][counter u64][sealed body][tag 16]
 //!   PING   body = nonce u64
 //!   AUDIO  body = seq u32, opus payload
+//!   VIDEO  body = frame u32, part u16, parts u16, key u8, h264 payload
 //! server -> client   [kind u8][counter u64][sealed body][tag 16]
 //!   PONG   body = nonce u64
 //!   AUDIO  body = from u32, seq u32, opus payload
+//!   VIDEO  body = from u32, frame u32, part u16, parts u16, key u8, h264 payload
 //! ```
 //!
 //! The 12-byte nonce is the direction (0 to the server, 1 to the client),
 //! three zero bytes and the sender's counter. Each sender counts up from 0;
 //! each receiver drops counters it has already seen and counters more than 63
 //! behind the newest one. Audio is 48 kHz mono Opus in 20 ms frames.
+//!
+//! Video splits each H.264 access unit (one frame) into `parts` datagrams,
+//! numbered from 0. `key` is 1 for a keyframe and 0 otherwise.
+
+use std::time::Duration;
 
 use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};
@@ -32,16 +39,31 @@ pub const MAX_DATAGRAM: usize = 1200;
 /// 4 or 8 sealed bytes before the payload, and the 16-byte tag.
 pub const MAX_OPUS_PAYLOAD: usize = MAX_DATAGRAM - CLIENT_HEADER - 4 - TAG_LEN;
 const _: () = assert!(SERVER_HEADER + 8 + MAX_OPUS_PAYLOAD + TAG_LEN <= MAX_DATAGRAM);
+/// Video spends 38 bytes around the payload both ways: the part header takes
+/// 9 bytes where audio's sequence number takes 4.
+pub const MAX_VIDEO_PAYLOAD: usize = MAX_DATAGRAM - CLIENT_HEADER - VIDEO_HEAD - TAG_LEN;
+const _: () = assert!(SERVER_HEADER + 4 + VIDEO_HEAD + MAX_VIDEO_PAYLOAD + TAG_LEN <= MAX_DATAGRAM);
+/// An access unit spans at most this many datagrams.
+pub const MAX_VIDEO_PARTS: u16 = 512;
+/// The largest access unit that fits in [`MAX_VIDEO_PARTS`] datagrams, about 580 KB.
+pub const MAX_ACCESS_UNIT: usize = MAX_VIDEO_PARTS as usize * MAX_VIDEO_PAYLOAD;
+/// The server asks a sharer for a keyframe at most this often, and a viewer
+/// asks for one at most this often per sharer.
+pub const KEYFRAME_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The secret for one client's voice datagrams, sent in `Welcome` inside TLS.
 pub type VoiceKey = [u8; 32];
 
 const PING: u8 = 0x01;
 const AUDIO: u8 = 0x02;
+const VIDEO: u8 = 0x03;
 const PONG: u8 = 0x81;
 const AUDIO_OUT: u8 = 0x82;
+const VIDEO_OUT: u8 = 0x83;
 const CLIENT_HEADER: usize = 1 + 4 + 8;
 const SERVER_HEADER: usize = 1 + 8;
+/// frame u32, part u16, parts u16, key u8.
+const VIDEO_HEAD: usize = 4 + 2 + 2 + 1;
 const TAG_LEN: usize = 16;
 const TO_SERVER: u8 = 0;
 const TO_CLIENT: u8 = 1;
@@ -50,12 +72,14 @@ const TO_CLIENT: u8 = 1;
 pub enum ToServer<'a> {
     Ping { nonce: u64 },
     Audio { seq: u32, payload: &'a [u8] },
+    Video { frame: u32, part: u16, parts: u16, key: bool, payload: &'a [u8] },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToClient<'a> {
     Pong { nonce: u64 },
     Audio { from: ClientId, seq: u32, payload: &'a [u8] },
+    Video { from: ClientId, frame: u32, part: u16, parts: u16, key: bool, payload: &'a [u8] },
 }
 
 /// The client's end of its voice link.
@@ -75,6 +99,7 @@ impl ClientSide {
         out.push(match msg {
             ToServer::Ping { .. } => PING,
             ToServer::Audio { .. } => AUDIO,
+            ToServer::Video { .. } => VIDEO,
         });
         out.extend_from_slice(&self.id.to_le_bytes());
         out.extend_from_slice(&counter.to_le_bytes());
@@ -84,6 +109,7 @@ impl ClientSide {
                 out.extend_from_slice(&seq.to_le_bytes());
                 out.extend_from_slice(payload);
             }
+            ToServer::Video { frame, part, parts, key, payload } => put_video(out, frame, part, parts, key, payload),
         }
         self.link.seal(TO_SERVER, counter, CLIENT_HEADER, out);
     }
@@ -91,7 +117,7 @@ impl ClientSide {
     /// Decrypts in place. `None` for anything forged, replayed or malformed.
     pub fn open<'a>(&mut self, datagram: &'a mut [u8]) -> Option<ToClient<'a>> {
         let kind = *datagram.first()?;
-        if !matches!(kind, PONG | AUDIO_OUT) || datagram.len() > MAX_DATAGRAM {
+        if !matches!(kind, PONG | AUDIO_OUT | VIDEO_OUT) || datagram.len() > MAX_DATAGRAM {
             return None;
         }
         let counter = u64::from_le_bytes(datagram.get(1..9)?.try_into().ok()?);
@@ -99,9 +125,14 @@ impl ClientSide {
         if kind == PONG {
             return Some(ToClient::Pong { nonce: u64::from_le_bytes(body.try_into().ok()?) });
         }
-        let (head, payload) = body.split_at_checked(8)?;
-        let from = u32::from_le_bytes(head[..4].try_into().ok()?);
-        let seq = u32::from_le_bytes(head[4..].try_into().ok()?);
+        let (from, body) = body.split_at_checked(4)?;
+        let from = u32::from_le_bytes(from.try_into().ok()?);
+        if kind == VIDEO_OUT {
+            let (frame, part, parts, key, payload) = video(body)?;
+            return Some(ToClient::Video { from, frame, part, parts, key, payload });
+        }
+        let (seq, payload) = body.split_at_checked(4)?;
+        let seq = u32::from_le_bytes(seq.try_into().ok()?);
         valid_payload(payload).then_some(ToClient::Audio { from, seq, payload })
     }
 }
@@ -132,6 +163,12 @@ impl ServerSide {
                 out.extend_from_slice(&seq.to_le_bytes());
                 out.extend_from_slice(payload);
             }
+            ToClient::Video { from, frame, part, parts, key, payload } => {
+                out.push(VIDEO_OUT);
+                out.extend_from_slice(&counter.to_le_bytes());
+                out.extend_from_slice(&from.to_le_bytes());
+                put_video(out, frame, part, parts, key, payload);
+            }
         }
         self.link.seal(TO_CLIENT, counter, SERVER_HEADER, out);
     }
@@ -139,13 +176,17 @@ impl ServerSide {
     /// Decrypts in place. `None` for anything forged, replayed or malformed.
     pub fn open<'a>(&mut self, datagram: &'a mut [u8]) -> Option<ToServer<'a>> {
         let kind = *datagram.first()?;
-        if !matches!(kind, PING | AUDIO) || datagram.len() > MAX_DATAGRAM {
+        if !matches!(kind, PING | AUDIO | VIDEO) || datagram.len() > MAX_DATAGRAM {
             return None;
         }
         let counter = u64::from_le_bytes(datagram.get(5..13)?.try_into().ok()?);
         let body = self.link.open(TO_SERVER, counter, CLIENT_HEADER, datagram)?;
         if kind == PING {
             return Some(ToServer::Ping { nonce: u64::from_le_bytes(body.try_into().ok()?) });
+        }
+        if kind == VIDEO {
+            let (frame, part, parts, key, payload) = video(body)?;
+            return Some(ToServer::Video { frame, part, parts, key, payload });
         }
         let (seq, payload) = body.split_at_checked(4)?;
         let seq = u32::from_le_bytes(seq.try_into().ok()?);
@@ -160,6 +201,30 @@ pub fn sender(datagram: &[u8]) -> Option<ClientId> {
 
 fn valid_payload(payload: &[u8]) -> bool {
     !payload.is_empty() && payload.len() <= MAX_OPUS_PAYLOAD
+}
+
+fn put_video(out: &mut Vec<u8>, frame: u32, part: u16, parts: u16, key: bool, payload: &[u8]) {
+    out.extend_from_slice(&frame.to_le_bytes());
+    out.extend_from_slice(&part.to_le_bytes());
+    out.extend_from_slice(&parts.to_le_bytes());
+    out.push(u8::from(key));
+    out.extend_from_slice(payload);
+}
+
+/// Frame, part, parts, key and payload of a video body, if well formed.
+fn video(body: &[u8]) -> Option<(u32, u16, u16, bool, &[u8])> {
+    let (head, payload) = body.split_at_checked(VIDEO_HEAD)?;
+    let frame = u32::from_le_bytes(head[..4].try_into().ok()?);
+    let part = u16::from_le_bytes(head[4..6].try_into().ok()?);
+    let parts = u16::from_le_bytes(head[6..8].try_into().ok()?);
+    let key = match head[8] {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    let numbered = part < parts && parts <= MAX_VIDEO_PARTS;
+    let sized = !payload.is_empty() && payload.len() <= MAX_VIDEO_PAYLOAD;
+    (numbered && sized).then_some((frame, part, parts, key, payload))
 }
 
 /// Key, send counter and replay window of one end of a voice link.
@@ -267,12 +332,20 @@ mod tests {
         let mut client = ClientSide::new(42, &KEY);
         let mut server = ServerSide::new(&KEY);
         let mut buf = Vec::new();
-        for msg in [ToServer::Ping { nonce: 7 }, ToServer::Audio { seq: 9, payload: &[1, 2, 3] }] {
+        for msg in [
+            ToServer::Ping { nonce: 7 },
+            ToServer::Audio { seq: 9, payload: &[1, 2, 3] },
+            ToServer::Video { frame: 70_000, part: 2, parts: 3, key: true, payload: &[6, 7] },
+        ] {
             client.seal(msg, &mut buf);
             assert_eq!(sender(&buf), Some(42));
             assert_eq!(server.open(&mut buf.clone()), Some(msg));
         }
-        for msg in [ToClient::Pong { nonce: 7 }, ToClient::Audio { from: 3, seq: 9, payload: &[4, 5] }] {
+        for msg in [
+            ToClient::Pong { nonce: 7 },
+            ToClient::Audio { from: 3, seq: 9, payload: &[4, 5] },
+            ToClient::Video { from: 3, frame: 1, part: 0, parts: 1, key: false, payload: &[8] },
+        ] {
             server.seal(msg, &mut buf);
             assert_eq!(client.open(&mut buf.clone()), Some(msg));
         }
@@ -283,6 +356,9 @@ mod tests {
         let mut buf = Vec::new();
         ClientSide::new(1, &KEY).seal(ToServer::Audio { seq: 0, payload: b"secret words" }, &mut buf);
         assert!(!buf.windows(12).any(|w| w == b"secret words"));
+        let video = ToServer::Video { frame: 0, part: 0, parts: 1, key: true, payload: b"secret pixels" };
+        ClientSide::new(1, &KEY).seal(video, &mut buf);
+        assert!(!buf.windows(13).any(|w| w == b"secret pixels"));
     }
 
     #[test]
@@ -321,6 +397,48 @@ mod tests {
         from_server.seal(ToClient::Audio { from: 2, seq: 0, payload: &[0; MAX_OPUS_PAYLOAD] }, &mut buf);
         assert!(buf.len() <= MAX_DATAGRAM);
         assert!(client.open(&mut buf).is_some());
+    }
+
+    #[test]
+    fn rejects_malformed_video() {
+        let video = |part, parts, payload| ToServer::Video { frame: 0, part, parts, key: false, payload };
+        let mut client = ClientSide::new(1, &KEY);
+        let mut server = ServerSide::new(&KEY);
+        let mut buf = Vec::new();
+        for (msg, why) in [
+            (video(0, 1, &[]), "empty payload"),
+            (video(0, 1, &[0; MAX_VIDEO_PAYLOAD + 1]), "oversized payload"),
+            (video(1, 1, &[1]), "part past the last"),
+            (video(0, 0, &[1]), "no parts"),
+            (video(0, MAX_VIDEO_PARTS + 1, &[1]), "too many parts"),
+        ] {
+            client.seal(msg, &mut buf);
+            assert_eq!(server.open(&mut buf), None, "{why}");
+        }
+
+        // Sealed by hand, to put a key byte on the wire that `seal` never writes.
+        let with_key_byte = |byte: u8, counter: u64| {
+            let mut d = vec![VIDEO];
+            d.extend_from_slice(&1u32.to_le_bytes());
+            d.extend_from_slice(&counter.to_le_bytes());
+            put_video(&mut d, 0, 0, 1, false, &[1]);
+            d[CLIENT_HEADER + VIDEO_HEAD - 1] = byte;
+            Link::new(&KEY).seal(TO_SERVER, counter, CLIENT_HEADER, &mut d);
+            d
+        };
+        let mut fresh = ServerSide::new(&KEY);
+        assert!(fresh.open(&mut with_key_byte(1, 0)).is_some());
+        assert_eq!(fresh.open(&mut with_key_byte(2, 1)), None, "key byte other than 0 or 1");
+
+        let (part, parts, payload) = (MAX_VIDEO_PARTS - 1, MAX_VIDEO_PARTS, &[0; MAX_VIDEO_PAYLOAD]);
+        let largest = ToServer::Video { frame: u32::MAX, part, parts, key: true, payload };
+        client.seal(largest, &mut buf);
+        assert_eq!(buf.len(), MAX_DATAGRAM);
+        assert_eq!(server.open(&mut buf), Some(largest), "largest payload fits");
+        let largest = ToClient::Video { from: 2, frame: u32::MAX, part, parts, key: true, payload };
+        ServerSide::new(&KEY).seal(largest, &mut buf);
+        assert!(buf.len() <= MAX_DATAGRAM);
+        assert_eq!(client.open(&mut buf), Some(largest));
     }
 
     #[test]

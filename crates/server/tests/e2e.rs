@@ -199,6 +199,9 @@ impl Voice {
         match self.crypto.open(&mut buf[..n])? {
             voice::ToClient::Pong { nonce } => Some(Got::Pong(nonce)),
             voice::ToClient::Audio { from, seq, payload } => Some(Got::Audio(from, seq, payload.to_vec())),
+            voice::ToClient::Video { from, frame, part, parts, key, payload } => {
+                Some(Got::Video { from, frame, part, parts, key, payload: payload.to_vec() })
+            }
         }
     }
 }
@@ -207,6 +210,7 @@ impl Voice {
 enum Got {
     Pong(u64),
     Audio(ClientId, u32, Vec<u8>),
+    Video { from: ClientId, frame: u32, part: u16, parts: u16, key: bool, payload: Vec<u8> },
 }
 
 #[tokio::test]
