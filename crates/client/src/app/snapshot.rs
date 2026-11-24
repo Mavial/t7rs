@@ -5,12 +5,21 @@
 //! `target/snapshots`, or to `$T7_SNAPSHOT_DIR` when set.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use t7_proto::perms::{ChannelPerms, Member, Override, Perm, Permissions, Perms, RoleId, Roles};
 use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo, Speech};
 
+use egui::vec2;
+use t7_proto::tls::Fingerprint;
+use t7_proto::{BanInfo, S2C};
+
+use super::channel_dialog::FormTab;
+use super::chat::{Line, LineKind, TabKind};
+use super::server_settings::{Pick, SettingsTab};
 use super::*;
+use crate::settings::Recent;
 
 fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo {
     ChannelInfo {

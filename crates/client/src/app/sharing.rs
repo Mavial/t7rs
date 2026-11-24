@@ -7,7 +7,9 @@ use egui::{Align2, Color32, CornerRadius, FontId, PopupCloseBehavior, RectAlign,
 use t7_proto::model::ServerView;
 use t7_proto::{C2S, ClientId, Speech};
 
-use super::{App, Conn, LineKind, icon_button, mic_held, toggle};
+use super::chat::LineKind;
+use super::widgets::{icon_button, mic_held, toggle};
+use super::{App, Conn};
 use crate::icons::Icon;
 use crate::screen::{Quality, Share, Source, SourceInfo};
 use crate::theme;

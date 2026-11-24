@@ -317,10 +317,16 @@ On a call, one other person talks the whole time:
 ## Development
 
 ```sh
-cargo test --workspace                       # unit + end-to-end server tests
+cargo nextest run --workspace                # unit + end-to-end server tests
+cargo nextest run -p t7-server               # just the crate you changed
 cargo run --example bot -- 127.0.0.1:9988    # fill a server with demo users
 cargo run --example bot -- 127.0.0.1:9988 500   # crude load test
 ```
+
+Tests run with [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`),
+which runs the tests of every crate at once instead of one crate after another.
+`cargo test --workspace` works too, just slower. nextest skips doctests; run
+`cargo test --workspace --doc` for those.
 
 ## Updates and releases
 
