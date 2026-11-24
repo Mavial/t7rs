@@ -17,7 +17,19 @@ const QUALITIES: [(Quality, &str); 3] =
 
 pub(super) struct Sharing {
     share: Share,
-    confirmed: bool,
+    state: ShareState,
+}
+
+#[derive(Clone, Copy)]
+enum ShareState {
+    Requested,
+    Live,
+}
+
+impl Sharing {
+    fn ended_by_server(&self, shared: Option<bool>) -> bool {
+        matches!((shared, self.state), (None, _) | (Some(false), ShareState::Live))
+    }
 }
 
 pub(super) struct Watching {
@@ -75,7 +87,7 @@ impl App {
             Ok(share) => {
                 tracing::info!(encoder = share.encoder(), "sharing the screen");
                 self.net.send(C2S::SetSharing(true));
-                self.sharing = Some(Sharing { share, confirmed: false });
+                self.sharing = Some(Sharing { share, state: ShareState::Requested });
             }
             Err(e) => {
                 let tab = self.active_tab;
@@ -102,12 +114,14 @@ impl App {
     pub(super) fn sync_screens(&mut self) {
         let shared = self.view.as_ref().and_then(ServerView::me).map(|c| c.sharing);
         if let Some(sharing) = &mut self.sharing {
-            sharing.confirmed |= shared == Some(true);
+            if shared == Some(true) {
+                sharing.state = ShareState::Live;
+            }
             if sharing.share.ended() {
                 self.stop_sharing();
                 let tab = self.active_tab;
                 self.push(tab, LineKind::System, "Stopped sharing: the shared window or screen is gone");
-            } else if shared.is_none() || (sharing.confirmed && shared == Some(false)) {
+            } else if sharing.ended_by_server(shared) {
                 self.stop_sharing();
             }
         }
