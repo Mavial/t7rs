@@ -58,6 +58,7 @@ fn view() -> ServerView {
     lobby.default = true;
     lobby.topic = "Hang out here".into();
     let mut games = channel(2, None, "Games", 1);
+    games.topic = "Ranked tonight at 9".into();
     games.moderators.push(Identity([3; 32]));
     let mut ranked = channel(3, Some(2), "Ranked", 0);
     ranked.max_clients = Some(5);
@@ -120,8 +121,10 @@ fn view() -> ServerView {
     view
 }
 
+/// A chat line from today at `time`, like "20:14".
 fn line(time: &str, kind: LineKind, text: &str) -> Line {
-    Line { time: time.into(), kind, text: text.into() }
+    let time = chrono::NaiveTime::parse_from_str(time, "%H:%M").expect("a clock time");
+    Line::new(chrono::Local::now().date_naive().and_time(time), kind, text.into())
 }
 
 fn msg(from: u32, name: &str) -> LineKind {
@@ -152,6 +155,7 @@ fn connected(ctx: &egui::Context) -> App {
         line("20:14", msg(2, "Marta"), "hey! ready for ranked?"),
         line("20:15", msg(1, "Santi"), "two minutes, grabbing a drink"),
         line("20:15", msg(3, "Kenji"), "my mic is acting up again, I'll type for now"),
+        line("20:15", msg(3, "Kenji"), "can someone check if Ola is still around?"),
         line("20:16", LineKind::System, "Ola joined Ranked"),
         line("20:17", LineKind::Error, "Couldn't open the microphone: device in use"),
         line(
@@ -340,6 +344,24 @@ const SCENES: &[Scene] = &[
         let channels = view.channels.keys().map(|&c| (c, moderator)).collect();
         view.apply(&S2C::Permissions(Permissions { server: Perms::of(&[Perm::View]), channels }));
         app.open_edit_channel(3);
+        app
+    }),
+    ("36-private-chat", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.active_tab = 2;
+        app.tabs[2].unread = 0;
+        app.tabs[2].lines = vec![
+            line("20:12", msg(2, "Marta"), "can you bring the spare headset tomorrow?"),
+            line("20:13", msg(1, "Santi"), "yep"),
+            line("20:19", msg(2, "Marta"), "thanks!"),
+        ];
+        app
+    }),
+    ("37-empty-channel", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.apply(&S2C::ClientMoved { id: 1, channel: 6 });
+        app.tabs[1].title = "Music".into();
+        app.tabs[1].lines = vec![line("20:20", LineKind::System, "You joined Music")];
         app
     }),
     ("33-update-ready", (1100, 720), |ctx| {

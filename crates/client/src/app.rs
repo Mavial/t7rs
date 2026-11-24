@@ -256,7 +256,7 @@ impl App {
         self.drive_audio(&ctx);
         self.shortcuts(&ctx);
         self.sidebar(ui);
-        self.chat(ui);
+        self.main_pane(ui);
         self.connect_dialog(&ctx);
         self.audio_dialog(&ctx);
         self.poke_dialog(&ctx);
