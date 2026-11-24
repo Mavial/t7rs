@@ -26,6 +26,11 @@ const NO_VOICE: &str = "Voice packets aren't getting through. The server's UDP p
 /// What the banner above your panel shows, worked out each frame from the app state.
 pub(super) enum Banner {
     UpdateReady(String),
+    /// The connection dropped or we were kicked: why, and Reconnect.
+    Lost {
+        headline: String,
+        detail: String,
+    },
 }
 
 /// Picked from the server menu, applied after drawing it.
@@ -37,6 +42,8 @@ enum ServerAction {
     ClaimOwnership,
     CopyAddress,
     Disconnect,
+    Reconnect,
+    BackToServers,
 }
 
 /// Picked from your menu.
@@ -62,7 +69,7 @@ impl App {
                 self.banner_slot(ui);
                 let body = egui::Frame::new().inner_margin(Margin { left: 8, right: 8, top: 0, bottom: 6 });
                 body.show(ui, |ui| {
-                    if self.view.is_some() {
+                    if self.shown_view().is_some() {
                         self.channel_tree(ui);
                     }
                 });
@@ -78,7 +85,11 @@ impl App {
         }
     }
 
+    /// A lost connection comes first: it is why the tree is dimmed.
     pub(super) fn banner(&self) -> Option<Banner> {
+        if let Conn::Lost { why, .. } = &self.conn {
+            return Some(Banner::Lost { headline: why.headline.clone(), detail: why.detail.clone() });
+        }
         match self.updater.status() {
             crate::update::Status::Ready(version) => Some(Banner::UpdateReady(version)),
             _ => None,
@@ -87,14 +98,14 @@ impl App {
 
     fn address(&self) -> Option<&str> {
         match &self.conn {
-            Conn::Connecting(login) | Conn::Connected { login, .. } => Some(&login.address),
+            Conn::Connecting(login) | Conn::Connected { login, .. } | Conn::Lost { login, .. } => Some(&login.address),
             Conn::Disconnected => None,
         }
     }
 
     /// The server's name, or what we know of it while connecting.
     fn server_name(&self) -> String {
-        if let Some(view) = &self.view {
+        if let Some(view) = self.shown_view() {
             return view.info.name.clone();
         }
         let Some(address) = self.address() else { return "T7".to_owned() };
@@ -106,6 +117,7 @@ impl App {
     fn presence(&self) -> Option<(egui::Color32, String, String)> {
         match &self.conn {
             Conn::Disconnected => None,
+            Conn::Lost { .. } => Some((theme::TEXT_FAINT, "Offline".to_owned(), "Not connected".to_owned())),
             Conn::Connecting(login) => {
                 Some((theme::AMBER, "Connecting".to_owned(), format!("Connecting to {}", login.address)))
             }
@@ -150,6 +162,8 @@ impl App {
                 }
             }
             Some(ServerAction::Disconnect) => self.disconnect(),
+            Some(ServerAction::Reconnect) => self.reconnect(),
+            Some(ServerAction::BackToServers) => self.forget_lost(),
             None => {}
         }
     }
@@ -162,21 +176,33 @@ impl App {
         }
         let resp = menu_button(ui, Icon::Dots, 28.0);
         let mut picked = None;
+        let lost = matches!(self.conn, Conn::Lost { .. });
         egui::Popup::menu(&resp).align(RectAlign::BOTTOM_END).show(|ui| {
-            picked = server_menu(ui, self.view.as_ref(), self.address().unwrap_or_default());
+            picked = if lost {
+                lost_menu(ui, self.address().unwrap_or_default())
+            } else {
+                server_menu(ui, self.view.as_ref(), self.address().unwrap_or_default())
+            };
         });
         picked
     }
 
     fn banner_slot(&mut self, ui: &mut egui::Ui) {
         let Some(banner) = self.banner() else { return };
-        let (fill, icon, icon_color, text, button) = match &banner {
+        let (fill, icon, icon_color, (headline, detail), button) = match &banner {
             Banner::UpdateReady(version) => (
                 theme::ACCENT_BG,
                 Icon::Update,
                 theme::ACCENT_TEXT,
-                format!("T7 {version} is ready"),
+                (format!("T7 {version} is ready"), None),
                 Btn::primary("Restart").small(),
+            ),
+            Banner::Lost { headline, detail } => (
+                theme::RED.gamma_multiply(0.12),
+                Icon::Warning,
+                theme::RED,
+                (headline.clone(), Some(detail.clone())),
+                Btn::secondary("Reconnect").small(),
             ),
         };
         let mut clicked = false;
@@ -192,19 +218,28 @@ impl App {
                     ui.painter().layout_no_wrap("Reconnect".to_owned(), FontId::proportional(12.5), theme::TEXT);
                 let button_w = button_w.size().x + 20.0;
                 let text_w = width - 14.0 - 8.0 - 8.0 - button_w;
-                let galley = ui.painter().layout(text, FontId::proportional(12.5), theme::TEXT, text_w);
-                let (rect, _) = ui.allocate_exact_size(vec2(width, galley.size().y.max(24.0)), Sense::hover());
+                let p = ui.painter();
+                let headline = p.layout(headline, FontId::proportional(12.5), theme::TEXT, text_w);
+                let detail = detail.map(|d| p.layout(d, FontId::proportional(11.5), theme::TEXT_DIM, text_w));
+                let text_h = headline.size().y + detail.as_ref().map_or(0.0, |d| d.size().y + 1.0);
+                let (rect, _) = ui.allocate_exact_size(vec2(width, text_h.max(24.0)), Sense::hover());
                 let icon_rect =
                     egui::Rect::from_center_size(egui::pos2(rect.left() + 7.0, rect.center().y), vec2(14.0, 14.0));
                 icons::paint(ui.painter(), icon_rect, icon, icon_color);
-                let text_pos = egui::pos2(rect.left() + 22.0, rect.center().y - galley.size().y / 2.0);
-                ui.painter().galley(text_pos, galley, theme::TEXT);
+                let mut text_pos = egui::pos2(rect.left() + 22.0, rect.center().y - text_h / 2.0);
+                let headline_h = headline.size().y;
+                ui.painter().galley(text_pos, headline, theme::TEXT);
+                if let Some(detail) = detail {
+                    text_pos.y += headline_h + 1.0;
+                    ui.painter().galley(text_pos, detail, theme::TEXT_DIM);
+                }
                 let slot =
                     egui::Rect::from_min_max(egui::pos2(rect.right() - button_w, rect.top()), rect.right_bottom());
                 clicked = ui
                     .put(slot, button)
                     .on_hover_text(match &banner {
                         Banner::UpdateReady(_) => "T7 restarts with the update and reconnects.",
+                        Banner::Lost { .. } => "Connect to this server again",
                     })
                     .clicked();
             });
@@ -212,6 +247,7 @@ impl App {
         if clicked {
             match banner {
                 Banner::UpdateReady(_) => self.restart_to_update(),
+                Banner::Lost { .. } => self.reconnect(),
             }
         }
     }
@@ -247,7 +283,7 @@ impl App {
                 }
             },
             Conn::Connecting(_) => ("Connecting…", theme::TEXT_FAINT),
-            Conn::Disconnected => ("Offline", theme::TEXT_FAINT),
+            Conn::Disconnected | Conn::Lost { .. } => ("Offline", theme::TEXT_FAINT),
         };
         (text.to_owned(), color)
     }
@@ -358,6 +394,25 @@ fn presence_dot(ui: &mut egui::Ui, color: egui::Color32, text: &str) -> egui::Re
     let pos = egui::pos2(rect.left() + 13.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(pos, galley, theme::TEXT_FAINT);
     resp
+}
+
+/// After a lost connection: try again, or put the old tree away.
+fn lost_menu(ui: &mut egui::Ui, address: &str) -> Option<ServerAction> {
+    menu_style(ui, 220.0);
+    let mut picked = None;
+    let copy = Item::new(Icon::Copy, "Copy address");
+    let copy = if address.chars().count() <= 28 { copy.right(address) } else { copy };
+    for (item, action) in [
+        (Item::new(Icon::ArrowRight, "Reconnect"), ServerAction::Reconnect),
+        (copy, ServerAction::CopyAddress),
+        (Item::new(Icon::Cross, "Back to servers"), ServerAction::BackToServers),
+    ] {
+        if ui.add(item).clicked() {
+            picked = Some(action);
+            ui.close();
+        }
+    }
+    picked
 }
 
 /// Server-wide actions, each shown only to those who may use it.

@@ -43,7 +43,27 @@ struct Login {
 enum Conn {
     Disconnected,
     Connecting(Login),
-    Connected { server: ServerKey, login: Login },
+    Connected {
+        server: ServerKey,
+        login: Login,
+    },
+    /// The connection dropped, or a moderator kicked us. The last tree stays
+    /// on screen, dimmed, so you see where you were, until you reconnect.
+    Lost {
+        server: ServerKey,
+        login: Login,
+        why: Lost,
+        last: Box<ServerView>,
+    },
+}
+
+/// Why a connection that was up ended, for the banner over your panel.
+#[derive(Clone)]
+struct Lost {
+    /// "Kicked from the server" or "Disconnected".
+    headline: String,
+    /// Who and why, or what failed.
+    detail: String,
 }
 
 /// Connect-on-startup request from the command line.
@@ -76,7 +96,7 @@ pub struct App {
     moderation: Option<Moderation>,
     server_settings: Option<ServerSettings>,
     /// Who kicked us off the server and why, for when the connection closes.
-    kicked: Option<String>,
+    kicked: Option<Lost>,
     cert_change: Option<CertChange>,
     /// Ask the window manager to flash the taskbar entry.
     attention: bool,
@@ -162,6 +182,36 @@ impl App {
 
     fn my_speech(&self) -> Speech {
         self.view.as_ref().and_then(ServerView::me).map_or(Speech::Allowed, |me| me.speech)
+    }
+
+    /// The server as it is now, or as it was when the connection was lost.
+    fn shown_view(&self) -> Option<&ServerView> {
+        match &self.conn {
+            Conn::Lost { last, .. } => Some(last),
+            _ => self.view.as_ref(),
+        }
+    }
+
+    fn server_key(&self) -> Option<&ServerKey> {
+        match &self.conn {
+            Conn::Connected { server, .. } | Conn::Lost { server, .. } => Some(server),
+            Conn::Disconnected | Conn::Connecting(_) => None,
+        }
+    }
+
+    fn reconnect(&mut self) {
+        let Conn::Lost { login, .. } = &self.conn else { return };
+        let Login { address, password } = login.clone();
+        let nickname = self.settings.nickname.clone();
+        self.connect(address, nickname, password);
+    }
+
+    /// Puts away the tree of a lost connection, for the list of servers.
+    fn forget_lost(&mut self) {
+        if matches!(self.conn, Conn::Lost { .. }) {
+            self.conn = Conn::Disconnected;
+            self.active_tab = 0;
+        }
     }
 
     fn sound(&self, sound: Sound) {

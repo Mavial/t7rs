@@ -8,7 +8,7 @@ use t7_proto::{
 
 use super::chat::{LineKind, TabKind, base_tabs};
 use super::connect::{CertChange, MAX_RECENT};
-use super::{App, Conn, Login};
+use super::{App, Conn, Login, Lost};
 use crate::net::{Ended, NetEvent, ServerKey};
 use crate::settings::Recent;
 use crate::sounds::Sound;
@@ -45,28 +45,34 @@ impl App {
             }
         };
         let kicked = self.kicked.take();
-        let reason = kicked.clone().or(reason);
-        let was_connected = matches!(self.conn, Conn::Connected { .. });
-        self.conn = Conn::Disconnected;
-        self.view = None;
+        let was = std::mem::replace(&mut self.conn, Conn::Disconnected);
+        let last = self.view.take();
         self.ping = None;
         self.voice.disconnected();
+        let was_connected = matches!(was, Conn::Connected { .. });
+        // The kick notice already said who and why.
         match (&reason, was_connected) {
-            (Some(r), true) => self.push(0, LineKind::Error, format!("Disconnected: {r}")),
-            (None, true) => self.push(0, LineKind::System, "Disconnected"),
+            (Some(r), true) if kicked.is_none() => self.push(0, LineKind::Error, format!("Disconnected: {r}")),
+            (_, true) => self.push(0, LineKind::System, "Disconnected"),
             _ => {}
         }
         if was_connected {
-            self.sound(if reason.is_some() { Sound::ConnectionLost } else { Sound::Disconnected });
+            let lost = reason.is_some() || kicked.is_some();
+            self.sound(if lost { Sound::ConnectionLost } else { Sound::Disconnected });
         }
         // A server newer than us: fetch the update right away.
         if reason.as_deref().is_some_and(|r| r.contains("please update your T7")) {
             self.updater.check_now();
         }
-        if !was_connected || kicked.is_some() {
-            self.last_error = reason;
+        let why = kicked.or_else(|| reason.clone().map(|detail| Lost { headline: "Disconnected".into(), detail }));
+        match (was, why, last) {
+            // Keep the last tree and chat on screen, with why, until reconnecting.
+            (Conn::Connected { server, login }, Some(why), Some(last)) => {
+                self.conn = Conn::Lost { server, login, why, last: Box::new(last) };
+            }
+            (Conn::Connecting(_), _, _) => self.last_error = reason,
+            _ => self.active_tab = 0,
         }
-        self.active_tab = 0;
     }
 
     fn on_message(&mut self, msg: S2C) {

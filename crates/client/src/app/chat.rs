@@ -241,7 +241,7 @@ impl App {
 
     pub(super) fn main_pane(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
-            if self.view.is_none() {
+            if self.shown_view().is_none() {
                 egui::Frame::new().inner_margin(Margin::symmetric(16, 12)).show(ui, |ui| self.empty_state(ui));
                 return;
             }
@@ -311,7 +311,7 @@ impl App {
     /// Your channel's icon, name and topic; on a private tab, who it is with
     /// and what they are up to.
     fn paint_title(&self, ui: &egui::Ui, rect: Rect) {
-        let Some(view) = self.view.as_ref() else { return };
+        let Some(view) = self.shown_view() else { return };
         let p = ui.painter();
         let y = rect.center().y;
         let (name, aside) = match self.tabs[self.active_tab].kind {
@@ -405,6 +405,22 @@ impl App {
             TabKind::Private(_) => format!("Message {}", tab.title),
         };
         let frame = egui::Frame::new().inner_margin(Margin { left: 20, right: 20, top: 4, bottom: 16 });
+        if !matches!(self.conn, Conn::Connected { .. }) {
+            egui::Panel::bottom("composer").frame(frame).show_separator_line(false).show(ui, |ui| {
+                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::hover());
+                let p = ui.painter();
+                p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
+                let text_pos = egui::pos2(rect.left() + 12.0, rect.center().y);
+                p.text(
+                    text_pos,
+                    Align2::LEFT_CENTER,
+                    "You're not connected",
+                    FontId::proportional(14.0),
+                    theme::TEXT_FAINT,
+                );
+            });
+            return;
+        }
         egui::Panel::bottom("composer").frame(frame).show_separator_line(false).show(ui, |ui| {
             let field = egui::Frame::new()
                 .fill(theme::SURFACE)

@@ -43,6 +43,7 @@ pub enum Icon {
     Bell,
     Kick,
     Ban,
+    Warning,
 }
 
 struct Pen<'a> {
@@ -247,6 +248,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Ban => {
             pen.poly(&Pen::arc_points(12.0, 12.0, 8.5, 0.0, 360.0), true);
             pen.line((6.0, 18.0), (18.0, 6.0));
+        }
+        Icon::Warning => {
+            pen.poly(&[(12.0, 3.5), (21.5, 20.0), (2.5, 20.0)], true);
+            pen.line((12.0, 9.5), (12.0, 14.0));
+            pen.line((12.0, 16.8), (12.0, 17.2));
         }
         Icon::Crown => pen
             .poly(&[(3.0, 18.5), (3.0, 7.5), (8.0, 12.0), (12.0, 5.0), (16.0, 12.0), (21.0, 7.5), (21.0, 18.5)], true),

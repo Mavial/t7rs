@@ -127,11 +127,13 @@ struct MemberRow<'a> {
 impl App {
     /// The tree fills the rest of `ui`, scrolling when it is taller.
     pub(super) fn channel_tree(&mut self, ui: &mut egui::Ui) {
-        let Some(view) = &self.view else { return };
-        let folded = match &self.conn {
-            Conn::Connected { server, .. } => self.settings.folded.get(server),
-            _ => None,
-        };
+        let Some(view) = self.shown_view() else { return };
+        let folded = self.server_key().and_then(|server| self.settings.folded.get(server));
+        // A lost connection's tree stays, dimmed and still, until reconnecting.
+        let lost = matches!(self.conn, Conn::Lost { .. });
+        if lost {
+            ui.disable();
+        }
         let tree = Tree {
             view,
             folded,
@@ -143,7 +145,7 @@ impl App {
             watched: self.watching.as_ref().map(|w| w.sharer),
             picked: None,
         };
-        if let Some(action) = tree.show(ui) {
+        if let Some(action) = tree.show(ui).filter(|_| !lost) {
             self.apply_tree_action(action);
         }
     }

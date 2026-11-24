@@ -364,6 +364,15 @@ const SCENES: &[Scene] = &[
         app.tabs[1].lines = vec![line("20:20", LineKind::System, "You joined Music")];
         app
     }),
+    ("38-kicked", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        let Conn::Connected { server, login } = std::mem::replace(&mut app.conn, Conn::Disconnected) else {
+            unreachable!()
+        };
+        let why = Lost { headline: "Kicked from the server".into(), detail: "by Marta: \"take a break\"".into() };
+        app.conn = Conn::Lost { server, login, why, last: Box::new(app.view.take().unwrap()) };
+        app
+    }),
     ("33-update-ready", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         app.updater = crate::update::Updater::showing(crate::update::Status::Ready("0.7.0".into()));
