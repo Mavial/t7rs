@@ -11,7 +11,12 @@ pub fn sources() -> Vec<SourceInfo> {
 pub enum Share {}
 
 impl Share {
-    pub fn start(_: super::Source, _: Params, _: Box<dyn FnMut(AccessUnit) + Send>) -> Result<Share, String> {
+    pub fn start(
+        _: super::Source,
+        _: Params,
+        _: Box<dyn FnMut(AccessUnit) + Send>,
+        _: Box<dyn FnOnce() + Send>,
+    ) -> Result<Share, String> {
         Err(UNSUPPORTED.into())
     }
 

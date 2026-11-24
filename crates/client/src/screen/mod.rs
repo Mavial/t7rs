@@ -91,12 +91,14 @@ fn fit(source: (u32, u32), max: (u32, u32)) -> (u32, u32) {
 pub struct Share(platform::Share);
 
 impl Share {
+    /// `ended` runs on the share's thread once it stops, for any reason.
     pub fn start(
         source: Source,
         quality: Quality,
         sink: impl FnMut(AccessUnit) + Send + 'static,
+        ended: impl FnOnce() + Send + 'static,
     ) -> Result<Share, String> {
-        platform::Share::start(source, quality.params(), Box::new(sink)).map(Share)
+        platform::Share::start(source, quality.params(), Box::new(sink), Box::new(ended)).map(Share)
     }
 
     /// Makes the next access unit a keyframe, also when the picture is still.
@@ -140,41 +142,29 @@ pub struct Picture {
     pub pixels: Vec<u32>,
 }
 
-/// Turns one share's access units back into pictures.
+/// Turns one share's access units back into pictures. The first one it gets
+/// must be a keyframe, and each after it the next frame.
 pub struct Decoder {
     platform: platform::Decoder,
-    /// The frame number that continues the stream; `None` until a keyframe.
-    next: Option<u32>,
+    /// Decoding failed: access units are skipped until the next keyframe.
+    failed: bool,
     spare: Picture,
 }
 
 impl Decoder {
     pub fn new() -> Result<Decoder, String> {
-        Ok(Decoder { platform: platform::Decoder::new()?, next: None, spare: Picture::default() })
+        Ok(Decoder { platform: platform::Decoder::new()?, failed: false, spare: Picture::default() })
     }
 
-    /// The picture `au` completes, if any. After a lost access unit nothing
-    /// is shown until the next keyframe: see `wants_keyframe`.
-    pub fn decode(&mut self, au: &AccessUnit) -> Option<Picture> {
-        if !au.key && self.next != Some(au.frame) {
-            self.next = None;
-            return None;
+    /// The picture `au` completes, if any. After an error nothing is decoded
+    /// until the next keyframe, so ask the sharer for one.
+    pub fn decode(&mut self, au: &AccessUnit) -> Result<Option<Picture>, String> {
+        if self.failed && !au.key {
+            return Ok(None);
         }
-        self.next = Some(au.frame.wrapping_add(1));
-        match self.platform.decode(&au.data, &mut self.spare) {
-            Ok(true) => Some(std::mem::take(&mut self.spare)),
-            Ok(false) => None,
-            Err(e) => {
-                tracing::warn!("screen decode: {e}");
-                self.next = None;
-                None
-            }
-        }
-    }
-
-    /// Waiting for a keyframe: the stream has not started or lost a frame.
-    pub fn wants_keyframe(&self) -> bool {
-        self.next.is_none()
+        let decoded = self.platform.decode(&au.data, &mut self.spare);
+        self.failed = decoded.is_err();
+        decoded.map(|done| done.then(|| std::mem::take(&mut self.spare)))
     }
 
     /// Hands a shown picture back so the next one reuses its memory.

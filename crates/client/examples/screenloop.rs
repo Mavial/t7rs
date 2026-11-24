@@ -121,16 +121,21 @@ fn share_loop(monitor: Source, args: &Args) {
 
     let share = {
         let second = second.clone();
-        Share::start(monitor, args.quality, move |au| {
-            let mut s = second.lock().unwrap();
-            if au.key {
-                s.keyframes.push(au.data.len());
-            } else {
-                s.largest = s.largest.max(au.data.len());
-            }
-            drop(s);
-            let _ = units.send((au, Instant::now()));
-        })
+        Share::start(
+            monitor,
+            args.quality,
+            move |au| {
+                let mut s = second.lock().unwrap();
+                if au.key {
+                    s.keyframes.push(au.data.len());
+                } else {
+                    s.largest = s.largest.max(au.data.len());
+                }
+                drop(s);
+                let _ = units.send((au, Instant::now()));
+            },
+            || {},
+        )
     };
     let share = Arc::new(share.unwrap_or_else(|e| {
         eprintln!("cannot share: {e}");
@@ -154,11 +159,13 @@ fn share_loop(monitor: Source, args: &Args) {
                     s.decode.push(took);
                     s.queued = s.queued.max(start - sent);
                 }
-                if decoder.wants_keyframe()
-                    && let Some(share) = share.upgrade()
-                {
-                    share.request_keyframe();
-                }
+                let picture = picture.unwrap_or_else(|e| {
+                    eprintln!("decode: {e}");
+                    if let Some(share) = share.upgrade() {
+                        share.request_keyframe();
+                    }
+                    None
+                });
                 if let Some(picture) = picture {
                     if let Some(old) = newest.lock().unwrap().replace(picture) {
                         decoder.recycle(old);
@@ -309,7 +316,7 @@ fn decode_bench(monitor: Source, seconds: u64) {
     // The share stops at the end of this block.
     let share_cpu = {
         let recording = recording.clone();
-        let share = Share::start(monitor, Quality::P1080_60, move |au| recording.lock().unwrap().push(au));
+        let share = Share::start(monitor, Quality::P1080_60, move |au| recording.lock().unwrap().push(au), || {});
         let share = share.expect("share");
         println!("recording {seconds} s with {}", share.encoder());
         let cpu = process_cpu();
@@ -342,7 +349,7 @@ fn decode_bench(monitor: Source, seconds: u64) {
         for (i, au) in units.iter().enumerate() {
             std::thread::sleep((start + interval * i as u32).saturating_duration_since(Instant::now()));
             let t = Instant::now();
-            let picture = decoder.decode(au);
+            let picture = decoder.decode(au).expect("decodable");
             latencies.push(t.elapsed());
             if let Some(picture) = picture {
                 size = (picture.width, picture.height);
@@ -371,7 +378,7 @@ fn decode_bench(monitor: Source, seconds: u64) {
     let start = Instant::now();
     let mut shown = 0;
     for au in &units {
-        if let Some(picture) = decoder.decode(au) {
+        if let Some(picture) = decoder.decode(au).expect("decodable") {
             shown += 1;
             decoder.recycle(picture);
         }

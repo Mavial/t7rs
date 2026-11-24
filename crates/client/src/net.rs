@@ -84,9 +84,11 @@ pub enum Ended {
 /// Receives each encoded screen frame to send.
 pub type VideoSink = Arc<dyn Fn(AccessUnit) + Send + Sync>;
 
-/// Receives what comes of the video of each screen watched, on the network
-/// thread: keep it quick. The net layer asks for keyframes itself.
-pub type ScreenSink = Box<dyn FnMut(ClientId, Assembled) + Send>;
+/// Takes each decodable frame of the screens watched, in order, on the
+/// network thread: keep it quick. Returning false says it could not take the
+/// frame: that screen then waits for its next keyframe, which the net layer
+/// asks for, as it does after a lost frame.
+pub type ScreenSink = Box<dyn FnMut(ClientId, AccessUnit) -> bool + Send>;
 
 pub struct Net {
     tx: mpsc::UnboundedSender<Command>,
@@ -184,13 +186,19 @@ impl Viewer {
     fn push(&mut self, from: ClientId, part: VideoPart<'_>, now: Instant) -> bool {
         let Some(sink) = &mut self.sink else { return false };
         let sharer = self.sharers.entry(from).or_default();
-        let Some(out) = sharer.assembler.push(part) else { return false };
-        let ask = matches!(out, Assembled::NeedKeyframe)
-            && sharer.asked.is_none_or(|at| now.duration_since(at) >= voice::KEYFRAME_INTERVAL);
+        let undecodable = match sharer.assembler.push(part) {
+            None => return false,
+            Some(Assembled::Frame(au)) => !sink(from, au),
+            Some(Assembled::NeedKeyframe) => true,
+        };
+        if !undecodable {
+            return false;
+        }
+        sharer.assembler.wait_for_keyframe();
+        let ask = sharer.asked.is_none_or(|at| now.duration_since(at) >= voice::KEYFRAME_INTERVAL);
         if ask {
             sharer.asked = Some(now);
         }
-        sink(from, out);
         ask
     }
 }
@@ -535,17 +543,40 @@ mod tests {
         assert_eq!(push(&mut viewer, 1, au(0, false), 0), [false], "nothing installed");
 
         let sink_got = got.clone();
-        viewer.sink = Some(Box::new(move |from, out| sink_got.lock().unwrap().push((from, out))));
+        viewer.sink = Some(Box::new(move |from, au| {
+            sink_got.lock().unwrap().push((from, au));
+            true
+        }));
         assert_eq!(push(&mut viewer, 1, au(1, false), 0), [true]);
         assert_eq!(push(&mut viewer, 1, au(2, false), 100), [false], "asked 100 ms ago");
         assert_eq!(push(&mut viewer, 2, au(5, false), 100), [true], "another sharer");
         let interval = voice::KEYFRAME_INTERVAL.as_millis() as u64;
         assert_eq!(push(&mut viewer, 1, au(3, false), interval + 1), [true], "asked again");
         assert_eq!(push(&mut viewer, 1, au(4, true), interval + 2), [false]);
+        assert_eq!(*got.lock().unwrap(), [(1, au(4, true))], "only what can be decoded");
+    }
 
-        let got = got.lock().unwrap();
-        let waiting = |from| (from, Assembled::NeedKeyframe);
-        let shown = (1, Assembled::Frame(au(4, true)));
-        assert_eq!(*got, [waiting(1), waiting(1), waiting(2), waiting(1), shown]);
+    #[test]
+    fn a_frame_the_sink_cannot_take_makes_the_screen_wait_for_a_keyframe() {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let mut viewer = Viewer::default();
+        let au = |frame, key| AccessUnit { frame, key, data: vec![1] };
+        let push = |viewer: &mut Viewer, au: AccessUnit| {
+            packetize(&au).map(|p| viewer.push(1, p, Instant::now())).collect::<Vec<_>>()
+        };
+        let sink_got = got.clone();
+        viewer.sink = Some(Box::new(move |_, au: AccessUnit| {
+            let taken = au.frame != 1;
+            if taken {
+                sink_got.lock().unwrap().push(au.frame);
+            }
+            taken
+        }));
+        assert_eq!(push(&mut viewer, au(0, true)), [false]);
+        assert_eq!(push(&mut viewer, au(1, false)), [true], "not taken: ask for a keyframe");
+        assert_eq!(push(&mut viewer, au(2, false)), [false], "waits, asked just now");
+        assert_eq!(push(&mut viewer, au(3, true)), [false]);
+        assert_eq!(push(&mut viewer, au(4, false)), [false]);
+        assert_eq!(*got.lock().unwrap(), [0, 3, 4]);
     }
 }

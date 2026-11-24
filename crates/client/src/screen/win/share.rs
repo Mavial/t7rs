@@ -48,9 +48,10 @@ struct Shared {
 }
 
 type Sink = Box<dyn FnMut(AccessUnit) + Send>;
+type Ended = Box<dyn FnOnce() + Send>;
 
 impl Share {
-    pub fn start(source: Source, params: Params, sink: Sink) -> Result<Share, String> {
+    pub fn start(source: Source, params: Params, sink: Sink, ended: Ended) -> Result<Share, String> {
         let (wake, wakes) = mpsc::channel();
         let (ready, started) = mpsc::sync_channel(1);
         let shared = Arc::new(Shared::default());
@@ -58,7 +59,10 @@ impl Share {
             .name("screen share".into())
             .spawn({
                 let (wake, shared) = (wake.clone(), shared.clone());
-                move || run(source, &params, sink, &wakes, &wake, &shared, &ready)
+                move || {
+                    run(source, &params, sink, &wakes, &wake, &shared, &ready);
+                    ended();
+                }
             })
             .map_err(|e| format!("screen share thread: {e}"))?;
         match started.recv() {

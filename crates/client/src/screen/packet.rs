@@ -169,6 +169,11 @@ impl Assembler {
         Some(self.finish(p))
     }
 
+    /// Treats the stream as broken: nothing more comes out until a keyframe.
+    pub fn wait_for_keyframe(&mut self) {
+        self.decodable = None;
+    }
+
     fn finish(&mut self, p: Pending) -> Assembled {
         self.newest = Some(p.frame);
         let follows = self.decodable.and_then(|d| d.checked_add(1)) == Some(p.frame);
