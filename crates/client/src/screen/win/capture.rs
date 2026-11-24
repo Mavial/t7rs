@@ -27,9 +27,8 @@ use super::share::Wake;
 
 pub fn sources() -> Vec<SourceInfo> {
     let mut monitors: Vec<(bool, RECT, HMONITOR)> = Vec::new();
-    // SAFETY: the callback only runs during the call and gets `monitors` back.
     unsafe {
-        let _ = EnumDisplayMonitors(None, None, Some(add_monitor), LPARAM(&raw mut monitors as isize));
+        let _ = EnumDisplayMonitors(None, None, Some(add_monitor), lparam(&mut monitors));
     }
     monitors.sort_by_key(|(primary, ..)| !primary);
     let mut list: Vec<SourceInfo> = (monitors.into_iter().enumerate())
@@ -39,13 +38,26 @@ pub fn sources() -> Vec<SourceInfo> {
         })
         .collect();
     unsafe {
-        let _ = EnumWindows(Some(add_window), LPARAM(&raw mut list as isize));
+        let _ = EnumWindows(Some(add_window), lparam(&mut list));
     }
     list
 }
 
+fn lparam<T>(list: &mut Vec<T>) -> LPARAM {
+    LPARAM(&raw mut *list as isize)
+}
+
+/// # Safety
+///
+/// `list` is what [`lparam`] made of a `Vec<T>` for the enumeration calling back.
+unsafe fn handed<'a, T>(list: LPARAM) -> &'a mut Vec<T> {
+    // SAFETY: the enumeration calls back only during the call that borrows the
+    // vector, one callback at a time on that call's thread.
+    unsafe { &mut *(list.0 as *mut Vec<T>) }
+}
+
 unsafe extern "system" fn add_monitor(monitor: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> BOOL {
-    let list = unsafe { &mut *(list.0 as *mut Vec<(bool, RECT, HMONITOR)>) };
+    let list = unsafe { handed(list) };
     let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
     if unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool() {
         list.push((info.dwFlags & MONITORINFOF_PRIMARY != 0, info.rcMonitor, monitor));
@@ -54,7 +66,7 @@ unsafe extern "system" fn add_monitor(monitor: HMONITOR, _: HDC, _: *mut RECT, l
 }
 
 unsafe extern "system" fn add_window(window: HWND, list: LPARAM) -> BOOL {
-    let list = unsafe { &mut *(list.0 as *mut Vec<SourceInfo>) };
+    let list = unsafe { handed(list) };
     if let Some(name) = capturable(window) {
         list.push(SourceInfo { source: Source::Window(Handle(window.0 as isize)), name });
     }
