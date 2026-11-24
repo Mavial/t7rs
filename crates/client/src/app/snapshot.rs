@@ -415,6 +415,13 @@ const MENUS: &[Menu] = &[
         make: connected,
         steps: &[press(80.0, 238.0, RIGHT), release(80.0, 238.0, RIGHT), hover(150.0, 260.0)],
     },
+    Menu { name: "34-hover-channel", size: (1100, 720), make: connected, steps: &[hover(120.0, 529.0)] },
+    Menu {
+        name: "35-drag-member",
+        size: (1100, 720),
+        make: connected,
+        steps: &[press(90.0, 296.0, LEFT), hover(90.0, 250.0), hover(90.0, 150.0), hover(90.0, 67.0)],
+    },
 ];
 
 const FRAMES_BEFORE_STEPS: usize = 2;
