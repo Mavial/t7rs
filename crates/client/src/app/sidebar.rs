@@ -4,7 +4,9 @@
 
 use std::time::Duration;
 
-use egui::{CornerRadius, FontId, Layout, Margin, PopupCloseBehavior, RectAlign, RichText, Sense, Stroke, vec2};
+use egui::{
+    Align2, CornerRadius, FontId, Layout, Margin, PopupCloseBehavior, RectAlign, RichText, Sense, Stroke, vec2,
+};
 use t7_proto::model::ServerView;
 use t7_proto::perms::{Perm, Scope};
 use t7_proto::{MAX_NICKNAME_LEN, Speech};
@@ -68,12 +70,71 @@ impl App {
                 self.me_panel(ui);
                 self.banner_slot(ui);
                 let body = egui::Frame::new().inner_margin(Margin { left: 8, right: 8, top: 0, bottom: 6 });
-                body.show(ui, |ui| {
-                    if self.shown_view().is_some() {
-                        self.channel_tree(ui);
-                    }
+                body.show(ui, |ui| match self.conn {
+                    Conn::Disconnected => self.saved_servers(ui),
+                    // Where the tree will be, so nothing jumps when it arrives.
+                    Conn::Connecting(_) => skeleton(ui),
+                    Conn::Connected { .. } | Conn::Lost { .. } => self.channel_tree(ui),
                 });
             });
+    }
+
+    /// Before connecting, the sidebar lists the servers you've been on.
+    fn saved_servers(&mut self, ui: &mut egui::Ui) {
+        if self.settings.recent.is_empty() {
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(RichText::new("Servers you join show up here.").size(12.0).color(theme::TEXT_FAINT));
+            });
+            return;
+        }
+        let (mut connect_to, mut forget) = (None, None);
+        ui.add_space(4.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+        let label_pos = egui::pos2(rect.left() + 8.0, rect.center().y);
+        ui.painter().text(label_pos, Align2::LEFT_CENTER, "SERVERS", FontId::proportional(11.0), theme::TEXT_FAINT);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (i, r) in self.settings.recent.iter().enumerate() {
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+                let p = ui.painter();
+                if resp.hovered() || resp.context_menu_opened() {
+                    p.rect_filled(rect, CornerRadius::same(6), theme::SURFACE_HOVER);
+                }
+                paint_avatar(p, egui::pos2(rect.left() + 20.0, rect.center().y), 12.0, &r.server_name);
+                let x = rect.left() + 40.0;
+                let width = rect.right() - 8.0 - x;
+                let name = truncated(ui, &r.server_name, FontId::proportional(13.0), theme::TEXT, width);
+                let address = truncated(ui, &r.address, FontId::proportional(11.0), theme::TEXT_FAINT, width);
+                let top = rect.center().y - f32::midpoint(name.size().y, address.size().y);
+                let name_h = name.size().y;
+                p.galley(egui::pos2(x, top), name, theme::TEXT);
+                p.galley(egui::pos2(x, top + name_h), address, theme::TEXT_FAINT);
+                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.clicked() {
+                    connect_to = Some(r.address.clone());
+                }
+                resp.context_menu(|ui| {
+                    menu_style(ui, 180.0);
+                    if ui.add(Item::new(Icon::ArrowRight, "Connect")).clicked() {
+                        connect_to = Some(r.address.clone());
+                        ui.close();
+                    }
+                    if ui.add(Item::new(Icon::Trash, "Remove from list").danger()).clicked() {
+                        forget = Some(i);
+                        ui.close();
+                    }
+                });
+            }
+        });
+        if let Some(i) = forget {
+            self.settings.recent.remove(i);
+        }
+        if let Some(address) = connect_to {
+            let nickname = self.settings.nickname.clone();
+            self.connect(address, nickname, String::new());
+        }
     }
 
     fn restart_to_update(&mut self) {
@@ -104,7 +165,7 @@ impl App {
     }
 
     /// The server's name, or what we know of it while connecting.
-    fn server_name(&self) -> String {
+    pub(super) fn server_name(&self) -> String {
         if let Some(view) = self.shown_view() {
             return view.info.name.clone();
         }
@@ -382,6 +443,26 @@ impl App {
         if mic || sound {
             self.set_status(s);
         }
+    }
+}
+
+/// Grey rows shaped like channels and the people in them.
+fn skeleton(ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    for (i, width) in [0.7, 0.4, 0.55, 0.45, 0.6, 0.35, 0.5].into_iter().enumerate() {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+        let p = ui.painter();
+        let member = i % 3 != 0;
+        let x = rect.left() + if member { 30.0 } else { 8.0 };
+        let y = rect.center().y;
+        let mark = if member {
+            egui::Rect::from_center_size(egui::pos2(x + 8.0, y), vec2(16.0, 16.0))
+        } else {
+            egui::Rect::from_min_size(egui::pos2(x, y - 5.0), vec2(14.0, 10.0))
+        };
+        p.rect_filled(mark, CornerRadius::same(if member { 8 } else { 3 }), theme::SURFACE);
+        let bar = egui::Rect::from_min_size(egui::pos2(x + 24.0, y - 5.0), vec2(rect.width() * width, 10.0));
+        p.rect_filled(bar, CornerRadius::same(4), theme::SURFACE);
     }
 }
 

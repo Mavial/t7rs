@@ -373,6 +373,10 @@ const SCENES: &[Scene] = &[
         app.conn = Conn::Lost { server, login, why, last: Box::new(app.view.take().unwrap()) };
         app
     }),
+    ("39-first-run", (1100, 720), |ctx| {
+        let settings = Settings { nickname: "Santi".into(), ..Default::default() };
+        App::new(ctx, settings, None, Arc::new(|| {}))
+    }),
     ("33-update-ready", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         app.updater = crate::update::Updater::showing(crate::update::Status::Ready("0.7.0".into()));

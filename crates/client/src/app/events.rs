@@ -70,7 +70,13 @@ impl App {
             (Conn::Connected { server, login }, Some(why), Some(last)) => {
                 self.conn = Conn::Lost { server, login, why, last: Box::new(last) };
             }
-            (Conn::Connecting(_), _, _) => self.last_error = reason,
+            // A failed attempt opens the form again, with the error under the address.
+            (Conn::Connecting(login), _, _) => {
+                if reason.is_some() && self.cert_change.is_none() {
+                    self.reopen_connect_form(login);
+                }
+                self.last_error = reason;
+            }
             _ => self.active_tab = 0,
         }
     }

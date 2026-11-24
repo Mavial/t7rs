@@ -27,7 +27,7 @@ use crate::sounds::{Pack, Resolved, Sound};
 use crate::{audio, sounds, theme};
 use channel_dialog::ChannelDialog;
 use chat::{Tab, base_tabs};
-use connect::{CertChange, ConnectForm, DEFAULT_SERVER};
+use connect::{CertChange, ConnectForm};
 use moderation::{Moderation, PokeAlert, PokeForm};
 use server_settings::ServerSettings;
 use voice::{AudioDialog, Voice};
@@ -159,9 +159,6 @@ impl App {
         if let Some(l) = launch {
             let nick = l.nickname.unwrap_or_else(|| app.settings.nickname.clone());
             app.connect(l.address, nick, String::new());
-        } else if app.settings.recent.is_empty() && DEFAULT_SERVER.is_some() {
-            // First run of a build with a baked-in server: just ask for a nickname.
-            app.open_connect_form();
         }
         app
     }

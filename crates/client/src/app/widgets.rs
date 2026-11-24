@@ -271,10 +271,3 @@ pub(super) fn text_input(value: &mut String) -> egui::TextEdit<'_> {
         .align(Align2::LEFT_CENTER)
         .margin(Margin::symmetric(10, 0))
 }
-
-pub(super) fn field(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool) -> egui::Response {
-    field_label(ui, label);
-    let resp = ui.add(text_input(value).password(password));
-    ui.add_space(8.0);
-    resp
-}
