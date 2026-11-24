@@ -183,12 +183,16 @@ mod tests {
     #[test]
     fn one_color_stays_that_color_at_any_size() {
         let p = picture(1920, 1080, |_, _| 0x00C8_6432);
-        for (w, h) in [(1280, 720), (853, 480), (333, 187), (2560, 1440), (3000, 1000)] {
-            let window = (NonZeroUsize::new(w).unwrap(), NonZeroUsize::new(h).unwrap());
-            let (x0, y0, fw, fh) = fit((1920, 1080), window);
-            let out = draw(&p, w, h);
-            let inside = (y0..y0 + fh).flat_map(|y| (x0..x0 + fw).map(move |x| y * w + x));
-            assert!(inside.map(|i| out[i]).all(|px| px == 0x00C8_6432), "{w}x{h}");
+        let sizes = [
+            (1280, 720, 0, 1280),
+            (853, 480, 0, 853),
+            (333, 187, 0, 332),
+            (2560, 1440, 0, 2560),
+            (3000, 1000, 611, 1778),
+        ];
+        for (w, h, left, inner) in sizes {
+            let row = [vec![0; left], vec![0x00C8_6432; inner], vec![0; w - left - inner]].concat();
+            assert!(draw(&p, w, h).chunks(w).all(|r| r == row), "{w}x{h}");
         }
     }
 
@@ -214,22 +218,5 @@ mod tests {
         let out = draw(&p, 100, 1);
         let gray = |px: u32| px.to_le_bytes()[..3].iter().all(|c| (0x54..=0x56).contains(c));
         assert!(out.iter().all(|&px| px == out[0] && gray(px)), "{:x?}", &out[..4]);
-    }
-
-    #[test]
-    #[ignore = "a timing, not a check: cargo test --release -p t7-client scaling_cost -- --ignored --nocapture"]
-    fn scaling_cost() {
-        let p = picture(1920, 1080, |x, y| (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) & 0x00FF_FFFF);
-        for (w, h) in [(1920, 1080), (1874, 1054), (1600, 900), (1280, 720), (960, 540), (2560, 1440), (3840, 2160)] {
-            let mut scaler = Scaler::default();
-            let mut out = vec![0; w * h];
-            scaler.draw(&p, &mut out, w, h);
-            let start = std::time::Instant::now();
-            let runs = 60;
-            for _ in 0..runs {
-                scaler.draw(&p, &mut out, w, h);
-            }
-            println!("1920x1080 into {w}x{h}: {:.2} ms", start.elapsed().as_secs_f64() * 1000.0 / f64::from(runs));
-        }
     }
 }

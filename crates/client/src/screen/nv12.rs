@@ -110,26 +110,4 @@ mod tests {
         let out = convert(3, 1, &[63, 63, 63], &[128, 128, 102, 240]);
         assert!(close(out[2], 0xff0000), "{:06x}", out[2]);
     }
-
-    /// `cargo test --release -p t7-client nv12_speed -- --ignored --nocapture`
-    #[test]
-    #[ignore = "timing, run in release"]
-    fn nv12_speed() {
-        let (w, h) = (1920, 1080);
-        let y: Vec<u8> = (0..w * h).map(|i| (i * 7 % 220 + 16) as u8).collect();
-        let uv: Vec<u8> = (0..w * h / 2).map(|i| (i * 13 % 224 + 16) as u8).collect();
-        let mut out = vec![0; w * h];
-        let src = Nv12 { y: &y, uv: &uv, stride: w, width: w, height: h };
-        let runs = 200;
-        let start = std::time::Instant::now();
-        for _ in 0..runs {
-            to_rgb(&src, &mut out);
-        }
-        let per_frame = start.elapsed() / runs;
-        println!(
-            "1080p NV12 -> RGB: {per_frame:?} per frame, {:.1}% of one core at 60 fps",
-            per_frame.as_secs_f64() * 6000.0
-        );
-        assert!(out.iter().any(|&p| p != 0));
-    }
 }
