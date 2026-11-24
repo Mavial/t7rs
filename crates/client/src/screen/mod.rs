@@ -124,7 +124,7 @@ pub struct ShareStats {
     pub captured: u32,
     pub encoded: u32,
     pub bytes: u64,
-    /// From the frame reaching the screen to its access unit leaving the encoder.
+    /// From the capture handing over a frame to its access unit leaving the encoder.
     pub latency_total: Duration,
     pub latency_max: Duration,
 }

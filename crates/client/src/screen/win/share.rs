@@ -17,7 +17,7 @@ use super::super::{AccessUnit, Handle, Params, ShareStats, Source, annexb, fit};
 use super::capture::{self, Capture};
 use super::convert::{Converter, Gpu, SLOTS};
 use super::encode::Encoder;
-use super::{Context, Runtime, now_100ns};
+use super::{Runtime, now_100ns};
 
 /// What the share thread waits for.
 pub enum Wake {
@@ -169,7 +169,8 @@ impl Pipeline {
         let mut due = Instant::now();
         // Input the asynchronous encoder asked for and has not had yet.
         let mut credit = 0u32;
-        let mut pending: Option<Direct3D11CaptureFrame> = None;
+        // The newest frame not encoded yet, and when it reached this thread.
+        let mut pending: Option<(Direct3D11CaptureFrame, i64)> = None;
         let mut keyframe = true;
         let mut out = Out { inflight: VecDeque::new(), frame: 0 };
         let mut slot = 0;
@@ -207,7 +208,7 @@ impl Pipeline {
             // Take frames as they come, so the pool always has a free buffer
             // and the newest picture is never the one dropped.
             if arrived && let Some(frame) = self.capture.newest()? {
-                pending = Some(frame);
+                pending = Some((frame, now_100ns()));
             }
 
             let now = Instant::now();
@@ -215,8 +216,7 @@ impl Pipeline {
             if !encoder_ready || now + early < due {
                 continue;
             }
-            let (input, time) = if let Some(frame) = pending.take() {
-                let time = frame.SystemRelativeTime().context("frame time")?.Duration;
+            let (input, time) = if let Some((frame, time)) = pending.take() {
                 let (texture, content) = capture::texture(&frame)?;
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 // SAFETY: writes into a local.
@@ -250,7 +250,7 @@ impl Pipeline {
 }
 
 struct Out {
-    /// Capture times of the frames inside the encoder, oldest first.
+    /// Arrival times of the frames inside the encoder, oldest first.
     inflight: VecDeque<i64>,
     frame: u32,
 }
