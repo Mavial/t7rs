@@ -23,6 +23,7 @@ use crate::settings::{self, Recent, Settings};
 use crate::sounds::{self, Pack, Resolved, Sound};
 use crate::theme::{self, Btn};
 
+mod sharing;
 #[cfg(test)]
 mod snapshot;
 
@@ -146,6 +147,8 @@ enum TreeAction {
     SetRole { identity: Identity, role: RoleId, held: bool },
     MoveMember { target: ClientId, channel: ChannelId },
     Fold(String),
+    Watch(ClientId),
+    StopWatching,
 }
 
 /// Payload while dragging yourself onto another channel.
@@ -337,10 +340,21 @@ pub struct App {
     updater: crate::update::Updater,
     /// Set by "Restart to update": the shell closes the window after this frame.
     quit: bool,
+    sharing: Option<sharing::Sharing>,
+    watching: Option<sharing::Watching>,
+    /// Wakes the screen window when the screen watched has a new picture.
+    screen_wake: crate::watch::Wake,
+    /// What the share picker offers, listed when it opens.
+    share_sources: Vec<crate::screen::SourceInfo>,
 }
 
 impl App {
-    pub fn new(ctx: &egui::Context, mut settings: Settings, launch: Option<Launch>) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        mut settings: Settings,
+        launch: Option<Launch>,
+        screen_wake: crate::watch::Wake,
+    ) -> Self {
         theme::apply(ctx);
         if settings.nickname.is_empty() {
             settings.nickname =
@@ -383,6 +397,10 @@ impl App {
             attention: false,
             updater: crate::update::Updater::start(ctx.clone()),
             quit: false,
+            sharing: None,
+            watching: None,
+            screen_wake,
+            share_sources: Vec::new(),
         };
         app.sound_pack = Pack::open(app.settings.audio.sound_pack.as_deref());
         if let Some(l) = launch {
@@ -964,8 +982,9 @@ impl App {
                 let tab = self.active_tab;
                 self.push(tab, LineKind::Error, message);
             }
-            // The net layer handles Rejected and Pong; SendKeyframe waits for the screen-share UI.
-            S2C::Rejected { .. } | S2C::Pong { .. } | S2C::SendKeyframe => {}
+            S2C::SendKeyframe => self.send_keyframe(),
+            // The net layer handles these.
+            S2C::Rejected { .. } | S2C::Pong { .. } => {}
         }
     }
 
@@ -1171,6 +1190,9 @@ impl App {
                     if changed {
                         self.set_status(s);
                     }
+                    let (r, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
+                    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_STRONG));
+                    self.share_button(ui);
                 });
             });
         });
@@ -1186,6 +1208,7 @@ impl App {
             ui,
             |ui| {
                 let Some(view) = &self.view else { return };
+                let watched = self.watching.as_ref().map(|w| w.sharer);
                 let mut join = None;
                 let mut private = None;
                 let mut poke = None;
@@ -1544,6 +1567,23 @@ impl App {
                                 icons::paint(p, r, icon, color);
                                 name_end += 16.0;
                             }
+                            // Those in our channel we can watch.
+                            let watchable = c.sharing && !is_me && view.my_channel() == Some(ch_id);
+                            if c.sharing {
+                                let live = sharing::live_badge(p, egui::pos2(name_end + 6.0, rect.center().y));
+                                name_end = live.right();
+                                let tip = if is_me {
+                                    "You're sharing your screen".to_owned()
+                                } else if watchable {
+                                    format!("Watch {}'s screen", c.nickname)
+                                } else {
+                                    "Sharing their screen. Join their channel to watch".to_owned()
+                                };
+                                let id = ui.scope_id().with(("live", c.id));
+                                if sharing::live_badge_clicked(ui, live, id, &tip, watchable) {
+                                    action = Some(TreeAction::Watch(c.id));
+                                }
+                            }
                             let name_rect =
                                 egui::Rect::from_min_max(name_rect.min, egui::pos2(name_end, name_rect.max.y));
                             let volume = volumes.get(&c.nickname).copied().unwrap_or(1.0);
@@ -1614,6 +1654,15 @@ impl App {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                                 }
                                 resp.context_menu(|ui| {
+                                    if watchable && watched == Some(c.id) {
+                                        if ui.button("Stop watching").clicked() {
+                                            action = Some(TreeAction::StopWatching);
+                                            ui.close();
+                                        }
+                                    } else if watchable && ui.button("Watch screen").clicked() {
+                                        action = Some(TreeAction::Watch(c.id));
+                                        ui.close();
+                                    }
                                     if ui.button("Send private message").clicked() {
                                         private = Some(c.id);
                                         ui.close();
@@ -1769,6 +1818,8 @@ impl App {
                     Some(TreeAction::MoveMember { target, channel }) => {
                         self.net.send(C2S::MoveMember { target, channel });
                     }
+                    Some(TreeAction::Watch(sharer)) => self.watch(sharer),
+                    Some(TreeAction::StopWatching) => self.stop_watching(),
                     None => {}
                 }
             },
@@ -2847,6 +2898,7 @@ fn open_sounds_folder() {
 impl App {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.poll_network();
+        self.sync_screens();
         let ctx = ui.ctx().clone();
         self.drive_audio(&ctx);
         self.shortcuts(&ctx);

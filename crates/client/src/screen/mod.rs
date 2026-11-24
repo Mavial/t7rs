@@ -1,6 +1,5 @@
 //! Screen sharing: capture and encode on the sharer, decode and show on viewers.
 //! Frames travel as H.264 access units over the voice link (`t7_proto::voice`).
-#![allow(dead_code, reason = "the app wires screen sharing up in a later change")]
 
 mod annexb;
 mod nv12;
@@ -53,10 +52,14 @@ pub fn sources() -> Vec<SourceInfo> {
     platform::sources()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Quality {
+    #[serde(rename = "720p30")]
     P720_30,
+    #[default]
+    #[serde(rename = "1080p30")]
     P1080_30,
+    #[serde(rename = "1080p60")]
     P1080_60,
 }
 

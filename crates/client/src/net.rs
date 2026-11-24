@@ -148,7 +148,6 @@ impl Net {
     }
 
     /// Where the screen encoder sends access units while sharing.
-    #[expect(dead_code, reason = "the screen-share UI hands it to the encoder")]
     pub fn video_sink(&self) -> VideoSink {
         let tx = self.tx.clone();
         Arc::new(move |au| {
@@ -158,7 +157,6 @@ impl Net {
 
     /// Installs where watched screens go, or with `None` drops them. Either
     /// way, every screen starts again from its next keyframe.
-    #[expect(dead_code, reason = "the screen-share UI installs it while showing a screen")]
     pub fn set_screen_sink(&self, sink: Option<ScreenSink>) {
         let mut viewer = self.viewer.lock().unwrap();
         viewer.sink = sink;

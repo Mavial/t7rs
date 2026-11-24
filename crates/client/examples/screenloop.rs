@@ -14,6 +14,7 @@
 //! sharing, then decodes the recording at 60 fps and reports what that costs.
 
 #[path = "../src/screen/mod.rs"]
+#[allow(dead_code, reason = "the example has no network, so no use for the packet half")]
 mod screen;
 
 use std::num::NonZeroU32;

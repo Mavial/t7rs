@@ -5,9 +5,12 @@
 //! commits ~65 MB, several times what this whole client needs, while drawing
 //! a mostly static UI on the CPU costs a few milliseconds per repaint, and
 //! the UI only repaints on input or network events.
+//!
+//! While watching someone's screen, a second window shows it (`watch`).
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
@@ -19,9 +22,15 @@ use winit::window::{Theme, Window, WindowId};
 
 use crate::app::App;
 use crate::settings::Store;
+use crate::watch;
 
-/// Sent by egui, from any thread, when it wants a repaint after the given delay.
-struct RepaintAfter(Duration);
+/// Wakes the event loop, from any thread.
+enum Wake {
+    /// egui wants a repaint after this delay.
+    Repaint(Duration),
+    /// The screen watched has a new picture.
+    Screen,
+}
 
 struct Gfx {
     window: Rc<Window>,
@@ -37,22 +46,31 @@ struct Shell {
     gfx: Option<Gfx>,
     next_repaint: Option<Instant>,
     title: String,
+    /// The window showing the screen watched, while watching one.
+    screen: Option<watch::Window>,
 }
 
 /// Runs the UI until the window closes. `make_app` runs after the repaint
-/// wakeup is wired, so nothing the app starts can miss a repaint.
+/// wakeup is wired, so nothing the app starts can miss a repaint. It gets
+/// what wakes the screen window when a new picture is ready.
 pub fn run(
     ctx: egui::Context,
     store: Store,
-    make_app: impl FnOnce(&egui::Context) -> App,
+    make_app: impl FnOnce(&egui::Context, watch::Wake) -> App,
 ) -> Result<(), winit::error::EventLoopError> {
-    let event_loop = EventLoop::<RepaintAfter>::with_user_event().build()?;
+    let event_loop = EventLoop::<Wake>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
+    let repaint = proxy.clone();
     ctx.set_request_repaint_callback(move |info| {
-        let _ = proxy.send_event(RepaintAfter(info.delay));
+        let _ = repaint.send_event(Wake::Repaint(info.delay));
     });
-    let app = make_app(&ctx);
-    let mut shell = Shell { ctx, app, store, gfx: None, next_repaint: None, title: String::new() };
+    let app = make_app(
+        &ctx,
+        Arc::new(move || {
+            let _ = proxy.send_event(Wake::Screen);
+        }),
+    );
+    let mut shell = Shell { ctx, app, store, gfx: None, next_repaint: None, title: String::new(), screen: None };
     event_loop.run_app(&mut shell)
 }
 
@@ -109,9 +127,25 @@ impl Shell {
         let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
         self.schedule(delay);
     }
+
+    /// Opens, switches or closes the screen window to match what the app watches.
+    fn sync_screen(&mut self, event_loop: &ActiveEventLoop) {
+        let wanted = self.app.watching().map(|(frames, title)| (frames.clone(), title));
+        match (wanted, &mut self.screen) {
+            (None, screen) => *screen = None,
+            (Some((frames, title)), Some(screen)) => screen.show(&frames, &title),
+            (Some((frames, title)), screen @ None) => match watch::Window::open(event_loop, frames, title) {
+                Ok(window) => *screen = Some(window),
+                Err(e) => {
+                    tracing::error!("cannot open the screen window: {e}");
+                    self.app.stop_watching();
+                }
+            },
+        }
+    }
 }
 
-impl ApplicationHandler<RepaintAfter> for Shell {
+impl ApplicationHandler<Wake> for Shell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_some() {
             return;
@@ -160,11 +194,28 @@ impl ApplicationHandler<RepaintAfter> for Shell {
         }
     }
 
-    fn user_event(&mut self, _: &ActiveEventLoop, RepaintAfter(delay): RepaintAfter) {
-        self.schedule(delay);
+    fn user_event(&mut self, _: &ActiveEventLoop, wake: Wake) {
+        match wake {
+            Wake::Repaint(delay) => self.schedule(delay),
+            Wake::Screen => {
+                if let Some(screen) = &self.screen {
+                    screen.wake();
+                }
+            }
+        }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some(screen) = &mut self.screen
+            && screen.id() == id
+        {
+            if screen.event(&event) {
+                self.screen = None;
+                self.app.stop_watching();
+                self.schedule(Duration::ZERO);
+            }
+            return;
+        }
         let Some(g) = &mut self.gfx else { return };
         let response = g.input.on_window_event(&g.window, &event);
         match event {
@@ -175,6 +226,7 @@ impl ApplicationHandler<RepaintAfter> for Shell {
             }
             WindowEvent::RedrawRequested => {
                 self.paint();
+                self.sync_screen(event_loop);
                 if self.app.take_quit() {
                     self.store.save(self.app.settings());
                     self.app.on_exit();

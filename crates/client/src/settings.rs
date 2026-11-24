@@ -9,6 +9,7 @@ use t7_proto::tls::Fingerprint;
 
 use crate::audio::AudioSettings;
 use crate::net::ServerKey;
+use crate::screen::Quality;
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
 #[serde(default)]
@@ -24,6 +25,8 @@ pub struct Settings {
     pub folded: std::collections::BTreeMap<ServerKey, std::collections::BTreeSet<String>>,
     /// Made on the first connect.
     pub identity_key: Option<IdentityKey>,
+    /// What screen shares are sent at.
+    pub screen_quality: Quality,
 }
 
 /// A new identity, from the system's randomness.
@@ -120,6 +123,7 @@ mod tests {
             server_certs: [(ServerKey::of("1.2.3.4"), Fingerprint([0xab; 32]))].into(),
             folded: [(ServerKey::of("1.2.3.4"), ["Games".to_owned()].into())].into(),
             identity_key: Some(new_identity_key()),
+            screen_quality: Quality::P1080_60,
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);

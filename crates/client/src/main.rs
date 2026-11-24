@@ -15,6 +15,7 @@ mod shell;
 mod sounds;
 mod theme;
 mod update;
+mod watch;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -26,7 +27,7 @@ fn main() {
     let (store, settings) = settings::Store::open(profile.as_deref().map(str::trim));
     let launch = parse_args();
 
-    let result = shell::run(egui::Context::default(), store, |ctx| app::App::new(ctx, settings, launch));
+    let result = shell::run(egui::Context::default(), store, |ctx, wake| app::App::new(ctx, settings, launch, wake));
     if let Err(e) = result {
         tracing::error!("{e}");
         std::process::exit(1);
