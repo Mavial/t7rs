@@ -554,13 +554,17 @@ fn snapshots() {
 /// How long a full redraw of the connected window takes: layout, tessellation
 /// and rasterizing, as the shell does on every repaint.
 /// `cargo test --release -p t7-client frame_time -- --ignored --nocapture`.
+/// `T7_SNAPSHOT=05-voice-settings` times the first scene whose name contains it instead.
 #[test]
 #[ignore = "measures redraw time; run it in release"]
 fn frame_time() {
     const FRAMES: usize = 260;
     const KEPT: usize = 200;
     let size = (1100, 720);
-    let mut canvas = Canvas::new(size, connected, 1.0);
+    let only = std::env::var("T7_SNAPSHOT").ok();
+    let scene = only.as_deref().map(|o| SCENES.iter().find(|(name, ..)| name.contains(o)).expect("a scene"));
+    let (name, make) = scene.map_or(("connected", connected as fn(&egui::Context) -> App), |s| (s.0, s.2));
+    let mut canvas = Canvas::new(size, make, 1.0);
     let mut times: Vec<f64> = (0..FRAMES)
         .map(|frame| {
             let raw = canvas.input(frame);
@@ -573,7 +577,7 @@ fn frame_time() {
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times[((KEPT - 1) as f64 * q).round() as usize];
     println!(
-        "frame_time {}x{}, last {KEPT} of {FRAMES} frames: median {:.3} ms, p10 {:.3} ms, p90 {:.3} ms",
+        "frame_time {name} {}x{}, last {KEPT} of {FRAMES} frames: median {:.3} ms, p10 {:.3} ms, p90 {:.3} ms",
         size.0,
         size.1,
         at(0.5),
