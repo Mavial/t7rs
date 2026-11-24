@@ -111,7 +111,8 @@ impl Converter {
             let outputs = (0..SLOTS)
                 .map(|_| {
                     let texture = texture(gpu, output_size, DXGI_FORMAT_NV12)?;
-                    Ok((texture.clone(), output_view(&device, &enumerator, &texture)?))
+                    let view = output_view(&device, &enumerator, &texture)?;
+                    Ok((texture, view))
                 })
                 .collect::<Result<_, String>>()?;
             video.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
