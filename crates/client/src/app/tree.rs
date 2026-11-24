@@ -42,7 +42,7 @@ enum TreeAction {
     MoveMember { target: ClientId, channel: ChannelId },
     Fold(String),
     Watch(ClientId),
-    StopWatching,
+    StopWatching(ClientId),
 }
 
 /// Payload while dragging yourself onto another channel.
@@ -85,7 +85,7 @@ struct Tree<'a> {
     me_talking: bool,
     dragging: Dragging,
     pointer: Option<egui::Pos2>,
-    watched: Option<ClientId>,
+    watched: &'a [sharing::Watching],
     picked: Option<TreeAction>,
 }
 
@@ -132,7 +132,7 @@ impl App {
             me_talking: self.voice.shared.transmitting(),
             dragging: Dragging::of(ui.ctx()),
             pointer: ui.input(|i| i.pointer.interact_pos()),
-            watched: self.watching.as_ref().map(|w| w.sharer),
+            watched: &self.watching,
             picked: None,
         };
         let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(8, 10));
@@ -176,7 +176,7 @@ impl App {
             TreeAction::Fold(name) => self.toggle_folded(name),
             TreeAction::MoveMember { target, channel } => self.net.send(C2S::MoveMember { target, channel }),
             TreeAction::Watch(sharer) => self.watch(sharer),
-            TreeAction::StopWatching => self.stop_watching(),
+            TreeAction::StopWatching(sharer) => self.stop_watching(sharer),
         }
     }
 
@@ -473,9 +473,9 @@ impl<'a> Tree<'a> {
 
     fn member_menu(&mut self, ui: &mut egui::Ui, ch: &ChannelInfo, member: &MemberRow, movable: bool) {
         let (view, c) = (self.view, member.c);
-        if member.watchable && self.watched == Some(c.id) {
+        if member.watchable && self.watched.iter().any(|w| w.sharer == c.id) {
             if ui.button("Stop watching").clicked() {
-                self.picked = Some(TreeAction::StopWatching);
+                self.picked = Some(TreeAction::StopWatching(c.id));
                 ui.close();
             }
         } else if member.watchable && ui.button("Watch screen").clicked() {

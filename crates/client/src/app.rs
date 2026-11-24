@@ -82,7 +82,8 @@ pub struct App {
     /// Set by the update icon: the shell closes the window after this frame.
     quit: bool,
     sharing: Option<sharing::Sharing>,
-    watching: Option<sharing::Watching>,
+    /// In the order started.
+    watching: Vec<sharing::Watching>,
     screen_wake: crate::watch::Wake,
     share_sources: Vec<crate::screen::SourceInfo>,
 }
@@ -129,7 +130,7 @@ impl App {
             updater: crate::update::Updater::start(ctx.clone()),
             quit: false,
             sharing: None,
-            watching: None,
+            watching: Vec::new(),
             screen_wake,
             share_sources: Vec::new(),
         };
