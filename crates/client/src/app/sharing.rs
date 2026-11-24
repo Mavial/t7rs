@@ -54,8 +54,7 @@ impl App {
 
     pub fn stop_watching(&mut self) {
         if self.watching.take().is_some() {
-            self.net.set_screen_sink(None);
-            self.net.send(C2S::Watch(None));
+            self.net.watch(None);
         }
     }
 
@@ -66,10 +65,9 @@ impl App {
             return;
         }
         let name = view.nickname(sharer).unwrap_or("Someone").to_owned();
-        match watch::start(sharer, self.screen_wake.clone()) {
+        match watch::start(self.screen_wake.clone()) {
             Ok((frames, sink)) => {
-                self.net.set_screen_sink(Some(sink));
-                self.net.send(C2S::Watch(Some(sharer)));
+                self.net.watch(Some((sharer, sink)));
                 self.watching = Some(Watching { sharer, frames });
             }
             Err(e) => {

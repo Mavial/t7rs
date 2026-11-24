@@ -9,7 +9,6 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use t7_proto::ClientId;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -59,9 +58,9 @@ impl Frames {
     }
 }
 
-/// Starts decoding `sharer`'s screen on its own thread. The returned sink
-/// goes to the net layer; the thread ends when the sink is dropped.
-pub fn start(sharer: ClientId, wake: Wake) -> Result<(Arc<Frames>, ScreenSink), String> {
+/// Starts decoding a screen on its own thread. The returned sink goes to the
+/// net layer; the thread ends when the sink is dropped.
+pub fn start(wake: Wake) -> Result<(Arc<Frames>, ScreenSink), String> {
     let decoder = Decoder::new()?;
     let frames = Arc::new(Frames::default());
     let failed = Arc::new(AtomicBool::new(false));
@@ -73,11 +72,7 @@ pub fn start(sharer: ClientId, wake: Wake) -> Result<(Arc<Frames>, ScreenSink), 
             move || decode(&units, decoder, &frames, &failed, &*wake)
         })
         .map_err(|e| format!("screen decoder thread: {e}"))?;
-    let sink: ScreenSink = Box::new(move |from, au| {
-        // Someone else's frames are stragglers from the screen watched before.
-        if from != sharer {
-            return true;
-        }
+    let sink: ScreenSink = Box::new(move |au| {
         // Refusing a frame makes the net layer ask for a keyframe.
         let failed = failed.swap(false, Relaxed);
         queue.try_send(au).is_ok() && !failed

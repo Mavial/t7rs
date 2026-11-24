@@ -275,10 +275,11 @@ crates/
   bytes of a frame per datagram and 512 datagrams per frame. The sharer
   spreads a frame's datagrams over 16 ms. The server forwards them without
   decoding to those in the sharer's channel who chose to watch, and drops a
-  sharer's video past 12 Mbit/s or while they may not speak. After a lost
-  frame a viewer waits for the next keyframe and asks the sharer for one
-  through the server, which passes on at most one request per sharer every
-  250 ms. Changing channels ends your share and what you watch. A watched
+  sharer's video past 12 Mbit/s or while they may not speak. A viewer that
+  starts watching, or loses a frame, asks the sharer for a keyframe through
+  the server every 250 ms until one arrives, since a still screen sends
+  nothing until asked. The server passes on at most one request per sharer
+  every 250 ms. Changing channels ends your share and what you watch. A watched
   screen decodes on a thread of its own and draws in its own window, so the
   main window doesn't repaint for video.
 - **Sound cleanup** (`crates/client/src/dsp.rs`), on the microphone, 10 ms at a time:

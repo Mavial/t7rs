@@ -174,6 +174,11 @@ impl Assembler {
         self.decodable = None;
     }
 
+    /// Nothing comes out until a keyframe: none has yet, or the stream broke since.
+    pub fn waiting_for_keyframe(&self) -> bool {
+        self.decodable.is_none()
+    }
+
     fn finish(&mut self, p: Pending) -> Assembled {
         self.newest = Some(p.frame);
         let follows = self.decodable.and_then(|d| d.checked_add(1)) == Some(p.frame);
