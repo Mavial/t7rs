@@ -23,8 +23,6 @@ use super::{Runtime, now_100ns};
 pub enum Wake {
     /// The capture delivered a frame.
     Frame,
-    /// The source closed.
-    Closed,
     NeedInput,
     HaveOutput,
     Keyframe,
@@ -184,6 +182,7 @@ impl Pipeline {
             };
             let first = match wakes.recv_timeout(timeout) {
                 Ok(wake) => Some(wake),
+                Err(RecvTimeoutError::Timeout) if !self.capture.alive() => return Ok(()),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             };
@@ -202,7 +201,7 @@ impl Pipeline {
                     }
                     Wake::Keyframe => keyframe = true,
                     Wake::Failed(e) => return Err(e),
-                    Wake::Closed | Wake::Stop => return Ok(()),
+                    Wake::Stop => return Ok(()),
                 }
             }
             // Take frames as they come, so the pool always has a free buffer

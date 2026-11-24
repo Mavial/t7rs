@@ -18,8 +18,8 @@ use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, H
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetShellWindow, GetWindow, GetWindowLongPtrW, GetWindowTextW, IsWindowVisible,
-    MONITORINFOF_PRIMARY, WS_EX_TOOLWINDOW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetShellWindow, GetWindow, GetWindowLongPtrW, GetWindowTextW, IsWindow,
+    IsWindowVisible, MONITORINFOF_PRIMARY, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, Interface};
 
@@ -95,12 +95,11 @@ fn capturable(window: HWND) -> Option<String> {
 }
 
 /// A capture session delivering frames into a two-buffer pool. Each new frame
-/// sends `Wake::Frame`; the source closing sends `Wake::Closed`.
+/// sends `Wake::Frame`.
 pub struct Capture {
     session: GraphicsCaptureSession,
     pool: Direct3D11CaptureFramePool,
-    item: GraphicsCaptureItem,
-    closed: i64,
+    source: Source,
     device: IDirect3DDevice,
     size: SizeInt32,
 }
@@ -136,13 +135,6 @@ impl Capture {
             Ok(())
         }))
         .context("frame handler")?;
-        let gone = wake.clone();
-        let closed = item
-            .Closed(&TypedEventHandler::new(move |_, _| {
-                let _ = gone.send(Wake::Closed);
-                Ok(())
-            }))
-            .context("close handler")?;
         let session = pool.CreateCaptureSession(&item).context("capture session")?;
         // Newer Windows only; each is fine to miss.
         let _ = session.SetIsCursorCaptureEnabled(true);
@@ -156,7 +148,22 @@ impl Capture {
         // is not a multiple of `fps` still delivers at least `fps`.
         let _ = session.SetMinUpdateInterval(TimeSpan { Duration: 7_500_000 / i64::from(fps) });
         session.StartCapture().context("starting capture")?;
-        Ok(Capture { session, pool, item, closed, device, size })
+        Ok(Capture { session, pool, source, device, size })
+    }
+
+    /// The source still exists. Polled, because the capture item's Closed
+    /// event did not fire when a captured window closed (Windows 11 26300).
+    pub fn alive(&self) -> bool {
+        // SAFETY: plain queries; a stale handle fails them.
+        unsafe {
+            match self.source {
+                Source::Window(Handle(h)) => IsWindow(Some(HWND(h as _))).as_bool(),
+                Source::Monitor(Handle(h)) => {
+                    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+                    GetMonitorInfoW(HMONITOR(h as _), &raw mut info).as_bool()
+                }
+            }
+        }
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -184,7 +191,6 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        let _ = self.item.RemoveClosed(self.closed);
         let _ = self.session.Close();
         let _ = self.pool.Close();
     }
