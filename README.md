@@ -335,9 +335,10 @@ Release builds update themselves. Shortly after start and every 6 hours T7
 reads `latest.json` from the latest GitHub release; if it lists a newer version
 for the platform, T7 downloads it next to itself and accepts it only if the
 SHA-256 matches and the ed25519 signature verifies against the key built into
-the client. The new build replaces the old one when T7 closes, or right away
-with "Restart to update". When a server says the client is too old, T7 checks
-immediately. Local builds (without `T7_RELEASE` set) never update themselves.
+the client. A small download icon then appears in the top bar. The new build
+replaces the old one when T7 closes, or right away when you click the icon.
+When a server says the client is too old, T7 checks immediately. Local builds
+(without `T7_RELEASE` set) never update themselves.
 
 To publish a release:
 

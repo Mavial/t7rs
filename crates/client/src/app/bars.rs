@@ -9,7 +9,7 @@ use t7_proto::Speech;
 use super::chat::LineKind;
 use super::widgets::{avatar, icon_button, logo, mic_held, toggle};
 use super::{App, Conn};
-use crate::icons::Icon;
+use crate::icons::{self, Icon};
 use crate::theme;
 use crate::theme::Btn;
 
@@ -54,23 +54,20 @@ impl App {
                         }
                     }
                     self.status_pill(ui);
-                    match self.updater.status() {
-                        crate::update::Status::Ready(version) => {
-                            let label = format!("Restart to update to {version}");
-                            if ui
-                                .add(Btn::primary(&label))
-                                .on_hover_text("The update is downloaded and verified")
-                                .clicked()
-                            {
-                                self.restart_to_update();
-                            }
+                    if let crate::update::Status::Ready(version) = self.updater.status() {
+                        let (rect, resp) =
+                            ui.allocate_exact_size(vec2(theme::CONTROL_H, theme::CONTROL_H), Sense::click());
+                        let fill = theme::ACCENT.gamma_multiply(if resp.hovered() { 0.26 } else { 0.18 });
+                        ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
+                        let icon_rect = egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0));
+                        icons::paint(ui.painter(), icon_rect, Icon::Update, theme::ACCENT_TEXT);
+                        if resp
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!("Update now to T7 {version}. T7 restarts and reconnects."))
+                            .clicked()
+                        {
+                            self.restart_to_update();
                         }
-                        crate::update::Status::Downloading(version) => {
-                            ui.label(
-                                RichText::new(format!("Downloading {version}…")).size(12.5).color(theme::TEXT_FAINT),
-                            );
-                        }
-                        _ => {}
                     }
                 });
             });
