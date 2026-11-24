@@ -267,14 +267,17 @@ impl App {
         if connect && self.form.is_none() {
             self.open_connect_form();
         }
-        for (pressed, flip) in [
-            (mute, (|s| ClientStatus { muted: !s.muted, ..s }) as fn(ClientStatus) -> ClientStatus),
-            (deafen, |s| ClientStatus { deafened: !s.deafened, ..s }),
-            (away, |s| ClientStatus { away: !s.away, ..s }),
-        ] {
-            if pressed {
-                self.set_status(flip(self.settings.status));
-            }
+        if mute {
+            let s = self.settings.status;
+            self.set_status(ClientStatus { muted: !s.muted, ..s });
+        }
+        if deafen {
+            let s = self.settings.status;
+            self.set_status(ClientStatus { deafened: !s.deafened, ..s });
+        }
+        if away {
+            let s = self.settings.status;
+            self.set_status(ClientStatus { away: !s.away, ..s });
         }
         if settings && self.audio_dialog.is_none() {
             self.open_voice_settings();

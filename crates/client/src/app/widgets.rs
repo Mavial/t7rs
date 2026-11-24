@@ -34,8 +34,8 @@ pub(super) fn mic_held(ui: &mut egui::Ui, icon: Icon, color: Color32, tip: &str)
 }
 
 /// A small icon button that stays lit while the menu it opens shows.
-pub(super) fn menu_button(ui: &mut egui::Ui, icon: Icon, size: f32) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+pub(super) fn menu_button(ui: &mut egui::Ui, icon: Icon) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
     let lit = open || resp.hovered();
     if lit {
@@ -62,7 +62,7 @@ pub(super) fn truncated(
 /// A menu entry: an icon, a label, and optional faint text on the right.
 /// `ui.add_enabled(false, ..)` greys it out.
 pub(super) struct Item<'a> {
-    icon: Option<Icon>,
+    icon: Icon,
     icon_color: Color32,
     label: &'a str,
     right: Option<&'a str>,
@@ -72,7 +72,7 @@ pub(super) struct Item<'a> {
 
 impl<'a> Item<'a> {
     pub(super) fn new(icon: Icon, label: &'a str) -> Self {
-        Self { icon: Some(icon), icon_color: theme::TEXT_FAINT, label, right: None, danger: false, submenu: false }
+        Self { icon, icon_color: theme::TEXT_FAINT, label, right: None, danger: false, submenu: false }
     }
 
     /// Faint text at the right edge: a shortcut, or the value it acts on.
@@ -118,15 +118,13 @@ impl egui::Widget for Item<'_> {
         if enabled && resp.hovered() {
             p.rect_filled(rect, CornerRadius::same(5), theme::SURFACE_HOVER);
         }
-        let (text, icon) = match (enabled, self.danger) {
+        let (text, icon_color) = match (enabled, self.danger) {
             (false, _) => (theme::TEXT_FAINT, theme::TEXT_FAINT),
             (true, true) => (theme::RED, theme::RED),
             (true, false) => (theme::TEXT, self.icon_color),
         };
-        if let Some(i) = self.icon {
-            let center = egui::pos2(rect.left() + PAD + ICON / 2.0, rect.center().y);
-            icons::paint(p, egui::Rect::from_center_size(center, vec2(ICON, ICON)), i, icon);
-        }
+        let center = egui::pos2(rect.left() + PAD + ICON / 2.0, rect.center().y);
+        icons::paint(p, egui::Rect::from_center_size(center, vec2(ICON, ICON)), self.icon, icon_color);
         let text_pos = egui::pos2(rect.left() + PAD * 2.0 + ICON, rect.center().y - galley.size().y / 2.0);
         p.galley_with_override_text_color(text_pos, galley, text);
         let mut right_edge = rect.right() - PAD;

@@ -232,10 +232,10 @@ impl App {
     /// `+` to connect while offline, else `⋯` with what the top bar used to hold.
     fn server_button(&self, ui: &mut egui::Ui) -> Option<ServerAction> {
         if matches!(self.conn, Conn::Disconnected) {
-            let resp = menu_button(ui, Icon::Plus, 28.0).on_hover_text("Connect to a server (Ctrl+S)");
+            let resp = menu_button(ui, Icon::Plus).on_hover_text("Connect to a server (Ctrl+S)");
             return resp.clicked().then_some(ServerAction::Connect);
         }
-        let resp = menu_button(ui, Icon::Dots, 28.0);
+        let resp = menu_button(ui, Icon::Dots);
         let mut picked = None;
         let lost = matches!(self.conn, Conn::Lost { .. });
         egui::Popup::menu(&resp).align(RectAlign::BOTTOM_END).show(|ui| {
