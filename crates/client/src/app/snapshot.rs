@@ -5,6 +5,7 @@
 //! `target/snapshots`, or to `$T7_SNAPSHOT_DIR` when set.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use t7_proto::perms::{ChannelPerms, Member, Override, Perm, Permissions, Perms, RoleId, Roles};
@@ -40,7 +41,16 @@ fn channel(id: u32, parent: Option<u32>, name: &str, order: u32) -> ChannelInfo 
 
 fn client(id: u32, name: &str, channel: u32, status: ClientStatus) -> ClientInfo {
     let identity = Identity([id as u8; 32]);
-    ClientInfo { id, nickname: name.into(), channel, status, role: None, identity, speech: Speech::Allowed }
+    ClientInfo {
+        id,
+        nickname: name.into(),
+        channel,
+        status,
+        role: None,
+        identity,
+        speech: Speech::Allowed,
+        sharing: false,
+    }
 }
 
 fn view() -> ServerView {
@@ -76,13 +86,14 @@ fn view() -> ServerView {
     me.role = Some("Owner".into());
     let mut marta = client(2, "Marta", 2, ClientStatus::default());
     marta.role = Some("Admin".into());
+    marta.sharing = true;
     let mut kenji = client(3, "Kenji", 2, muted);
     kenji.role = Some("Moderator".into());
     let clients = vec![
         me,
         marta,
         kenji,
-        client(4, "Ola", 3, deaf),
+        ClientInfo { sharing: true, ..client(4, "Ola", 3, deaf) },
         client(5, "Priya", 3, ClientStatus::default()),
         client(6, "Dmitri", 11, ClientStatus::default()),
         client(10, "Mei", 11, ClientStatus::default()),
@@ -127,7 +138,7 @@ fn recents() -> Vec<Recent> {
 fn connected(ctx: &egui::Context) -> App {
     let mut settings = Settings { nickname: "Santi".into(), recent: recents(), ..Default::default() };
     settings.user_volumes.insert("Marta".into(), 0.6);
-    let mut app = App::new(ctx, settings, None);
+    let mut app = App::new(ctx, settings, None, Arc::new(|| {}));
     app.view = Some(view());
     app.conn = Conn::Connected { server: ServerKey::of("friday.example.com:9988") };
     app.ping = Some(Duration::from_millis(23));
@@ -154,7 +165,7 @@ fn connected(ctx: &egui::Context) -> App {
 
 fn disconnected(ctx: &egui::Context) -> App {
     let settings = Settings { nickname: "Santi".into(), recent: recents(), ..Default::default() };
-    App::new(ctx, settings, None)
+    App::new(ctx, settings, None, Arc::new(|| {}))
 }
 
 type Scene = (&'static str, (u32, u32), fn(&egui::Context) -> App);

@@ -8,6 +8,7 @@ mod connect;
 mod events;
 mod moderation;
 mod server_settings;
+mod sharing;
 #[cfg(test)]
 mod snapshot;
 mod tree;
@@ -80,10 +81,19 @@ pub struct App {
     updater: crate::update::Updater,
     /// Set by "Restart to update": the shell closes the window after this frame.
     quit: bool,
+    sharing: Option<sharing::Sharing>,
+    watching: Option<sharing::Watching>,
+    screen_wake: crate::watch::Wake,
+    share_sources: Vec<crate::screen::SourceInfo>,
 }
 
 impl App {
-    pub fn new(ctx: &egui::Context, mut settings: Settings, launch: Option<Launch>) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        mut settings: Settings,
+        launch: Option<Launch>,
+        screen_wake: crate::watch::Wake,
+    ) -> Self {
         theme::apply(ctx);
         if settings.nickname.is_empty() {
             settings.nickname =
@@ -118,6 +128,10 @@ impl App {
             attention: false,
             updater: crate::update::Updater::start(ctx.clone()),
             quit: false,
+            sharing: None,
+            watching: None,
+            screen_wake,
+            share_sources: Vec::new(),
         };
         app.sound_pack = Pack::open(app.settings.audio.sound_pack.as_deref());
         if let Some(l) = launch {
@@ -227,6 +241,7 @@ fn manages(view: &ServerView, scope: Scope) -> bool {
 impl App {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.poll_network();
+        self.sync_screens();
         let ctx = ui.ctx().clone();
         self.drive_audio(&ctx);
         self.shortcuts(&ctx);

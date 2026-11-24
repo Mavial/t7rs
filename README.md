@@ -8,7 +8,8 @@ no cloud, no bloat.
 
 > **Status:** voice works. Server, channel tree, presence, voice chat per channel
 > (voice activation or push-to-talk), text chat (server, channel, private),
-> mute / sound off / away, roles and channel permissions, and rooms of your own.
+> mute / sound off / away, roles and channel permissions, rooms of your own, and
+> screen sharing (Windows only for now).
 
 ## Quick start
 
@@ -56,6 +57,8 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Close a PM tab | Middle-click it, or right-click → Close |
 | Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right. Sound off silences the other people, not notification sounds |
 | Someone's volume | Right-click them: 0% (muted for you) to 200%. Remembered by nickname |
+| Share your screen | The screen button bottom-right: pick a screen or window, and a quality (720p 30, 1080p 30 or 1080p 60). Click it again to stop. Windows only for now |
+| Watch someone's screen | Click the red **LIVE** badge next to someone in your channel, or right-click them → Watch screen. It opens in a window of its own: double-click or `F11` for full screen, `Esc` to leave it. Windows only for now |
 | Voice settings | The sliders button bottom-right: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), notification sounds and sound pack, volumes |
 | Poke | Right-click a user → Poke…, with an optional message. They get a popup, a sound and a flashing taskbar entry |
 
@@ -220,13 +223,14 @@ Set log verbosity with `RUST_LOG=debug`.
 
 - **Control connection:** TLS 1.3 (rustls on ring), so nicknames, passwords,
   chat, claim tokens and voice keys never cross the network in the clear.
-- **Voice:** each client gets a random 32-byte key over TLS when it joins.
-  Every voice datagram, in both directions and pings included, is sealed with
-  ChaCha20-Poly1305. The server opens each frame with the speaker's key and
-  seals it again for each listener with theirs, and receivers drop replayed
-  datagrams. This protects voice on the network, not from the server: whoever
-  runs the server can hear it. The network still sees who talks to the server,
-  when and how much.
+- **Voice and screens:** each client gets a random 32-byte key over TLS when
+  it joins. Every voice and screen datagram, in both directions and pings
+  included, is sealed with ChaCha20-Poly1305. The server opens each one with
+  the sender's key and seals it again for each listener or viewer with
+  theirs, and receivers drop replayed datagrams. This protects voice and
+  shared screens on the network, not from the server: whoever runs the
+  server can hear and see them. The network still sees who talks to the
+  server, when and how much.
 - **Server certificate:** on first start the server makes a self-signed
   certificate, keeps it in `tls_cert.der` and `tls_key.der` next to its
   config, and logs its SHA-256 fingerprint at every start:
@@ -246,8 +250,8 @@ Set log verbosity with `RUST_LOG=debug`.
   connect". The very first connection is only as trustworthy as the network
   it runs over; compare the fingerprint with the admin if that matters to you,
   and before you enter a claim token.
-- Clients from before T7 0.5 (protocol 5 and older) can't connect. The
-  server tells them to update.
+- Clients from before screen sharing (protocol 6 and older) can't connect.
+  The server tells them to update.
 
 ## Architecture
 
@@ -267,6 +271,17 @@ crates/
   listeners with sound off, and rate-limits senders. Clients keep a ~60 ms jitter
   buffer per speaker. Each packet carries a low-bitrate copy of the previous frame
   (Opus in-band FEC), so a single lost packet is rebuilt; longer gaps are concealed.
+- **Screen sharing:** H.264 frames travel over the voice link, at most 1162
+  bytes of a frame per datagram and 512 datagrams per frame. The sharer
+  spreads a frame's datagrams over 16 ms. The server forwards them without
+  decoding to those in the sharer's channel who chose to watch, and drops a
+  sharer's video past 12 Mbit/s or while they may not speak. A viewer that
+  starts watching, or loses a frame, asks the sharer for a keyframe through
+  the server every 250 ms until one arrives, since a still screen sends
+  nothing until asked. The server passes on at most one request per sharer
+  every 250 ms. Changing channels ends your share and what you watch. A watched
+  screen decodes on a thread of its own and draws in its own window, so the
+  main window doesn't repaint for video.
 - **Sound cleanup** (`crates/client/src/dsp.rs`), on the microphone, 10 ms at a time:
   high-pass filter and WebRTC AEC3 echo cancellation (pure-Rust `sonora`), then
   RNNoise noise suppression (`nnnoiseless`), then WebRTC AGC2 adaptive gain. Voice

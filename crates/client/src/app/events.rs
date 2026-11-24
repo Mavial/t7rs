@@ -107,7 +107,9 @@ impl App {
                     self.sound(Sound::UserLeft);
                 }
             }
-            S2C::ClientStatus { .. } | S2C::Permissions(_) | S2C::Roles(_) => self.apply(&msg),
+            S2C::ClientStatus { .. } | S2C::ClientSharing { .. } | S2C::Permissions(_) | S2C::Roles(_) => {
+                self.apply(&msg);
+            }
             S2C::ClientSpeech { id, speech } => {
                 let mine = self.view.as_ref().is_some_and(|v| v.my_id == id);
                 let was = self.my_speech();
@@ -166,7 +168,8 @@ impl App {
                 let tab = self.active_tab;
                 self.push(tab, LineKind::Error, message);
             }
-            S2C::Rejected { .. } | S2C::Pong { .. } => {} // handled by the net layer
+            S2C::SendKeyframe => self.send_keyframe(),
+            S2C::Rejected { .. } | S2C::Pong { .. } => {}
         }
     }
 

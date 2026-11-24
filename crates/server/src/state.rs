@@ -68,6 +68,9 @@ struct Client {
     /// Learned from the first authenticated datagram (works behind NAT).
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
+    watching: Option<ClientId>,
+    video_bucket: TokenBucket,
+    keyframe_asked: Option<Instant>,
     last_sent_permissions: Permissions,
     last_sent_locations: HashMap<ClientId, ChannelId>,
     arrived: Instant,
@@ -77,14 +80,11 @@ impl Client {
     fn subject(&self) -> Subject {
         Subject { client: self.info.id, identity: self.info.identity }
     }
-
-    fn place(&mut self, channel: ChannelId) {
-        self.info.channel = channel;
-        self.arrived = Instant::now();
-    }
 }
 
-/// Rate limiter: `burst` events at once, refilled at `per_sec`.
+const VIDEO_BITS_PER_SEC: u32 = 12_000_000;
+
+/// Rate limiter: `burst` tokens at once, refilled at `per_sec`.
 struct TokenBucket {
     tokens: f32,
     burst: f32,
@@ -103,17 +103,25 @@ impl TokenBucket {
         Self::new(40.0, 60.0)
     }
 
+    fn video() -> Self {
+        Self::new(voice::MAX_ACCESS_UNIT as f32, VIDEO_BITS_PER_SEC as f32 / 8.0)
+    }
+
     fn new(burst: f32, per_sec: f32) -> Self {
         Self { tokens: burst, burst, per_sec, last: Instant::now() }
     }
 
     fn take(&mut self) -> bool {
+        self.take_n(1.0)
+    }
+
+    fn take_n(&mut self, cost: f32) -> bool {
         let now = Instant::now();
         let refill = now.duration_since(self.last).as_secs_f32() * self.per_sec;
         self.tokens = (self.tokens + refill).min(self.burst);
         self.last = now;
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
+        if self.tokens >= cost {
+            self.tokens -= cost;
             true
         } else {
             false
@@ -217,18 +225,24 @@ impl Server {
                     return;
                 }
                 let channel = sender.info.channel;
-                let audio = ToClient::Audio { from: id, seq, payload };
                 let listeners = self
                     .clients
                     .values_mut()
                     .filter(|c| c.info.id != id && c.info.channel == channel && !c.info.status.deafened);
-                for listener in listeners {
-                    let Some(addr) = listener.voice_addr else { continue };
-                    // Sealed per listener, with their key.
-                    listener.voice.seal(audio, &mut self.datagram);
-                    // Non-blocking: a full socket buffer drops the frame, like any lost packet.
-                    let _ = self.udp.try_send_to(&self.datagram, addr);
+                let audio = ToClient::Audio { from: id, seq, payload };
+                forward(&self.udp, &mut self.datagram, audio, listeners);
+            }
+            ToServer::Video { frame, part, parts, key, payload } => {
+                if !sender.info.sharing
+                    || sender.info.speech != Speech::Allowed
+                    || !sender.video_bucket.take_n(payload.len() as f32)
+                {
+                    return;
                 }
+                let channel = sender.info.channel;
+                let viewers = self.clients.values_mut().filter(|c| c.watching == Some(id) && c.info.channel == channel);
+                let video = ToClient::Video { from: id, frame, part, parts, key, payload };
+                forward(&self.udp, &mut self.datagram, video, viewers);
             }
         }
     }
@@ -283,7 +297,7 @@ impl Server {
         let channel = self.landing_channel(&permissions, None);
         let status = ClientStatus::default();
         let speech = speech(self.mutes.contains(&identity), &permissions, channel);
-        let info = ClientInfo { id, nickname, channel, status, role, identity, speech };
+        let info = ClientInfo { id, nickname, channel, status, role, identity, speech, sharing: false };
         let editor = permissions.edits_permissions();
 
         let seen = self.clients.values().filter(|c| permissions.sees(c.info.channel));
@@ -324,6 +338,9 @@ impl Server {
                 voice: voice::ServerSide::new(&voice_key),
                 voice_addr: None,
                 voice_bucket: TokenBucket::voice(),
+                watching: None,
+                video_bucket: TokenBucket::video(),
+                keyframe_asked: None,
                 last_sent_permissions: permissions,
                 last_sent_locations: locations,
                 arrived: Instant::now(),
@@ -458,7 +475,52 @@ impl Server {
             }
             C2S::ServerMute { target, muted } => self.server_mute(id, target, muted),
             C2S::MoveMember { target, channel } => self.move_member(id, target, channel),
+            C2S::SetSharing(sharing) => self.set_sharing(id, sharing),
+            C2S::Watch(target) => self.watch(id, target),
+            C2S::NeedKeyframe { from } => {
+                if self.clients[&id].watching == Some(from) {
+                    self.ask_for_keyframe(from);
+                }
+            }
         }
+    }
+
+    fn set_sharing(&mut self, id: ClientId, sharing: bool) {
+        let client = self.clients.get_mut(&id).expect("exists");
+        if sharing && client.info.speech != Speech::Allowed {
+            return self.error(id, "you can't share your screen here");
+        }
+        if client.info.sharing == sharing {
+            return;
+        }
+        client.info.sharing = sharing;
+        if !sharing {
+            for c in self.clients.values_mut().filter(|c| c.watching == Some(id)) {
+                c.watching = None;
+            }
+        }
+        self.broadcast(&S2C::ClientSharing { id, sharing }, |c| c.last_sent_locations.contains_key(&id));
+    }
+
+    fn watch(&mut self, id: ClientId, target: Option<ClientId>) {
+        let channel = self.clients[&id].info.channel;
+        let sharing_here =
+            |t: &ClientId| self.clients.get(t).is_some_and(|c| c.info.sharing && c.info.channel == channel);
+        let target = target.filter(|t| *t != id && sharing_here(t));
+        self.clients.get_mut(&id).expect("exists").watching = target;
+        if let Some(sharer) = target {
+            self.ask_for_keyframe(sharer);
+        }
+    }
+
+    fn ask_for_keyframe(&mut self, sharer: ClientId) {
+        let client = self.clients.get_mut(&sharer).expect("a watched sharer exists");
+        let now = Instant::now();
+        if client.keyframe_asked.is_some_and(|at| now.duration_since(at) < voice::KEYFRAME_INTERVAL) {
+            return;
+        }
+        client.keyframe_asked = Some(now);
+        self.send(sharer, &S2C::SendKeyframe);
     }
 
     fn move_member(&mut self, id: ClientId, target: ClientId, channel: ChannelId) {
@@ -636,8 +698,16 @@ impl Server {
     }
 
     fn move_to(&mut self, id: ClientId, channel: ChannelId) {
-        self.clients.get_mut(&id).expect("exists").place(channel);
+        self.place(id, channel);
         self.sync_about(id);
+    }
+
+    fn place(&mut self, id: ClientId, channel: ChannelId) {
+        self.set_sharing(id, false);
+        let client = self.clients.get_mut(&id).expect("exists");
+        client.info.channel = channel;
+        client.arrived = Instant::now();
+        client.watching = None;
     }
 
     fn sync_about(&mut self, subject: ClientId) {
@@ -718,10 +788,14 @@ impl Server {
             client.info.role = role;
         }
         let default = self.channels.default_id();
-        let mut evicted = Vec::new();
-        for c in self.clients.values_mut().filter(|c| !c.last_sent_permissions.may_in(c.info.channel, Perm::View)) {
-            c.place(default);
-            evicted.push(c.info.id);
+        let evicted: Vec<ClientId> = self
+            .clients
+            .values()
+            .filter(|c| !c.last_sent_permissions.may_in(c.info.channel, Perm::View))
+            .map(|c| c.info.id)
+            .collect();
+        for &id in &evicted {
+            self.place(id, default);
         }
 
         for id in regranted {
@@ -1115,6 +1189,9 @@ impl Server {
             self.broadcast(&S2C::ClientLeft { id, reason }, |c| c.last_sent_locations.contains_key(&id));
             for c in self.clients.values_mut() {
                 c.last_sent_locations.remove(&id);
+                if c.watching == Some(id) {
+                    c.watching = None;
+                }
             }
             self.tidy_rooms();
         }
@@ -1149,6 +1226,16 @@ fn speech(server_muted: bool, permissions: &Permissions, channel: ChannelId) -> 
         Speech::Allowed
     } else {
         Speech::NotHere
+    }
+}
+
+fn forward<'a>(udp: &UdpSocket, buf: &mut Vec<u8>, msg: ToClient<'_>, to: impl Iterator<Item = &'a mut Client>) {
+    for client in to {
+        let Some(addr) = client.voice_addr else { continue };
+        // Sealed per listener, with their key.
+        client.voice.seal(msg, buf);
+        // Non-blocking: a full socket buffer drops the datagram, like any lost packet.
+        let _ = udp.try_send_to(buf, addr);
     }
 }
 

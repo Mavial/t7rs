@@ -27,6 +27,8 @@ pub enum Icon {
     Dash,
     Crown,
     SpeakerPlus,
+    Screen,
+    ScreenStop,
 }
 
 struct Pen<'a> {
@@ -158,6 +160,17 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.poly(&[(2.0, 9.0), (6.0, 9.0), (11.0, 5.0), (11.0, 19.0), (6.0, 15.0), (2.0, 15.0)], true);
             pen.line((14.5, 12.0), (21.5, 12.0));
             pen.line((18.0, 8.5), (18.0, 15.5));
+        }
+        Icon::Screen | Icon::ScreenStop => {
+            pen.rrect(2.5, 4.0, 21.5, 17.0, 2.0);
+            pen.line((12.0, 17.0), (12.0, 20.5));
+            pen.line((8.0, 20.5), (16.0, 20.5));
+            if icon == Icon::Screen {
+                pen.line((12.0, 14.0), (12.0, 7.5));
+                pen.poly(&[(9.0, 10.0), (12.0, 7.0), (15.0, 10.0)], false);
+            } else {
+                pen.rrect(9.5, 8.0, 14.5, 13.0, 0.8);
+            }
         }
         Icon::Crown => pen
             .poly(&[(3.0, 18.5), (3.0, 7.5), (8.0, 12.0), (12.0, 5.0), (16.0, 12.0), (21.0, 7.5), (21.0, 18.5)], true),

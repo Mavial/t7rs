@@ -9,7 +9,7 @@ use t7_proto::perms::{Perm, Rank, RoleChange, RoleId, Roles, Scope};
 use t7_proto::{C2S, ChannelId, ChannelInfo, ChannelKind, ClientId, ClientInfo, Identity, MAX_CHANNEL_DEPTH, Speech};
 
 use super::widgets::{Unit, paint_avatar, slider};
-use super::{App, Conn, manages};
+use super::{App, Conn, manages, sharing};
 use crate::channel_drop::{self, DropTarget, Outcome, Zone};
 use crate::icons::{self, Icon};
 use crate::theme::{self, Btn};
@@ -41,6 +41,8 @@ enum TreeAction {
     SetRole { identity: Identity, role: RoleId, held: bool },
     MoveMember { target: ClientId, channel: ChannelId },
     Fold(String),
+    Watch(ClientId),
+    StopWatching,
 }
 
 /// Payload while dragging yourself onto another channel.
@@ -83,6 +85,7 @@ struct Tree<'a> {
     me_talking: bool,
     dragging: Dragging,
     pointer: Option<egui::Pos2>,
+    watched: Option<ClientId>,
     picked: Option<TreeAction>,
 }
 
@@ -111,6 +114,7 @@ struct MemberRow<'a> {
     badge: Option<(Icon, Color32)>,
     owns_room: bool,
     volume: f32,
+    watchable: bool,
 }
 
 impl App {
@@ -128,6 +132,7 @@ impl App {
             me_talking: self.voice.shared.transmitting(),
             dragging: Dragging::of(ui.ctx()),
             pointer: ui.input(|i| i.pointer.interact_pos()),
+            watched: self.watching.as_ref().map(|w| w.sharer),
             picked: None,
         };
         let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(8, 10));
@@ -170,6 +175,8 @@ impl App {
             }
             TreeAction::Fold(name) => self.toggle_folded(name),
             TreeAction::MoveMember { target, channel } => self.net.send(C2S::MoveMember { target, channel }),
+            TreeAction::Watch(sharer) => self.watch(sharer),
+            TreeAction::StopWatching => self.stop_watching(),
         }
     }
 
@@ -431,8 +438,14 @@ impl<'a> Tree<'a> {
             badge,
             owns_room: row.ch.temporary && row.ch.owner == Some(c.id),
             volume: self.volumes.get(&c.nickname).copied().unwrap_or(1.0),
+            watchable: c.sharing && !is_me && view.my_channel() == Some(c.channel),
         };
-        member.paint(ui.painter(), rect, row.indent());
+        if let Some(live) = member.paint(ui.painter(), rect, row.indent()) {
+            let id = ui.scope_id().with(("live", c.id));
+            if sharing::live_badge_clicked(ui, live, id, &member.live_tip(), member.watchable) {
+                self.picked = Some(TreeAction::Watch(c.id));
+            }
+        }
 
         let tip = member.tooltip();
         let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
@@ -460,6 +473,15 @@ impl<'a> Tree<'a> {
 
     fn member_menu(&mut self, ui: &mut egui::Ui, ch: &ChannelInfo, member: &MemberRow, movable: bool) {
         let (view, c) = (self.view, member.c);
+        if member.watchable && self.watched == Some(c.id) {
+            if ui.button("Stop watching").clicked() {
+                self.picked = Some(TreeAction::StopWatching);
+                ui.close();
+            }
+        } else if member.watchable && ui.button("Watch screen").clicked() {
+            self.picked = Some(TreeAction::Watch(c.id));
+            ui.close();
+        }
         if ui.button("Send private message").clicked() {
             self.picked = Some(TreeAction::OpenPrivate(c.id));
             ui.close();
@@ -687,8 +709,7 @@ impl MemberRow<'_> {
         }
     }
 
-    /// The avatar, the name with its badges and volume note, and the status marks on the right.
-    fn paint(&self, p: &egui::Painter, rect: Rect, indent: f32) {
+    fn paint(&self, p: &egui::Painter, rect: Rect, indent: f32) -> Option<Rect> {
         let c = self.c;
         // The avatar starts where the channel's name does.
         let ax = rect.left() + indent + TEXT_X + 9.0;
@@ -706,6 +727,10 @@ impl MemberRow<'_> {
             let r = Rect::from_center_size(egui::pos2(name_end + 11.0, rect.center().y), vec2(12.0, 12.0));
             icons::paint(p, r, icon, color);
             name_end += 16.0;
+        }
+        let live = c.sharing.then(|| sharing::live_badge(p, egui::pos2(name_end + 6.0, rect.center().y)));
+        if let Some(live) = live {
+            name_end = live.right();
         }
         let hint = if self.is_me {
             Some("you".to_owned())
@@ -730,6 +755,7 @@ impl MemberRow<'_> {
             icons::paint(p, Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(14.0, 14.0)), icon, color);
             x -= 18.0;
         }
+        live
     }
 
     fn tooltip(&self) -> String {
@@ -738,6 +764,16 @@ impl MemberRow<'_> {
             .chain(self.mic().1)
             .collect();
         titles.join("\n")
+    }
+
+    fn live_tip(&self) -> String {
+        if self.is_me {
+            "You're sharing your screen".to_owned()
+        } else if self.watchable {
+            format!("Watch {}'s screen", self.c.nickname)
+        } else {
+            "Sharing their screen. Join their channel to watch".to_owned()
+        }
     }
 }
 

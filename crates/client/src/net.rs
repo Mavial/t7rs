@@ -6,8 +6,8 @@
 //! link to the same server address.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,8 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::audio::{Playback, VoiceSink};
+use crate::screen::AccessUnit;
+use crate::screen::packet::{Assembled, Assembler, Pacer, VideoPart};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 /// Also keeps NAT mappings alive, so it must stay well under typical UDP timeouts.
@@ -31,6 +33,7 @@ enum Command {
     Connect(Attempt),
     Send(C2S),
     Voice { seq: u32, payload: Vec<u8> },
+    Video(AccessUnit),
     Disconnect,
 }
 
@@ -48,6 +51,7 @@ struct Attempt {
 enum Out {
     Control(C2S),
     Voice { seq: u32, payload: Vec<u8> },
+    Video(AccessUnit),
 }
 
 /// Each connection attempt gets a fresh session id; the UI ignores events
@@ -76,16 +80,27 @@ pub enum Ended {
     },
 }
 
+pub type VideoSink = Arc<dyn Fn(AccessUnit) + Send + Sync>;
+
+/// Takes each decodable frame of the screen watched, in order, on the
+/// network thread: keep it quick. Returning false says it could not take the
+/// frame: the screen then waits for its next keyframe, which the net layer
+/// asks for, as it does after a lost frame.
+pub type ScreenSink = Box<dyn FnMut(AccessUnit) -> bool + Send>;
+
 pub struct Net {
     tx: mpsc::UnboundedSender<Command>,
     pub rx: std_mpsc::Receiver<NetEvent>,
     session: SessionId,
+    viewer: Arc<Mutex<Viewer>>,
 }
 
 impl Net {
     pub fn spawn(ctx: egui::Context, playback: Arc<Playback>) -> Self {
         let (tx, cmd_rx) = mpsc::unbounded_channel();
         let (ev_tx, rx) = std_mpsc::channel();
+        let viewer = Arc::new(Mutex::new(Viewer::default()));
+        let net_viewer = viewer.clone();
         std::thread::Builder::new()
             .name("t7-net".into())
             .spawn(move || {
@@ -93,10 +108,10 @@ impl Net {
                     .enable_all()
                     .build()
                     .expect("failed to start network runtime");
-                rt.block_on(command_loop(cmd_rx, Events { tx: ev_tx, ctx }, playback));
+                rt.block_on(command_loop(cmd_rx, Events { tx: ev_tx, ctx }, playback, net_viewer));
             })
             .expect("failed to spawn network thread");
-        Self { tx, rx, session: 0 }
+        Self { tx, rx, session: 0, viewer }
     }
 
     /// Starts a new connection and returns its session id. `pinned` is the
@@ -129,6 +144,69 @@ impl Net {
             let _ = tx.send(Command::Voice { seq, payload: payload.to_vec() });
         })
     }
+
+    pub fn video_sink(&self) -> VideoSink {
+        let tx = self.tx.clone();
+        Arc::new(move |au| {
+            let _ = tx.send(Command::Video(au));
+        })
+    }
+
+    pub fn watch(&self, watch: Option<(ClientId, ScreenSink)>) {
+        let sharer = watch.as_ref().map(|(sharer, _)| *sharer);
+        let watched = watch.map(|(sharer, sink)| Watched::new(sharer, sink, Instant::now()));
+        self.viewer.lock().unwrap().watched = watched;
+        self.send(C2S::Watch(sharer));
+    }
+}
+
+#[derive(Default)]
+struct Viewer {
+    watched: Option<Watched>,
+}
+
+struct Watched {
+    sharer: ClientId,
+    sink: ScreenSink,
+    assembler: Assembler,
+    next_ask: Instant,
+}
+
+impl Watched {
+    fn new(sharer: ClientId, sink: ScreenSink, watch_sent: Instant) -> Watched {
+        Watched { sharer, sink, assembler: Assembler::default(), next_ask: watch_sent + voice::KEYFRAME_INTERVAL }
+    }
+}
+
+impl Viewer {
+    fn push(&mut self, from: ClientId, part: VideoPart<'_>) {
+        let Some(w) = self.watched.as_mut().filter(|w| w.sharer == from) else { return };
+        if let Some(Assembled::Frame(au)) = w.assembler.push(part)
+            && !(w.sink)(au)
+        {
+            w.assembler.wait_for_keyframe();
+        }
+    }
+
+    fn keyframe_due(&self) -> Option<Instant> {
+        let w = self.watched.as_ref()?;
+        w.assembler.waiting_for_keyframe().then_some(w.next_ask)
+    }
+
+    fn ask(&mut self, now: Instant) -> Option<ClientId> {
+        if now < self.keyframe_due()? {
+            return None;
+        }
+        let w = self.watched.as_mut()?;
+        w.next_ask = now + voice::KEYFRAME_INTERVAL;
+        Some(w.sharer)
+    }
+
+    fn share_ended(&mut self, sharer: ClientId) {
+        if self.watched.as_ref().is_some_and(|w| w.sharer == sharer) {
+            self.watched = None;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -145,12 +223,17 @@ impl Events {
     }
 }
 
-async fn command_loop(mut cmds: mpsc::UnboundedReceiver<Command>, events: Events, playback: Arc<Playback>) {
+async fn command_loop(
+    mut cmds: mpsc::UnboundedReceiver<Command>,
+    events: Events,
+    playback: Arc<Playback>,
+    viewer: Arc<Mutex<Viewer>>,
+) {
     let mut session: SessionId = 0;
     let mut current: Option<(mpsc::UnboundedSender<Out>, tokio::task::JoinHandle<()>)> = None;
 
     while let Some(cmd) = cmds.recv().await {
-        match cmd {
+        let out = match cmd {
             Command::Connect(attempt) => {
                 if let Some((tx, task)) = current.take() {
                     let _ = tx.send(Out::Control(C2S::Goodbye));
@@ -162,24 +245,22 @@ async fn command_loop(mut cmds: mpsc::UnboundedReceiver<Command>, events: Events
                 }
                 session += 1;
                 let (tx, rx) = mpsc::unbounded_channel();
-                let task = tokio::spawn(run_session(session, attempt, rx, events.clone(), playback.clone()));
-                current = Some((tx, task));
+                let run = run_session(session, attempt, rx, events.clone(), playback.clone(), viewer.clone());
+                current = Some((tx, tokio::spawn(run)));
+                continue;
             }
-            Command::Send(msg) => {
-                if let Some((tx, _)) = &current {
-                    let _ = tx.send(Out::Control(msg));
-                }
-            }
-            Command::Voice { seq, payload } => {
-                if let Some((tx, _)) = &current {
-                    let _ = tx.send(Out::Voice { seq, payload });
-                }
-            }
+            Command::Send(msg) => Out::Control(msg),
+            Command::Voice { seq, payload } => Out::Voice { seq, payload },
+            Command::Video(au) => Out::Video(au),
             Command::Disconnect => {
                 if let Some((tx, _)) = current.take() {
                     let _ = tx.send(Out::Control(C2S::Goodbye));
                 }
+                continue;
             }
+        };
+        if let Some((tx, _)) = &current {
+            let _ = tx.send(out);
         }
     }
 }
@@ -190,9 +271,11 @@ async fn run_session(
     outgoing: mpsc::UnboundedReceiver<Out>,
     events: Events,
     playback: Arc<Playback>,
+    viewer: Arc<Mutex<Viewer>>,
 ) {
-    let ended = session(id, attempt, outgoing, &events, &playback).await;
+    let ended = session(id, attempt, outgoing, &events, &playback, &viewer).await;
     playback.clear();
+    viewer.lock().unwrap().watched = None;
     events.emit(NetEvent::Closed(id, ended));
 }
 
@@ -245,6 +328,11 @@ impl VoiceLink {
         // Voice is best effort: a failed send is just a lost frame.
         let _ = self.sock.send(&self.buf).await;
     }
+
+    fn try_send(&mut self, msg: ToServer<'_>) {
+        self.crypto.seal(msg, &mut self.buf);
+        let _ = self.sock.try_send(&self.buf);
+    }
 }
 
 /// Runs one connection to completion and says why it ended.
@@ -254,6 +342,7 @@ async fn session(
     mut outgoing: mpsc::UnboundedReceiver<Out>,
     events: &Events,
     playback: &Playback,
+    viewer: &Mutex<Viewer>,
 ) -> Ended {
     let target = with_default_port(&attempt.address);
     let stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target)).await {
@@ -306,6 +395,7 @@ async fn session(
     let mut voice_ping = tokio::time::interval(VOICE_PING_INTERVAL);
     voice_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut voice: Option<VoiceLink> = None;
+    let mut pacer = Pacer::default();
 
     loop {
         let sock = voice.as_ref().map(|v| v.sock.clone());
@@ -319,6 +409,8 @@ async fn session(
                 None => std::future::pending().await,
             }
         };
+        let video_due = until(pacer.next_at());
+        let keyframe_due = until(viewer.lock().unwrap().keyframe_due());
         tokio::select! {
             msg = incoming.recv() => match msg {
                 Some(Ok(S2C::Pong { nonce })) => {
@@ -334,6 +426,9 @@ async fn session(
                         }
                         voice_ping.reset_immediately();
                     }
+                    if let S2C::ClientSharing { id: sharer, sharing: false } | S2C::ClientLeft { id: sharer, .. } = &msg {
+                        viewer.lock().unwrap().share_ended(*sharer);
+                    }
                     events.emit(NetEvent::Message(id, msg));
                 }
                 Some(Err(FrameError::Io(_))) | None => return Ended::Failed("Connection to the server was lost".into()),
@@ -344,6 +439,9 @@ async fn session(
                 if let (Ok(n), Some(v)) = (res, &mut voice) {
                     match v.crypto.open(&mut buf[..n]) {
                         Some(ToClient::Audio { from, seq, payload }) => playback.push(from, seq, payload),
+                        Some(ToClient::Video { from, frame, part, parts, key, payload }) => {
+                            viewer.lock().unwrap().push(from, VideoPart { frame, part, parts, key, payload });
+                        }
                         Some(ToClient::Pong { nonce }) => {
                             let sent = Duration::from_micros(nonce);
                             events.emit(NetEvent::VoicePing(id, epoch.elapsed().saturating_sub(sent)));
@@ -352,10 +450,29 @@ async fn session(
                     }
                 }
             }
+            () = keyframe_due => {
+                let ask = viewer.lock().unwrap().ask(Instant::now());
+                if let Some(from) = ask && let Err(e) = write_frame(&mut writer, &C2S::NeedKeyframe { from }).await {
+                    return Ended::Failed(format!("Connection lost: {e}"));
+                }
+            }
+            () = video_due => {
+                if let Some(v) = &mut voice {
+                    pacer.send_due(Instant::now(), |p| {
+                        let VideoPart { frame, part, parts, key, payload } = p;
+                        v.try_send(ToServer::Video { frame, part, parts, key, payload });
+                    });
+                }
+            }
             out = outgoing.recv() => match out {
                 Some(Out::Voice { seq, payload }) => {
                     if let Some(v) = &mut voice {
                         v.send(ToServer::Audio { seq, payload: &payload }).await;
+                    }
+                }
+                Some(Out::Video(au)) => {
+                    if voice.is_some() && !pacer.push(au, Instant::now()) {
+                        tracing::warn!("screen frame too large to send");
                     }
                 }
                 Some(Out::Control(msg)) => {
@@ -388,6 +505,13 @@ async fn session(
     }
 }
 
+async fn until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -398,7 +522,8 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerKey, with_default_port};
+    use super::*;
+    use crate::screen::packet::packetize;
 
     #[test]
     fn default_port() {
@@ -412,5 +537,84 @@ mod tests {
     fn one_pin_per_server() {
         assert_eq!(ServerKey::of(" Example.COM "), ServerKey::of("example.com:9988"));
         assert_ne!(ServerKey::of("example.com:9989"), ServerKey::of("example.com:9988"));
+    }
+
+    fn au(frame: u32, key: bool) -> AccessUnit {
+        AccessUnit { frame, key, data: vec![1] }
+    }
+
+    fn watching(at: Instant, take: fn(u32) -> bool) -> (Viewer, Arc<Mutex<Vec<u32>>>) {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink_got = got.clone();
+        let sink: ScreenSink = Box::new(move |au| {
+            let taken = take(au.frame);
+            if taken {
+                sink_got.lock().unwrap().push(au.frame);
+            }
+            taken
+        });
+        (Viewer { watched: Some(Watched::new(1, sink, at)) }, got)
+    }
+
+    fn push(viewer: &mut Viewer, from: ClientId, au: &AccessUnit) {
+        packetize(au).for_each(|part| viewer.push(from, part));
+    }
+
+    #[test]
+    fn a_watch_asks_for_a_keyframe_on_a_timer_until_one_comes() {
+        let start = Instant::now();
+        let after = |interval: u32, ms: u64| start + voice::KEYFRAME_INTERVAL * interval + Duration::from_millis(ms);
+        let (mut viewer, got) = watching(start, |_| true);
+        assert_eq!(viewer.keyframe_due(), Some(after(1, 0)), "starting to watch asked");
+        assert_eq!(viewer.ask(after(0, 249)), None);
+        assert_eq!(viewer.ask(after(1, 0)), Some(1), "a still screen sends nothing: ask again");
+        assert_eq!(viewer.ask(after(1, 1)), None, "asked just now");
+        assert_eq!(viewer.ask(after(2, 3)), Some(1), "that keyframe was lost");
+
+        push(&mut viewer, 2, &au(0, true));
+        assert_eq!(viewer.keyframe_due(), Some(after(3, 3)), "from someone else: still waiting");
+        push(&mut viewer, 1, &au(5, true));
+        assert_eq!(viewer.keyframe_due(), None, "no timer once a keyframe came");
+        assert_eq!(viewer.ask(after(9, 0)), None);
+        assert_eq!(*got.lock().unwrap(), [5]);
+    }
+
+    #[test]
+    fn lost_video_asks_for_a_keyframe_at_most_once_per_interval() {
+        let start = Instant::now();
+        let after = |interval: u32, ms: u64| start + voice::KEYFRAME_INTERVAL * interval + Duration::from_millis(ms);
+        let (mut viewer, got) = watching(start, |_| true);
+        push(&mut viewer, 1, &au(0, true));
+        push(&mut viewer, 1, &au(2, false));
+        assert_eq!(viewer.keyframe_due(), Some(after(1, 0)), "frame 1 is lost, but the watch asked just now");
+        assert_eq!(viewer.ask(after(3, 0)), Some(1), "due since long ago: ask at once");
+        push(&mut viewer, 1, &au(3, false));
+        assert_eq!(viewer.ask(after(3, 100)), None, "asked 100 ms ago");
+        assert_eq!(viewer.ask(after(4, 0)), Some(1));
+        push(&mut viewer, 1, &au(4, true));
+        push(&mut viewer, 1, &au(5, false));
+        assert_eq!(viewer.keyframe_due(), None);
+        assert_eq!(*got.lock().unwrap(), [0, 4, 5], "only what can be decoded");
+
+        push(&mut viewer, 1, &au(7, false));
+        viewer.share_ended(2);
+        assert!(viewer.keyframe_due().is_some(), "someone else's share ended");
+        viewer.share_ended(1);
+        assert_eq!(viewer.keyframe_due(), None, "the watch ended with the share");
+    }
+
+    #[test]
+    fn a_frame_the_sink_cannot_take_makes_the_screen_wait_for_a_keyframe() {
+        let start = Instant::now();
+        let (mut viewer, got) = watching(start, |frame| frame != 1);
+        push(&mut viewer, 1, &au(0, true));
+        assert_eq!(viewer.keyframe_due(), None);
+        push(&mut viewer, 1, &au(1, false));
+        assert_eq!(viewer.keyframe_due(), Some(start + voice::KEYFRAME_INTERVAL), "not taken: wait for a keyframe");
+        push(&mut viewer, 1, &au(2, false));
+        push(&mut viewer, 1, &au(3, true));
+        push(&mut viewer, 1, &au(4, false));
+        assert_eq!(viewer.keyframe_due(), None);
+        assert_eq!(*got.lock().unwrap(), [0, 3, 4]);
     }
 }

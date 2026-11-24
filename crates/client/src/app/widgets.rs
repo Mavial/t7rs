@@ -33,6 +33,37 @@ pub(super) fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str) -> egui::Res
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
 }
 
+pub(super) fn mic_held(ui: &mut egui::Ui, icon: Icon, color: Color32, tip: &str) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), theme::SURFACE);
+    icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
+    resp.on_hover_text(tip);
+}
+
+/// An icon toggle button, tinted with `on_color` while on (muted, deafened...).
+pub(super) fn toggle(
+    ui: &mut egui::Ui,
+    on: &mut bool,
+    icon: Icon,
+    icon_on: Icon,
+    on_color: Color32,
+    tip: &str,
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+    let (fill, color, icon) = match (*on, resp.hovered()) {
+        (true, hovered) => (on_color.gamma_multiply(if hovered { 0.26 } else { 0.18 }), on_color, icon_on),
+        (false, true) => (theme::SURFACE_HOVER, theme::TEXT, icon),
+        (false, false) => (Color32::TRANSPARENT, theme::TEXT_DIM, icon),
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
+    icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
+    let clicked = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked();
+    if clicked {
+        *on = !*on;
+    }
+    clicked
+}
+
 /// Starts a group of settings: a small caps label with room above it.
 pub(super) fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(14.0);

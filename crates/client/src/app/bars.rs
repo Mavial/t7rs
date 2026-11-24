@@ -3,39 +3,15 @@
 
 use std::time::Duration;
 
-use egui::{Align, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, vec2};
+use egui::{Align, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, vec2};
 use t7_proto::Speech;
 
 use super::chat::LineKind;
-use super::widgets::{avatar, icon_button, logo};
+use super::widgets::{avatar, icon_button, logo, mic_held, toggle};
 use super::{App, Conn};
 use crate::icons::Icon;
+use crate::theme;
 use crate::theme::Btn;
-use crate::{icons, theme};
-
-fn mic_held(ui: &mut egui::Ui, icon: Icon, color: Color32, tip: &str) {
-    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), theme::SURFACE);
-    icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
-    resp.on_hover_text(tip);
-}
-
-/// An icon toggle button, tinted with `on_color` while on (muted, deafened...).
-fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: Icon, icon_on: Icon, on_color: Color32, tip: &str) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
-    let (fill, color, icon) = match (*on, resp.hovered()) {
-        (true, hovered) => (on_color.gamma_multiply(if hovered { 0.26 } else { 0.18 }), on_color, icon_on),
-        (false, true) => (theme::SURFACE_HOVER, theme::TEXT, icon),
-        (false, false) => (Color32::TRANSPARENT, theme::TEXT_DIM, icon),
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
-    icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
-    let clicked = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked();
-    if clicked {
-        *on = !*on;
-    }
-    clicked
-}
 
 impl App {
     fn restart_to_update(&mut self) {
@@ -216,6 +192,9 @@ impl App {
                     if changed {
                         self.set_status(s);
                     }
+                    let (r, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
+                    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::BORDER_STRONG));
+                    self.share_button(ui);
                 });
             });
         });
