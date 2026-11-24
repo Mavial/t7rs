@@ -4,10 +4,10 @@
 //!     cargo run --release --example screenloop -- --decode-bench [SECONDS]
 //!
 //! The loop shares monitor N (0 is the primary), or the first window whose
-//! title contains TITLE, and shows what a viewer
-//! would see in a window (`--at` places it, e.g. on another monitor), with a
-//! forced keyframe every 5 s. Each second it prints the capture rate, the
-//! bitrate, encode latency (frame on screen to access unit out), decode
+//! title contains TITLE, and shows what a viewer would see in a window (`--at`
+//! places it, e.g. on another monitor), with a forced keyframe every 5 s. Each
+//! second it prints the capture rate, the bitrate, the largest frame, encode
+//! latency (frame handed over by the capture to access unit out), decode
 //! latency, keyframe sizes and the process's CPU.
 //!
 //! `--decode-bench` records SECONDS of the primary monitor at 1080p60, stops
