@@ -3,11 +3,12 @@
 //! channels and gets woken up (`request_repaint`) only when something arrives.
 //!
 //! Each session has a TLS control connection and, once welcomed, a UDP voice
-//! link to the same server address.
+//! link to the same server address. Screen video shares the voice link.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,8 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::audio::{Playback, VoiceSink};
+use crate::screen::AccessUnit;
+use crate::screen::packet::{Assembled, Assembler, Pacer, VideoPart};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 /// Also keeps NAT mappings alive, so it must stay well under typical UDP timeouts.
@@ -31,6 +34,7 @@ enum Command {
     Connect(Attempt),
     Send(C2S),
     Voice { seq: u32, payload: Vec<u8> },
+    Video(AccessUnit),
     Disconnect,
 }
 
@@ -48,6 +52,7 @@ struct Attempt {
 enum Out {
     Control(C2S),
     Voice { seq: u32, payload: Vec<u8> },
+    Video(AccessUnit),
 }
 
 /// Each connection attempt gets a fresh session id; the UI ignores events
@@ -76,16 +81,26 @@ pub enum Ended {
     },
 }
 
+/// Receives each encoded screen frame to send.
+pub type VideoSink = Arc<dyn Fn(AccessUnit) + Send + Sync>;
+
+/// Receives what comes of the video of each screen watched, on the network
+/// thread: keep it quick. The net layer asks for keyframes itself.
+pub type ScreenSink = Box<dyn FnMut(ClientId, Assembled) + Send>;
+
 pub struct Net {
     tx: mpsc::UnboundedSender<Command>,
     pub rx: std_mpsc::Receiver<NetEvent>,
     session: SessionId,
+    viewer: Arc<Mutex<Viewer>>,
 }
 
 impl Net {
     pub fn spawn(ctx: egui::Context, playback: Arc<Playback>) -> Self {
         let (tx, cmd_rx) = mpsc::unbounded_channel();
         let (ev_tx, rx) = std_mpsc::channel();
+        let viewer = Arc::new(Mutex::new(Viewer::default()));
+        let net_viewer = viewer.clone();
         std::thread::Builder::new()
             .name("t7-net".into())
             .spawn(move || {
@@ -93,10 +108,10 @@ impl Net {
                     .enable_all()
                     .build()
                     .expect("failed to start network runtime");
-                rt.block_on(command_loop(cmd_rx, Events { tx: ev_tx, ctx }, playback));
+                rt.block_on(command_loop(cmd_rx, Events { tx: ev_tx, ctx }, playback, net_viewer));
             })
             .expect("failed to spawn network thread");
-        Self { tx, rx, session: 0 }
+        Self { tx, rx, session: 0, viewer }
     }
 
     /// Starts a new connection and returns its session id. `pinned` is the
@@ -129,6 +144,55 @@ impl Net {
             let _ = tx.send(Command::Voice { seq, payload: payload.to_vec() });
         })
     }
+
+    /// Where the screen encoder sends access units while sharing.
+    #[expect(dead_code, reason = "the screen-share UI hands it to the encoder")]
+    pub fn video_sink(&self) -> VideoSink {
+        let tx = self.tx.clone();
+        Arc::new(move |au| {
+            let _ = tx.send(Command::Video(au));
+        })
+    }
+
+    /// Installs where watched screens go, or with `None` drops them. Either
+    /// way, every screen starts again from its next keyframe.
+    #[expect(dead_code, reason = "the screen-share UI installs it while showing a screen")]
+    pub fn set_screen_sink(&self, sink: Option<ScreenSink>) {
+        let mut viewer = self.viewer.lock().unwrap();
+        viewer.sink = sink;
+        viewer.sharers.clear();
+    }
+}
+
+/// Puts received video back together for the installed [`ScreenSink`].
+#[derive(Default)]
+struct Viewer {
+    sink: Option<ScreenSink>,
+    sharers: HashMap<ClientId, Sharer>,
+}
+
+#[derive(Default)]
+struct Sharer {
+    assembler: Assembler,
+    /// When we last asked them for a keyframe.
+    asked: Option<Instant>,
+}
+
+impl Viewer {
+    /// Whether to ask `from` for a keyframe now: at most once per
+    /// [`voice::KEYFRAME_INTERVAL`] while its video can't be decoded.
+    fn push(&mut self, from: ClientId, part: VideoPart<'_>, now: Instant) -> bool {
+        let Some(sink) = &mut self.sink else { return false };
+        let sharer = self.sharers.entry(from).or_default();
+        let Some(out) = sharer.assembler.push(part) else { return false };
+        let ask = matches!(out, Assembled::NeedKeyframe)
+            && sharer.asked.is_none_or(|at| now.duration_since(at) >= voice::KEYFRAME_INTERVAL);
+        if ask {
+            sharer.asked = Some(now);
+        }
+        sink(from, out);
+        ask
+    }
 }
 
 #[derive(Clone)]
@@ -145,12 +209,17 @@ impl Events {
     }
 }
 
-async fn command_loop(mut cmds: mpsc::UnboundedReceiver<Command>, events: Events, playback: Arc<Playback>) {
+async fn command_loop(
+    mut cmds: mpsc::UnboundedReceiver<Command>,
+    events: Events,
+    playback: Arc<Playback>,
+    viewer: Arc<Mutex<Viewer>>,
+) {
     let mut session: SessionId = 0;
     let mut current: Option<(mpsc::UnboundedSender<Out>, tokio::task::JoinHandle<()>)> = None;
 
     while let Some(cmd) = cmds.recv().await {
-        match cmd {
+        let out = match cmd {
             Command::Connect(attempt) => {
                 if let Some((tx, task)) = current.take() {
                     let _ = tx.send(Out::Control(C2S::Goodbye));
@@ -162,24 +231,22 @@ async fn command_loop(mut cmds: mpsc::UnboundedReceiver<Command>, events: Events
                 }
                 session += 1;
                 let (tx, rx) = mpsc::unbounded_channel();
-                let task = tokio::spawn(run_session(session, attempt, rx, events.clone(), playback.clone()));
-                current = Some((tx, task));
+                let run = run_session(session, attempt, rx, events.clone(), playback.clone(), viewer.clone());
+                current = Some((tx, tokio::spawn(run)));
+                continue;
             }
-            Command::Send(msg) => {
-                if let Some((tx, _)) = &current {
-                    let _ = tx.send(Out::Control(msg));
-                }
-            }
-            Command::Voice { seq, payload } => {
-                if let Some((tx, _)) = &current {
-                    let _ = tx.send(Out::Voice { seq, payload });
-                }
-            }
+            Command::Send(msg) => Out::Control(msg),
+            Command::Voice { seq, payload } => Out::Voice { seq, payload },
+            Command::Video(au) => Out::Video(au),
             Command::Disconnect => {
                 if let Some((tx, _)) = current.take() {
                     let _ = tx.send(Out::Control(C2S::Goodbye));
                 }
+                continue;
             }
+        };
+        if let Some((tx, _)) = &current {
+            let _ = tx.send(out);
         }
     }
 }
@@ -190,9 +257,11 @@ async fn run_session(
     outgoing: mpsc::UnboundedReceiver<Out>,
     events: Events,
     playback: Arc<Playback>,
+    viewer: Arc<Mutex<Viewer>>,
 ) {
-    let ended = session(id, attempt, outgoing, &events, &playback).await;
+    let ended = session(id, attempt, outgoing, &events, &playback, &viewer).await;
     playback.clear();
+    viewer.lock().unwrap().sharers.clear();
     events.emit(NetEvent::Closed(id, ended));
 }
 
@@ -245,6 +314,12 @@ impl VoiceLink {
         // Voice is best effort: a failed send is just a lost frame.
         let _ = self.sock.send(&self.buf).await;
     }
+
+    /// Like [`Self::send`] without waiting: a full socket buffer drops the datagram.
+    fn try_send(&mut self, msg: ToServer<'_>) {
+        self.crypto.seal(msg, &mut self.buf);
+        let _ = self.sock.try_send(&self.buf);
+    }
 }
 
 /// Runs one connection to completion and says why it ended.
@@ -254,6 +329,7 @@ async fn session(
     mut outgoing: mpsc::UnboundedReceiver<Out>,
     events: &Events,
     playback: &Playback,
+    viewer: &Mutex<Viewer>,
 ) -> Ended {
     let target = with_default_port(&attempt.address);
     let stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target)).await {
@@ -306,6 +382,7 @@ async fn session(
     let mut voice_ping = tokio::time::interval(VOICE_PING_INTERVAL);
     voice_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut voice: Option<VoiceLink> = None;
+    let mut pacer = Pacer::default();
 
     loop {
         let sock = voice.as_ref().map(|v| v.sock.clone());
@@ -316,6 +393,13 @@ async fn session(
                     let n = sock.recv(&mut buf).await;
                     (n, buf)
                 }
+                None => std::future::pending().await,
+            }
+        };
+        let video_due = pacer.next_at();
+        let video_due = async move {
+            match video_due {
+                Some(at) => tokio::time::sleep_until(at.into()).await,
                 None => std::future::pending().await,
             }
         };
@@ -334,6 +418,10 @@ async fn session(
                         }
                         voice_ping.reset_immediately();
                     }
+                    // A share that ends, or starts over, numbers its frames from scratch.
+                    if let S2C::ClientSharing { id: sharer, .. } | S2C::ClientLeft { id: sharer, .. } = &msg {
+                        viewer.lock().unwrap().sharers.remove(sharer);
+                    }
                     events.emit(NetEvent::Message(id, msg));
                 }
                 Some(Err(FrameError::Io(_))) | None => return Ended::Failed("Connection to the server was lost".into()),
@@ -344,18 +432,38 @@ async fn session(
                 if let (Ok(n), Some(v)) = (res, &mut voice) {
                     match v.crypto.open(&mut buf[..n]) {
                         Some(ToClient::Audio { from, seq, payload }) => playback.push(from, seq, payload),
+                        Some(ToClient::Video { from, frame, part, parts, key, payload }) => {
+                            let part = VideoPart { frame, part, parts, key, payload };
+                            let ask = viewer.lock().unwrap().push(from, part, Instant::now());
+                            if ask && let Err(e) = write_frame(&mut writer, &C2S::NeedKeyframe { from }).await {
+                                return Ended::Failed(format!("Connection lost: {e}"));
+                            }
+                        }
                         Some(ToClient::Pong { nonce }) => {
                             let sent = Duration::from_micros(nonce);
                             events.emit(NetEvent::VoicePing(id, epoch.elapsed().saturating_sub(sent)));
                         }
-                        Some(ToClient::Video { .. }) | None => {}
+                        None => {}
                     }
+                }
+            }
+            () = video_due => {
+                if let Some(v) = &mut voice {
+                    pacer.send_due(Instant::now(), |p| {
+                        let VideoPart { frame, part, parts, key, payload } = p;
+                        v.try_send(ToServer::Video { frame, part, parts, key, payload });
+                    });
                 }
             }
             out = outgoing.recv() => match out {
                 Some(Out::Voice { seq, payload }) => {
                     if let Some(v) = &mut voice {
                         v.send(ToServer::Audio { seq, payload: &payload }).await;
+                    }
+                }
+                Some(Out::Video(au)) => {
+                    if voice.is_some() && !pacer.push(au, Instant::now()) {
+                        tracing::warn!("screen frame too large to send");
                     }
                 }
                 Some(Out::Control(msg)) => {
@@ -398,7 +506,8 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerKey, with_default_port};
+    use super::*;
+    use crate::screen::packet::packetize;
 
     #[test]
     fn default_port() {
@@ -412,5 +521,31 @@ mod tests {
     fn one_pin_per_server() {
         assert_eq!(ServerKey::of(" Example.COM "), ServerKey::of("example.com:9988"));
         assert_ne!(ServerKey::of("example.com:9989"), ServerKey::of("example.com:9988"));
+    }
+
+    #[test]
+    fn a_viewer_asks_each_sharer_for_keyframes_at_most_every_interval() {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let mut viewer = Viewer::default();
+        let au = |frame, key| AccessUnit { frame, key, data: vec![1] };
+        let push = |viewer: &mut Viewer, from, au: AccessUnit, ms| {
+            let at = Instant::now() + Duration::from_millis(ms);
+            packetize(&au).map(|p| viewer.push(from, p, at)).collect::<Vec<_>>()
+        };
+        assert_eq!(push(&mut viewer, 1, au(0, false), 0), [false], "nothing installed");
+
+        let sink_got = got.clone();
+        viewer.sink = Some(Box::new(move |from, out| sink_got.lock().unwrap().push((from, out))));
+        assert_eq!(push(&mut viewer, 1, au(1, false), 0), [true]);
+        assert_eq!(push(&mut viewer, 1, au(2, false), 100), [false], "asked 100 ms ago");
+        assert_eq!(push(&mut viewer, 2, au(5, false), 100), [true], "another sharer");
+        let interval = voice::KEYFRAME_INTERVAL.as_millis() as u64;
+        assert_eq!(push(&mut viewer, 1, au(3, false), interval + 1), [true], "asked again");
+        assert_eq!(push(&mut viewer, 1, au(4, true), interval + 2), [false]);
+
+        let got = got.lock().unwrap();
+        let waiting = |from| (from, Assembled::NeedKeyframe);
+        let shown = (1, Assembled::Frame(au(4, true)));
+        assert_eq!(*got, [waiting(1), waiting(1), waiting(2), waiting(1), shown]);
     }
 }

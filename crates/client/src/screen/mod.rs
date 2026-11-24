@@ -1,6 +1,8 @@
 //! Screen sharing: capture and encode on the sharer, decode and show on viewers.
 //! Frames travel as H.264 access units over the voice link (`t7_proto::voice`).
 
+pub mod packet;
+
 /// One encoded H.264 frame in Annex B form, the unit the encoder emits and
 /// the decoder takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
