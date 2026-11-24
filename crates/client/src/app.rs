@@ -1,7 +1,6 @@
 //! The client UI: the app's state, and what the window shell calls each frame.
 //! Each part of the window lives in a submodule.
 
-mod bars;
 mod channel_dialog;
 mod chat;
 mod connect;
@@ -9,6 +8,7 @@ mod events;
 mod moderation;
 mod server_settings;
 mod sharing;
+mod sidebar;
 #[cfg(test)]
 mod snapshot;
 mod tree;
@@ -32,16 +32,18 @@ use moderation::{Moderation, PokeAlert, PokeForm};
 use server_settings::ServerSettings;
 use voice::{AudioDialog, Voice};
 
+/// Where and how we log in: kept to retry after trusting a changed
+/// certificate, and to reconnect.
+#[derive(Clone)]
+struct Login {
+    address: String,
+    password: String,
+}
+
 enum Conn {
     Disconnected,
-    /// `password` is kept to retry after trusting a changed certificate.
-    Connecting {
-        address: String,
-        password: String,
-    },
-    Connected {
-        server: ServerKey,
-    },
+    Connecting(Login),
+    Connected { server: ServerKey, login: Login },
 }
 
 /// Connect-on-startup request from the command line.
@@ -203,24 +205,32 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let (connect, mute, deafen) = ctx.input_mut(|i| {
+        let [connect, mute, deafen, away, settings] = ctx.input_mut(|i| {
             use egui::{Key, KeyboardShortcut, Modifiers};
-            (
-                i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S)),
-                i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::M)),
-                i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::D)),
-            )
+            let shift = Modifiers::COMMAND | Modifiers::SHIFT;
+            [
+                (Modifiers::COMMAND, Key::S),
+                (shift, Key::M),
+                (shift, Key::D),
+                (shift, Key::A),
+                (Modifiers::COMMAND, Key::Comma),
+            ]
+            .map(|(modifiers, key)| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
         });
         if connect && self.form.is_none() {
             self.open_connect_form();
         }
-        if mute {
-            let s = self.settings.status;
-            self.set_status(ClientStatus { muted: !s.muted, ..s });
+        for (pressed, flip) in [
+            (mute, (|s| ClientStatus { muted: !s.muted, ..s }) as fn(ClientStatus) -> ClientStatus),
+            (deafen, |s| ClientStatus { deafened: !s.deafened, ..s }),
+            (away, |s| ClientStatus { away: !s.away, ..s }),
+        ] {
+            if pressed {
+                self.set_status(flip(self.settings.status));
+            }
         }
-        if deafen {
-            let s = self.settings.status;
-            self.set_status(ClientStatus { deafened: !s.deafened, ..s });
+        if settings && self.audio_dialog.is_none() {
+            self.open_voice_settings();
         }
     }
 }
@@ -245,11 +255,7 @@ impl App {
         let ctx = ui.ctx().clone();
         self.drive_audio(&ctx);
         self.shortcuts(&ctx);
-        self.top_bar(ui);
-        self.self_bar(ui);
-        if self.view.is_some() {
-            self.channel_tree(ui);
-        }
+        self.sidebar(ui);
         self.chat(ui);
         self.connect_dialog(&ctx);
         self.audio_dialog(&ctx);

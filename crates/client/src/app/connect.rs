@@ -5,7 +5,7 @@ use egui::{Align2, CornerRadius, FontId, Margin, RichText, Sense, Stroke, vec2};
 use t7_proto::tls::Fingerprint;
 
 use super::widgets::{dialog_footer, dialog_header, field, field_label, logo};
-use super::{App, Conn};
+use super::{App, Conn, Login};
 use crate::icons::Icon;
 use crate::net::ServerKey;
 use crate::settings::Recent;
@@ -95,7 +95,7 @@ impl App {
         let login_password = Some(password.clone()).filter(|p| !p.is_empty());
         let key = self.settings.identity_key.get_or_insert_with(settings::new_identity_key).clone();
         self.session = self.net.connect(address.clone(), nickname, login_password, pinned, key);
-        self.conn = Conn::Connecting { address, password };
+        self.conn = Conn::Connecting(Login { address, password });
         self.view = None;
         self.ping = None;
         self.last_error = None;
@@ -115,7 +115,7 @@ impl App {
             ui.add_space((ui.available_height() * 0.22).max(20.0));
             logo(ui, 64.0);
             ui.add_space(16.0);
-            if let Conn::Connecting { address, .. } = &self.conn {
+            if let Conn::Connecting(Login { address, .. }) = &self.conn {
                 ui.label(RichText::new("Connecting…").size(22.0).strong().color(theme::TEXT));
                 ui.add_space(6.0);
                 ui.label(RichText::new(address).color(theme::TEXT_DIM));

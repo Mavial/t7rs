@@ -3,12 +3,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use egui::containers::menu::SubMenu;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Rect, RichText, Sense, Stroke, vec2};
 use t7_proto::model::ServerView;
 use t7_proto::perms::{Perm, Rank, RoleChange, RoleId, Roles, Scope};
 use t7_proto::{C2S, ChannelId, ChannelInfo, ChannelKind, ClientId, ClientInfo, Identity, MAX_CHANNEL_DEPTH, Speech};
 
-use super::widgets::{Unit, paint_avatar, slider};
+use super::widgets::{Item, Unit, menu_label, menu_separator, menu_style, paint_avatar, slider};
 use super::{App, Conn, manages, sharing};
 use crate::channel_drop::{self, DropTarget, Outcome, Zone};
 use crate::icons::{self, Icon};
@@ -26,18 +27,16 @@ enum TreeAction {
     OpenPrivate(ClientId),
     Poke(ClientId),
     SetVolume { id: ClientId, nickname: String, volume: f32 },
-    Create(Option<ChannelId>),
+    Create(ChannelId),
     Edit(ChannelId),
     Shift(ChannelId, i32),
     Move(ChannelId, DropTarget),
     MakeDefault(ChannelId),
     Delete(ChannelId),
-    ClaimOwnership,
     SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
     Kick { target: ClientId, from_server: bool },
     Ban(ClientId),
     ServerMute { target: ClientId, muted: bool },
-    ServerSettings,
     SetRole { identity: Identity, role: RoleId, held: bool },
     MoveMember { target: ClientId, channel: ChannelId },
     Fold(String),
@@ -118,10 +117,11 @@ struct MemberRow<'a> {
 }
 
 impl App {
+    /// The tree fills the rest of `ui`, scrolling when it is taller.
     pub(super) fn channel_tree(&mut self, ui: &mut egui::Ui) {
         let Some(view) = &self.view else { return };
         let folded = match &self.conn {
-            Conn::Connected { server } => self.settings.folded.get(server),
+            Conn::Connected { server, .. } => self.settings.folded.get(server),
             _ => None,
         };
         let tree = Tree {
@@ -135,15 +135,7 @@ impl App {
             watched: self.watching.as_ref().map(|w| w.sharer),
             picked: None,
         };
-        let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(8, 10));
-        let picked = egui::Panel::left("tree")
-            .frame(frame)
-            .resizable(true)
-            .default_size(290.0)
-            .size_range(220.0..=520.0)
-            .show(ui, |ui| tree.show(ui))
-            .inner;
-        if let Some(action) = picked {
+        if let Some(action) = tree.show(ui) {
             self.apply_tree_action(action);
         }
     }
@@ -154,7 +146,7 @@ impl App {
             TreeAction::OpenPrivate(id) => self.open_private(id),
             TreeAction::Poke(id) => self.open_poke(id),
             TreeAction::SetVolume { id, nickname, volume } => self.set_user_volume(id, &nickname, volume),
-            TreeAction::Create(parent) => self.open_create_channel(parent),
+            TreeAction::Create(parent) => self.open_create_channel(Some(parent)),
             TreeAction::Edit(ch) => self.open_edit_channel(ch),
             TreeAction::Shift(ch, delta) => self.shift_channel(ch, delta),
             TreeAction::Move(ch, to) => {
@@ -162,14 +154,12 @@ impl App {
             }
             TreeAction::MakeDefault(ch) => self.net.send(C2S::SetDefaultChannel { id: ch }),
             TreeAction::Delete(ch) => self.open_delete_channel(ch),
-            TreeAction::ClaimOwnership => self.open_claim_ownership(),
             TreeAction::SetModerator { channel, identity, moderator } => {
                 self.net.send(C2S::SetModerator { channel, identity, moderator });
             }
             TreeAction::Kick { target, from_server } => self.open_kick(target, from_server),
             TreeAction::Ban(target) => self.open_ban(target),
             TreeAction::ServerMute { target, muted } => self.net.send(C2S::ServerMute { target, muted }),
-            TreeAction::ServerSettings => self.open_server_settings(),
             TreeAction::SetRole { identity, role, held } => {
                 self.net.send(C2S::ChangeRoles(RoleChange::Assign { identity, role, held }));
             }
@@ -181,7 +171,7 @@ impl App {
     }
 
     fn toggle_folded(&mut self, name: String) {
-        let Conn::Connected { server } = &self.conn else { return };
+        let Conn::Connected { server, .. } = &self.conn else { return };
         let folded = self.settings.folded.entry(server.clone()).or_default();
         if !folded.remove(&name) {
             folded.insert(name);
@@ -205,8 +195,6 @@ impl App {
 
 impl<'a> Tree<'a> {
     fn show(mut self, ui: &mut egui::Ui) -> Option<TreeAction> {
-        self.header(ui);
-        ui.add_space(2.0);
         let view = self.view;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -230,45 +218,6 @@ impl<'a> Tree<'a> {
             }
         });
         self.picked
-    }
-
-    /// The CHANNELS heading and its menu of server-wide actions.
-    fn header(&mut self, ui: &mut egui::Ui) {
-        let view = self.view;
-        ui.horizontal(|ui| {
-            // Lined up with the channel icons below.
-            ui.add_space(6.0);
-            ui.label(RichText::new("CHANNELS").size(11.0).color(theme::TEXT_FAINT).strong());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), Sense::click());
-                let color = if resp.hovered() { theme::TEXT } else { theme::TEXT_FAINT };
-                if resp.hovered() {
-                    ui.painter().rect_filled(rect, CornerRadius::same(5), theme::SURFACE_HOVER);
-                }
-                icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), Icon::Dots, color);
-                egui::Popup::menu(&resp).show(|ui| {
-                    let label = if manages(view, Scope::Server) {
-                        Some("Create channel…")
-                    } else {
-                        view.may(Perm::CreateTemporary).then_some("Create temporary channel…")
-                    };
-                    if let Some(label) = label
-                        && ui.button(label).clicked()
-                    {
-                        self.picked = Some(TreeAction::Create(None));
-                    }
-                    if (view.may(Perm::ManageRoles) || view.may(Perm::Ban)) && ui.button("Server settings…").clicked()
-                    {
-                        self.picked = Some(TreeAction::ServerSettings);
-                    }
-                    if view.is_owner() {
-                        ui.add_enabled(false, egui::Button::new("You own this server"));
-                    } else if ui.button("Claim ownership…").clicked() {
-                        self.picked = Some(TreeAction::ClaimOwnership);
-                    }
-                });
-            });
-        });
     }
 
     fn channel_row(&self, ch: &'a ChannelInfo, depth: usize, folded: bool) -> ChannelRow<'a> {
@@ -368,50 +317,59 @@ impl<'a> Tree<'a> {
         may.then_some(member)
     }
 
+    /// Adds a menu entry that picks `action` and closes the menu.
+    fn entry(&mut self, ui: &mut egui::Ui, item: Item, action: TreeAction) {
+        if ui.add(item).clicked() {
+            self.picked = Some(action);
+            ui.close();
+        }
+    }
+
+    /// Actions on one channel, most used first, deleting last and in red.
     fn channel_menu(&mut self, ui: &mut egui::Ui, row: &ChannelRow) {
+        menu_style(ui, 220.0);
         let (view, ch) = (self.view, row.ch);
         let category = ch.kind == ChannelKind::Category;
         if !category {
             let join = if ch.kind == ChannelKind::Lobby { "Open a room" } else { "Join channel" };
-            if ui.add_enabled(!row.is_mine && !row.full, egui::Button::new(join)).clicked() {
+            if ui.add_enabled(!row.is_mine && !row.full, Item::new(Icon::ArrowRight, join)).clicked() {
                 self.picked = Some(TreeAction::Join(ch.id));
                 ui.close();
             }
-            ui.separator();
         }
-        let may_create = view.may_in(ch.id, Perm::CreateTemporary) || row.manages;
-        let create = if category { "Create channel…" } else { "Create sub-channel…" };
-        if row.depth + 1 < MAX_CHANNEL_DEPTH && may_create && ui.button(create).clicked() {
-            self.picked = Some(TreeAction::Create(Some(ch.id)));
-            ui.close();
+        let edit = view.may_rename(ch.id) || view.may_in(ch.id, Perm::ManagePermissions);
+        let create = row.depth + 1 < MAX_CHANNEL_DEPTH && (view.may_in(ch.id, Perm::CreateTemporary) || row.manages);
+        let make_default =
+            view.may(Perm::ManageChannels) && !ch.default && !ch.temporary && ch.kind == ChannelKind::Voice;
+        let manage = edit || create || row.may_rearrange || make_default;
+        if manage && !category {
+            menu_separator(ui);
         }
-        let edit = if category { "Edit category…" } else { "Edit channel…" };
-        let may_edit = view.may_rename(ch.id) || view.may_in(ch.id, Perm::ManagePermissions);
-        if may_edit && ui.button(edit).clicked() {
-            self.picked = Some(TreeAction::Edit(ch.id));
-            ui.close();
+        if edit {
+            let label = if category { "Edit category…" } else { "Edit channel…" };
+            self.entry(ui, Item::new(Icon::Pencil, label), TreeAction::Edit(ch.id));
         }
+        if create {
+            let label = if category { "Create channel…" } else { "Create sub-channel…" };
+            self.entry(ui, Item::new(Icon::Plus, label), TreeAction::Create(ch.id));
+        }
+        // These leave the menu open, to move a channel several places.
         if row.may_rearrange {
-            if ui.button("Move up").clicked() {
-                self.picked = Some(TreeAction::Shift(ch.id, -1));
-            }
-            if ui.button("Move down").clicked() {
-                self.picked = Some(TreeAction::Shift(ch.id, 1));
+            for (icon, label, delta) in [(Icon::ArrowUp, "Move up", -1), (Icon::ArrowDown, "Move down", 1)] {
+                if ui.add(Item::new(icon, label)).clicked() {
+                    self.picked = Some(TreeAction::Shift(ch.id, delta));
+                }
             }
         }
-        if view.may(Perm::ManageChannels)
-            && !ch.default
-            && !ch.temporary
-            && ch.kind == ChannelKind::Voice
-            && ui.button("Make default channel").clicked()
-        {
-            self.picked = Some(TreeAction::MakeDefault(ch.id));
-            ui.close();
+        if make_default {
+            self.entry(ui, Item::new(Icon::Speaker, "Make default channel"), TreeAction::MakeDefault(ch.id));
         }
-        let delete = if category { "Delete category…" } else { "Delete channel…" };
-        if row.manages && !ch.default && ui.button(delete).clicked() {
-            self.picked = Some(TreeAction::Delete(ch.id));
-            ui.close();
+        if row.manages && !ch.default {
+            if manage || !category {
+                menu_separator(ui);
+            }
+            let label = if category { "Delete category…" } else { "Delete channel…" };
+            self.entry(ui, Item::new(Icon::Trash, label).danger(), TreeAction::Delete(ch.id));
         }
     }
 
@@ -471,25 +429,19 @@ impl<'a> Tree<'a> {
         }
     }
 
+    /// What everyone may do first, then moderation under its own heading.
     fn member_menu(&mut self, ui: &mut egui::Ui, ch: &ChannelInfo, member: &MemberRow, movable: bool) {
+        menu_style(ui, 250.0);
         let (view, c) = (self.view, member.c);
+        self.volume_control(ui, c, member.volume);
+        menu_separator(ui);
         if member.watchable && self.watched == Some(c.id) {
-            if ui.button("Stop watching").clicked() {
-                self.picked = Some(TreeAction::StopWatching);
-                ui.close();
-            }
-        } else if member.watchable && ui.button("Watch screen").clicked() {
-            self.picked = Some(TreeAction::Watch(c.id));
-            ui.close();
+            self.entry(ui, Item::new(Icon::ScreenStop, "Stop watching"), TreeAction::StopWatching);
+        } else if member.watchable {
+            self.entry(ui, Item::new(Icon::Screen, "Watch screen"), TreeAction::Watch(c.id));
         }
-        if ui.button("Send private message").clicked() {
-            self.picked = Some(TreeAction::OpenPrivate(c.id));
-            ui.close();
-        }
-        if ui.button("Poke…").clicked() {
-            self.picked = Some(TreeAction::Poke(c.id));
-            ui.close();
-        }
+        self.entry(ui, Item::new(Icon::Chat, "Send private message"), TreeAction::OpenPrivate(c.id));
+        self.entry(ui, Item::new(Icon::Bell, "Poke…"), TreeAction::Poke(c.id));
         let kicks = [
             (false, "Kick from channel…", !ch.default && view.may_in(ch.id, Perm::Kick)),
             (true, "Kick from server…", view.may(Perm::Kick)),
@@ -498,60 +450,54 @@ impl<'a> Tree<'a> {
         let mutes = view.may_in(ch.id, Perm::MuteMembers);
         let set_moderator = view.may_in(ch.id, Perm::ManagePermissions);
         let roles = view.roles.as_ref().filter(|_| view.may(Perm::ManageRoles));
-        if movable || kicks.iter().any(|k| k.2) || ban || mutes || set_moderator || roles.is_some() {
-            ui.separator();
+        if !(movable || kicks.iter().any(|k| k.2) || ban || mutes || set_moderator || roles.is_some()) {
+            return;
         }
+        menu_separator(ui);
+        menu_label(ui, "Moderation");
         if movable {
             self.move_to_menu(ui, ch.id, c.id);
         }
         if let Some(roles) = roles {
             self.roles_menu(ui, roles, c);
         }
-        for (from_server, label, allowed) in kicks {
-            if allowed && ui.button(label).clicked() {
-                self.picked = Some(TreeAction::Kick { target: c.id, from_server });
-                ui.close();
-            }
-        }
-        if ban && ui.button("Ban…").clicked() {
-            self.picked = Some(TreeAction::Ban(c.id));
-            ui.close();
-        }
         if mutes {
             let muted = c.speech == Speech::ServerMuted;
             let label = if muted { "Unmute on server" } else { "Mute on server" };
-            if ui.button(label).clicked() {
-                self.picked = Some(TreeAction::ServerMute { target: c.id, muted: !muted });
-                ui.close();
-            }
+            self.entry(ui, Item::new(Icon::MicLocked, label), TreeAction::ServerMute { target: c.id, muted: !muted });
         }
         if set_moderator {
             let moderator = ch.moderators.contains(&c.identity);
             let label =
                 if moderator { "Remove as moderator".to_owned() } else { format!("Make moderator of {}", ch.name) };
-            if ui.button(label).clicked() {
-                let identity = c.identity;
-                self.picked = Some(TreeAction::SetModerator { channel: ch.id, identity, moderator: !moderator });
-                ui.close();
+            let action = TreeAction::SetModerator { channel: ch.id, identity: c.identity, moderator: !moderator };
+            self.entry(ui, Item::new(Icon::Star, &label), action);
+        }
+        for (from_server, label, allowed) in kicks {
+            if allowed {
+                self.entry(ui, Item::new(Icon::Kick, label).danger(), TreeAction::Kick { target: c.id, from_server });
             }
         }
-        ui.separator();
-        self.volume_control(ui, c, member.volume);
+        if ban {
+            self.entry(ui, Item::new(Icon::Ban, "Ban…").danger(), TreeAction::Ban(c.id));
+        }
     }
 
     fn move_to_menu(&mut self, ui: &mut egui::Ui, from: ChannelId, target: ClientId) {
         let view = self.view;
-        ui.menu_button("Move to", |ui| {
+        let resp = ui.add(Item::new(Icon::ArrowRight, "Move to").submenu());
+        SubMenu::new().show(ui, &resp, |ui| {
+            menu_style(ui, 200.0);
             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                 for &(depth, to) in view.tree() {
                     let Some(dest) = view.channels.get(&to) else { continue };
                     if dest.kind == ChannelKind::Category {
-                        ui.label(RichText::new(dest.name.to_uppercase()).size(11.5));
+                        menu_label(ui, &dest.name);
                         continue;
                     }
                     let label = format!("{}{}", "    ".repeat(depth), dest.name);
                     let may = to != from && view.may_in(to, Perm::MoveMembers);
-                    if ui.add_enabled(may, egui::Button::new(label)).clicked() {
+                    if ui.add_enabled(may, Item::new(Icon::Speaker, &label)).clicked() {
                         self.picked = Some(TreeAction::MoveMember { target, channel: to });
                         ui.close();
                     }
@@ -562,7 +508,9 @@ impl<'a> Tree<'a> {
 
     fn roles_menu(&mut self, ui: &mut egui::Ui, roles: &Roles, c: &ClientInfo) {
         let view = self.view;
-        ui.menu_button("Roles", |ui| {
+        let resp = ui.add(Item::new(Icon::Shield, "Roles").submenu());
+        SubMenu::new().show(ui, &resp, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
             let mine = view.me().map_or(Rank::EVERYONE, |me| roles.rank(me.identity));
             let held = roles.members.get(&c.identity).map_or(&[][..], |m| &m.roles);
             for role in &roles.ranked {
@@ -578,16 +526,20 @@ impl<'a> Tree<'a> {
 
     /// How loud someone is for you alone.
     fn volume_control(&mut self, ui: &mut egui::Ui, c: &ClientInfo, volume: f32) {
-        ui.label(RichText::new("Volume").size(12.0).color(theme::TEXT_DIM));
         let mut v = volume;
-        ui.horizontal(|ui| {
-            let size = vec2(200.0, theme::CONTROL_H);
-            ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
-                slider(ui, &mut v, 0.0..=2.0, Unit::Percent);
+        let frame = egui::Frame::new().inner_margin(Margin { left: 8, right: 8, top: 6, bottom: 4 });
+        frame.show(ui, |ui| {
+            ui.label(RichText::new("Volume for you").size(12.0).color(theme::TEXT_DIM));
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let size = vec2(200.0, theme::CONTROL_H);
+                ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+                    slider(ui, &mut v, 0.0..=2.0, Unit::Percent);
+                });
+                if ui.add_enabled(v != 1.0, Btn::secondary("Reset").small()).clicked() {
+                    v = 1.0;
+                }
             });
-            if ui.add_enabled(v != 1.0, Btn::secondary("Reset").small()).clicked() {
-                v = 1.0;
-            }
         });
         if v != volume {
             self.picked = Some(TreeAction::SetVolume { id: c.id, nickname: c.nickname.clone(), volume: v });

@@ -140,7 +140,8 @@ fn connected(ctx: &egui::Context) -> App {
     settings.user_volumes.insert("Marta".into(), 0.6);
     let mut app = App::new(ctx, settings, None, Arc::new(|| {}));
     app.view = Some(view());
-    app.conn = Conn::Connected { server: ServerKey::of("friday.example.com:9988") };
+    let login = Login { address: "friday.example.com".into(), password: String::new() };
+    app.conn = Conn::Connected { server: ServerKey::of("friday.example.com:9988"), login };
     app.ping = Some(Duration::from_millis(23));
     app.tabs[1].title = "Games".into();
     app.active_tab = 1;
@@ -341,25 +342,40 @@ const SCENES: &[Scene] = &[
         app.open_edit_channel(3);
         app
     }),
+    ("33-update-ready", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.updater = crate::update::Updater::showing(crate::update::Status::Ready("0.7.0".into()));
+        app
+    }),
     ("16-connecting", (1100, 720), |ctx| {
         let mut app = disconnected(ctx);
-        app.conn = Conn::Connecting { address: "friday.example.com".into(), password: String::new() };
+        app.conn = Conn::Connecting(Login { address: "friday.example.com".into(), password: String::new() });
         app
     }),
 ];
 
-#[derive(Clone, Copy)]
-enum RightButton {
-    Press,
-    Release,
-}
-
+/// The pointer moves to (x, y), then presses or releases a button there, if any.
 #[derive(Clone, Copy)]
 struct Step {
     x: f32,
     y: f32,
-    right_button: Option<RightButton>,
+    button: Option<(egui::PointerButton, bool)>,
 }
+
+const fn hover(x: f32, y: f32) -> Step {
+    Step { x, y, button: None }
+}
+
+const fn press(x: f32, y: f32, button: egui::PointerButton) -> Step {
+    Step { x, y, button: Some((button, true)) }
+}
+
+const fn release(x: f32, y: f32, button: egui::PointerButton) -> Step {
+    Step { x, y, button: Some((button, false)) }
+}
+
+const LEFT: egui::PointerButton = egui::PointerButton::Primary;
+const RIGHT: egui::PointerButton = egui::PointerButton::Secondary;
 
 struct Menu {
     name: &'static str,
@@ -373,21 +389,31 @@ const MENUS: &[Menu] = &[
         name: "19-user-roles",
         size: (1100, 720),
         make: connected,
-        steps: &[
-            Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Press) },
-            Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Release) },
-            Step { x: 150.0, y: 330.0, right_button: None },
-        ],
+        steps: &[press(80.0, 181.0, RIGHT), release(80.0, 181.0, RIGHT), hover(150.0, 424.0)],
     },
     Menu {
         name: "29-user-move-to",
         size: (1100, 720),
         make: connected,
-        steps: &[
-            Step { x: 80.0, y: 340.0, right_button: Some(RightButton::Press) },
-            Step { x: 80.0, y: 340.0, right_button: Some(RightButton::Release) },
-            Step { x: 150.0, y: 240.0, right_button: None },
-        ],
+        steps: &[press(80.0, 295.0, RIGHT), release(80.0, 295.0, RIGHT), hover(150.0, 482.0)],
+    },
+    Menu {
+        name: "30-server-menu",
+        size: (1100, 720),
+        make: connected,
+        steps: &[press(256.0, 26.0, LEFT), release(256.0, 26.0, LEFT), hover(200.0, 120.0)],
+    },
+    Menu {
+        name: "31-your-menu",
+        size: (1100, 720),
+        make: connected,
+        steps: &[press(60.0, 692.0, LEFT), release(60.0, 692.0, LEFT), hover(100.0, 640.0)],
+    },
+    Menu {
+        name: "32-channel-menu",
+        size: (1100, 720),
+        make: connected,
+        steps: &[press(80.0, 238.0, RIGHT), release(80.0, 238.0, RIGHT), hover(150.0, 260.0)],
     },
 ];
 
@@ -449,9 +475,8 @@ fn render(
         if let Some(step) = frame.checked_sub(FRAMES_BEFORE_STEPS).and_then(|step| steps.get(step)) {
             let pos = egui::pos2(step.x, step.y);
             raw.events.push(egui::Event::PointerMoved(pos));
-            if let Some(right_button) = step.right_button {
-                let pressed = matches!(right_button, RightButton::Press);
-                let (button, modifiers) = (egui::PointerButton::Secondary, egui::Modifiers::default());
+            if let Some((button, pressed)) = step.button {
+                let modifiers = egui::Modifiers::default();
                 raw.events.push(egui::Event::PointerButton { pos, button, pressed, modifiers });
             }
         }
