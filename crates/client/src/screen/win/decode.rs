@@ -4,11 +4,12 @@
 use std::mem::ManuallyDrop;
 
 use windows::Win32::Media::MediaFoundation::{
-    CLSID_MSH264DecoderMFT, IMFMediaBuffer, IMFSample, IMFTransform, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    CLSID_MSH264DecoderMFT, IMFSample, IMFTransform, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
     MF_E_TRANSFORM_STREAM_CHANGE, MF_E_TRANSFORM_TYPE_NOT_SET, MF_LOW_LATENCY, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
     MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MFCreateMediaType, MFCreateMemoryBuffer,
     MFCreateSample, MFMediaType_Video, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_OUTPUT_DATA_BUFFER, MFVideoArea, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFVideoArea,
+    MFVideoFormat_H264, MFVideoFormat_NV12,
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 
@@ -26,10 +27,10 @@ pub struct Decoder {
 // is only used through `&mut self`.
 unsafe impl Send for Decoder {}
 
-/// The negotiated NV12 output and the sample it is written into.
+/// The negotiated NV12 output.
 struct Output {
-    sample: IMFSample,
-    buffer: IMFMediaBuffer,
+    /// Ours to write into, unless the decoder brings its own.
+    sample: Option<IMFSample>,
     stride: usize,
     /// Rows in the Y plane, often more than shown (1088 for 1080p).
     rows: usize,
@@ -70,7 +71,7 @@ impl Decoder {
                 Ok(()) => break,
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
                     // Full: take what is ready, then the input fits.
-                    if !self.drain()? {
+                    if !self.drain(picture)? {
                         return Err("the decoder takes no input and has no output".into());
                     }
                     decoded = true;
@@ -78,40 +79,40 @@ impl Decoder {
                 Err(e) => return Err(format!("decoding: {e}")),
             }
         }
-        decoded |= self.drain()?;
-        if decoded {
-            self.picture(picture)?;
-        }
-        Ok(decoded)
+        Ok(self.drain(picture)? || decoded)
     }
 
-    /// Takes every ready picture, each over the last; true if there was one.
-    fn drain(&mut self) -> Result<bool, String> {
+    /// Converts every ready picture into `picture`, each over the last; true
+    /// if there was one.
+    fn drain(&mut self, picture: &mut Picture) -> Result<bool, String> {
         let mut decoded = false;
         let mut changes = 0;
         loop {
-            let sample = self.output.as_ref().map(|o| o.sample.clone());
-            // SAFETY: the output struct holds one extra sample reference across
-            // the call, taken back out right after.
-            let result = unsafe {
-                if let Some(output) = &self.output {
-                    output.buffer.SetCurrentLength(0).context("decoder output")?;
+            let ours = self.output.as_ref().and_then(|o| o.sample.clone());
+            // SAFETY: the output struct owns one sample reference across the
+            // call, taken back out right after.
+            let (result, sample) = unsafe {
+                // The decoder only writes into an empty buffer.
+                if let Some(ours) = &ours {
+                    ours.GetBufferByIndex(0).and_then(|b| b.SetCurrentLength(0)).context("decoder output")?;
                 }
                 let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
                     dwStreamID: 0,
-                    pSample: ManuallyDrop::new(sample),
+                    pSample: ManuallyDrop::new(ours),
                     dwStatus: 0,
                     pEvents: ManuallyDrop::new(None),
                 }];
                 let mut status = 0;
                 let result = self.transform.ProcessOutput(0, &mut buffers, &raw mut status);
                 let [buffer] = buffers;
-                drop(ManuallyDrop::into_inner(buffer.pSample));
                 drop(ManuallyDrop::into_inner(buffer.pEvents));
-                result
+                (result, ManuallyDrop::into_inner(buffer.pSample))
             };
             match result {
-                Ok(()) => decoded = true,
+                Ok(()) => {
+                    self.picture(&sample.ok_or("the decoder gave no picture")?, picture)?;
+                    decoded = true;
+                }
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(decoded),
                 Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE || e.code() == MF_E_TRANSFORM_TYPE_NOT_SET => {
                     changes += 1;
@@ -147,24 +148,31 @@ impl Decoder {
             let (x, y, w, h) = shown.filter(|&(_, _, w, h)| w > 0 && h > 0).unwrap_or((0, 0, width, rows));
             let (w, h) = (w.min(width.saturating_sub(x)), h.min(rows.saturating_sub(y)));
             let info = self.transform.GetOutputStreamInfo(0).context("decoder output")?;
-            let len = (stride * rows * 3 / 2).max(info.cbSize as usize);
-            let buffer = MFCreateMemoryBuffer(len as u32).context("decoder output")?;
-            let sample = MFCreateSample().context("decoder output")?;
-            sample.AddBuffer(&buffer).context("decoder output")?;
-            self.output = Some(Output { sample, buffer, stride, rows, x, y, width: w, height: h });
+            let provides = (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0) as u32;
+            let sample = if info.dwFlags & provides == 0 {
+                let len = (stride * rows * 3 / 2).max(info.cbSize as usize);
+                let buffer = MFCreateMemoryBuffer(len as u32).context("decoder output")?;
+                let sample = MFCreateSample().context("decoder output")?;
+                sample.AddBuffer(&buffer).context("decoder output")?;
+                Some(sample)
+            } else {
+                None
+            };
+            self.output = Some(Output { sample, stride, rows, x, y, width: w, height: h });
             Ok(())
         }
     }
 
-    fn picture(&self, picture: &mut Picture) -> Result<(), String> {
+    fn picture(&self, sample: &IMFSample, picture: &mut Picture) -> Result<(), String> {
         let out = self.output.as_ref().ok_or("no decoder output")?;
         // SAFETY: the buffer is locked while its bytes are read.
         unsafe {
+            let buffer = sample.ConvertToContiguousBuffer().context("decoded picture")?;
             let (mut data, mut len) = (std::ptr::null_mut(), 0);
-            out.buffer.Lock(&raw mut data, None, Some(&raw mut len)).context("decoded picture")?;
+            buffer.Lock(&raw mut data, None, Some(&raw mut len)).context("decoded picture")?;
             let bytes = std::slice::from_raw_parts(data, len as usize);
             let result = convert(out, bytes, picture);
-            let _ = out.buffer.Unlock();
+            let _ = buffer.Unlock();
             result
         }
     }
