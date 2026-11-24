@@ -5,7 +5,7 @@
 //! no locks and a total order of events, and every broadcast is serialised
 //! exactly once no matter how many clients receive it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -16,8 +16,8 @@ use t7_proto::perms::{Override, Perm, Permissions, Rank, RoleChange, RoleId, Rol
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
     BanId, BanInfo, C2S, ChannelId, ChannelInfo, ChannelKind, ChannelSettings, ClientId, ClientInfo, ClientStatus,
-    Identity, LeaveReason, MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
-    PasswordChange, S2C, ServerInfo, Speech, TextTarget, encode_frame, validate_nickname,
+    Identity, LeaveReason, MAX_POKE_LEN, MAX_REASON_LEN, MAX_TEXT_LEN, MAX_WATCHED, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION, PasswordChange, S2C, ServerInfo, Speech, TextTarget, encode_frame, validate_nickname,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -68,7 +68,8 @@ struct Client {
     /// Learned from the first authenticated datagram (works behind NAT).
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
-    watching: Option<ClientId>,
+    /// Sharers in their channel whose video they get.
+    watching: BTreeSet<ClientId>,
     video_bucket: TokenBucket,
     keyframe_asked: Option<Instant>,
     last_sent_permissions: Permissions,
@@ -240,7 +241,8 @@ impl Server {
                     return;
                 }
                 let channel = sender.info.channel;
-                let viewers = self.clients.values_mut().filter(|c| c.watching == Some(id) && c.info.channel == channel);
+                let viewers =
+                    self.clients.values_mut().filter(|c| c.watching.contains(&id) && c.info.channel == channel);
                 let video = ToClient::Video { from: id, frame, part, parts, key, payload };
                 forward(&self.udp, &mut self.datagram, video, viewers);
             }
@@ -338,7 +340,7 @@ impl Server {
                 voice: voice::ServerSide::new(&voice_key),
                 voice_addr: None,
                 voice_bucket: TokenBucket::voice(),
-                watching: None,
+                watching: BTreeSet::new(),
                 video_bucket: TokenBucket::video(),
                 keyframe_asked: None,
                 last_sent_permissions: permissions,
@@ -476,9 +478,15 @@ impl Server {
             C2S::ServerMute { target, muted } => self.server_mute(id, target, muted),
             C2S::MoveMember { target, channel } => self.move_member(id, target, channel),
             C2S::SetSharing(sharing) => self.set_sharing(id, sharing),
-            C2S::Watch(target) => self.watch(id, target),
+            C2S::Watch { sharer, on } => self.watch(id, sharer, on),
+            C2S::WatchOnly(sharer) => {
+                self.clients.get_mut(&id).expect("checked above").watching.clear();
+                if let Some(sharer) = sharer {
+                    self.watch(id, sharer, true);
+                }
+            }
             C2S::NeedKeyframe { from } => {
-                if self.clients[&id].watching == Some(from) {
+                if self.clients[&id].watching.contains(&from) {
                     self.ask_for_keyframe(from);
                 }
             }
@@ -495,22 +503,29 @@ impl Server {
         }
         client.info.sharing = sharing;
         if !sharing {
-            for c in self.clients.values_mut().filter(|c| c.watching == Some(id)) {
-                c.watching = None;
+            for c in self.clients.values_mut() {
+                c.watching.remove(&id);
             }
         }
         self.broadcast(&S2C::ClientSharing { id, sharing }, |c| c.last_sent_locations.contains_key(&id));
     }
 
-    fn watch(&mut self, id: ClientId, target: Option<ClientId>) {
+    fn watch(&mut self, id: ClientId, sharer: ClientId, on: bool) {
         let channel = self.clients[&id].info.channel;
-        let sharing_here =
-            |t: &ClientId| self.clients.get(t).is_some_and(|c| c.info.sharing && c.info.channel == channel);
-        let target = target.filter(|t| *t != id && sharing_here(t));
-        self.clients.get_mut(&id).expect("exists").watching = target;
-        if let Some(sharer) = target {
-            self.ask_for_keyframe(sharer);
+        let sharing_here = self.clients.get(&sharer).is_some_and(|c| c.info.sharing && c.info.channel == channel);
+        let watching = &mut self.clients.get_mut(&id).expect("exists").watching;
+        if !on {
+            watching.remove(&sharer);
+            return;
         }
+        if sharer == id || !sharing_here || watching.contains(&sharer) {
+            return;
+        }
+        if watching.len() >= MAX_WATCHED {
+            return self.error(id, &format!("you can watch at most {MAX_WATCHED} screens at once"));
+        }
+        watching.insert(sharer);
+        self.ask_for_keyframe(sharer);
     }
 
     fn ask_for_keyframe(&mut self, sharer: ClientId) {
@@ -707,7 +722,7 @@ impl Server {
         let client = self.clients.get_mut(&id).expect("exists");
         client.info.channel = channel;
         client.arrived = Instant::now();
-        client.watching = None;
+        client.watching.clear();
     }
 
     fn sync_about(&mut self, subject: ClientId) {
@@ -1189,9 +1204,7 @@ impl Server {
             self.broadcast(&S2C::ClientLeft { id, reason }, |c| c.last_sent_locations.contains_key(&id));
             for c in self.clients.values_mut() {
                 c.last_sent_locations.remove(&id);
-                if c.watching == Some(id) {
-                    c.watching = None;
-                }
+                c.watching.remove(&id);
             }
             self.tidy_rooms();
         }

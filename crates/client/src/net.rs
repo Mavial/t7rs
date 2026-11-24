@@ -156,7 +156,7 @@ impl Net {
         let sharer = watch.as_ref().map(|(sharer, _)| *sharer);
         let watched = watch.map(|(sharer, sink)| Watched::new(sharer, sink, Instant::now()));
         self.viewer.lock().unwrap().watched = watched;
-        self.send(C2S::Watch(sharer));
+        self.send(C2S::WatchOnly(sharer));
     }
 }
 

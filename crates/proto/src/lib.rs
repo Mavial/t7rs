@@ -20,7 +20,7 @@ pub mod voice;
 
 /// This build's protocol. New messages are only ever appended to the enums
 /// below, so older clients keep working for everything they know about.
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 /// Oldest client protocol a server still accepts.
 pub const MIN_PROTOCOL_VERSION: u16 = 7;
 /// Default port of a T7 server (TCP for control, UDP for voice).
@@ -41,6 +41,8 @@ pub const MAX_CHANNELS: usize = 200;
 pub const MAX_ROLE_NAME_LEN: usize = 32;
 /// Roles a server may have, besides Everyone.
 pub const MAX_ROLES: usize = 32;
+/// Screens one client may watch at once.
+pub const MAX_WATCHED: usize = 4;
 
 /// How often the client sends a ping, and how long the server waits for
 /// any traffic before considering the connection dead.
@@ -300,12 +302,19 @@ pub enum C2S {
     /// Starts or stops sharing your screen. Starting needs Speak where you
     /// are. Moving to another channel stops it.
     SetSharing(bool),
-    /// Whose screen to watch, of those sharing in your channel. The server
-    /// forwards their video to you until either of you moves or they stop.
-    Watch(Option<ClientId>),
+    /// Protocol 7 clients: watch only this screen, or none. Newer clients
+    /// send [`C2S::Watch`].
+    WatchOnly(Option<ClientId>),
     /// Video from `from` can't be decoded until its next keyframe.
     NeedKeyframe {
         from: ClientId,
+    },
+    /// Starts or stops watching one of those sharing in your channel, up to
+    /// [`MAX_WATCHED`] at once (protocol 8). The server forwards their video
+    /// to you until either of you moves or they stop.
+    Watch {
+        sharer: ClientId,
+        on: bool,
     },
 }
 
