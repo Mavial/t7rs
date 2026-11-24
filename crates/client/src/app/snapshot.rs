@@ -395,23 +395,57 @@ const FRAMES_BEFORE_STEPS: usize = 2;
 
 const FRAMES_PER_SECOND: f64 = 4.0;
 
+/// An app drawn frame by frame into a pixel buffer, the way the window shell does.
+struct Canvas {
+    ctx: egui::Context,
+    app: App,
+    renderer: EguiSoftwareRender,
+    px: Vec<[u8; 4]>,
+    size: (u32, u32),
+    scale: f32,
+}
+
+impl Canvas {
+    fn new((w, h): (u32, u32), make: fn(&egui::Context) -> App, scale: f32) -> Self {
+        let ctx = egui::Context::default();
+        let app = make(&ctx);
+        let renderer = EguiSoftwareRender::new(ColorFieldOrder::Rgba).with_caching(false);
+        Self { ctx, app, renderer, px: vec![[0u8; 4]; (w * h) as usize], size: (w, h), scale }
+    }
+
+    fn input(&self, frame: usize) -> egui::RawInput {
+        let (w, h, scale) = (self.size.0 as f32, self.size.1 as f32, self.scale);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w / scale, h / scale));
+        let time = Some(frame as f64 / FRAMES_PER_SECOND);
+        let mut raw = egui::RawInput { screen_rect: Some(screen), time, ..Default::default() };
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(scale);
+        raw
+    }
+
+    /// Lays out, tessellates and rasterizes one frame.
+    fn draw(&mut self, raw: egui::RawInput) {
+        let app = &mut self.app;
+        let out = self.ctx.run_ui(raw, |ui| app.ui(ui));
+        let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
+        let mut target = BufferMutRef::new(&mut self.px, self.size.0 as usize, self.size.1 as usize);
+        let mut delta = out.textures_delta;
+        self.renderer.render(&mut target, &prims, &delta, out.pixels_per_point);
+        delta.clear();
+    }
+}
+
 fn render(
     name: &str,
-    (w, h): (u32, u32),
+    size: (u32, u32),
     make: fn(&egui::Context) -> App,
     steps: &[Step],
     scale: f32,
     dir: &std::path::Path,
 ) {
-    let ctx = egui::Context::default();
-    let mut app = make(&ctx);
-    let mut renderer = EguiSoftwareRender::new(ColorFieldOrder::Rgba).with_caching(false);
-    let mut px = vec![[0u8; 4]; (w * h) as usize];
-    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w as f32 / scale, h as f32 / scale));
+    let mut canvas = Canvas::new(size, make, scale);
     // Enough frames for layout to settle and fades to finish.
     for frame in 0..6 + steps.len() {
-        let time = Some(frame as f64 / FRAMES_PER_SECOND);
-        let mut raw = egui::RawInput { screen_rect: Some(screen), time, ..Default::default() };
+        let mut raw = canvas.input(frame);
         if let Some(step) = frame.checked_sub(FRAMES_BEFORE_STEPS).and_then(|step| steps.get(step)) {
             let pos = egui::pos2(step.x, step.y);
             raw.events.push(egui::Event::PointerMoved(pos));
@@ -421,14 +455,10 @@ fn render(
                 raw.events.push(egui::Event::PointerButton { pos, button, pressed, modifiers });
             }
         }
-        raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(scale);
-        let out = ctx.run_ui(raw, |ui| app.ui(ui));
-        let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
-        let mut target = BufferMutRef::new(&mut px, w as usize, h as usize);
-        let mut delta = out.textures_delta;
-        renderer.render(&mut target, &prims, &delta, out.pixels_per_point);
-        delta.clear();
+        canvas.draw(raw);
     }
+    let (w, h) = size;
+    let px = canvas.px;
     let file = std::fs::File::create(dir.join(format!("{name}.png"))).expect("create png");
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
     enc.set_color(png::ColorType::Rgba);
@@ -452,4 +482,35 @@ fn snapshots() {
             render(name, size, make, steps, 1.0, &dir);
         }
     }
+}
+
+/// How long a full redraw of the connected window takes: layout, tessellation
+/// and rasterizing, as the shell does on every repaint.
+/// `cargo test --release -p t7-client frame_time -- --ignored --nocapture`.
+#[test]
+#[ignore = "measures redraw time; run it in release"]
+fn frame_time() {
+    const FRAMES: usize = 260;
+    const KEPT: usize = 200;
+    let size = (1100, 720);
+    let mut canvas = Canvas::new(size, connected, 1.0);
+    let mut times: Vec<f64> = (0..FRAMES)
+        .map(|frame| {
+            let raw = canvas.input(frame);
+            let started = std::time::Instant::now();
+            canvas.draw(raw);
+            started.elapsed().as_secs_f64() * 1000.0
+        })
+        .skip(FRAMES - KEPT)
+        .collect();
+    times.sort_by(f64::total_cmp);
+    let at = |q: f64| times[((KEPT - 1) as f64 * q).round() as usize];
+    println!(
+        "frame_time {}x{}, last {KEPT} of {FRAMES} frames: median {:.3} ms, p10 {:.3} ms, p90 {:.3} ms",
+        size.0,
+        size.1,
+        at(0.5),
+        at(0.1),
+        at(0.9)
+    );
 }
