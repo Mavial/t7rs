@@ -342,12 +342,15 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 /// The frame every dialog uses: roomy margins and a soft shadow.
-pub fn modal(id: &str) -> egui::Modal {
-    let frame = egui::Frame::new()
+pub fn modal_frame() -> egui::Frame {
+    egui::Frame::new()
         .fill(PANEL)
         .stroke(Stroke::new(1.0, BORDER))
         .corner_radius(CornerRadius::same(12))
         .inner_margin(Margin::same(20))
-        .shadow(Shadow { offset: [0, 16], blur: 48, spread: 0, color: Color32::from_black_alpha(150) });
-    egui::Modal::new(egui::Id::unique(id)).frame(frame).backdrop_color(Color32::from_black_alpha(150))
+        .shadow(Shadow { offset: [0, 16], blur: 48, spread: 0, color: Color32::from_black_alpha(150) })
+}
+
+pub fn modal(id: &str) -> egui::Modal {
+    egui::Modal::new(egui::Id::unique(id)).frame(modal_frame()).backdrop_color(Color32::from_black_alpha(150))
 }

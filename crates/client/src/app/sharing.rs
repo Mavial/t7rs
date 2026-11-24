@@ -12,7 +12,7 @@ use crate::screen::{Quality, Share, Source, SourceInfo};
 use crate::theme;
 use crate::watch::{self, Frames};
 
-const QUALITIES: [(Quality, &str); 3] =
+pub(super) const QUALITIES: [(Quality, &str); 3] =
     [(Quality::P720_30, "720p 30"), (Quality::P1080_30, "1080p 30"), (Quality::P1080_60, "1080p 60")];
 
 pub(super) struct Sharing {

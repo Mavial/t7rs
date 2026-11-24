@@ -1,13 +1,14 @@
 //! The server settings dialog: roles with their permissions and members, and
 //! the ban list.
 
-use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, vec2};
+use egui::text::{LayoutJob, TextFormat};
+use egui::{Align, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, vec2};
 use t7_proto::model::ServerView;
 use t7_proto::perms::{Perm, Perms, Rank, RoleChange, RoleId, Roles};
 use t7_proto::{BanInfo, C2S, MAX_ROLE_NAME_LEN};
 
 use super::App;
-use super::widgets::{dialog_header, field_label, hint, section, text_input};
+use super::widgets::{field, hint, list_row, paint_avatar, placeholder, section, text_input};
 use crate::theme;
 use crate::theme::Btn;
 
@@ -19,7 +20,8 @@ pub(super) struct ServerSettings {
     pub(super) bans: Option<Vec<BanInfo>>,
     pub(super) picked: Pick,
     name_draft: String,
-    new_role: String,
+    /// The name of a role being added, while its field shows.
+    new_role: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,6 +37,9 @@ pub(super) enum Pick {
     Everyone,
 }
 
+/// Height of either tab, so switching tabs doesn't resize the dialog.
+const BODY_H: f32 = 480.0;
+
 fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
     match bans {
         None => {
@@ -44,13 +49,22 @@ fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
             ui.label(RichText::new("Nobody is banned.").color(theme::TEXT_DIM));
         }
         Some(list) => {
-            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                for ban in list {
-                    if ban_card(ui, ban) {
-                        send.push(C2S::Unban { id: ban.id });
-                    }
-                }
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Frame::new().stroke(Stroke::new(1.0, theme::BORDER)).corner_radius(CornerRadius::same(8)).show(
+                    ui,
+                    |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for (i, ban) in list.iter().enumerate() {
+                            if i > 0 {
+                                let x = ui.max_rect().x_range();
+                                ui.painter().hline(x, ui.cursor().top(), Stroke::new(1.0, theme::BORDER));
+                            }
+                            if ban_row(ui, ban) {
+                                send.push(C2S::Unban { id: ban.id });
+                            }
+                        }
+                    },
+                );
             });
         }
     }
@@ -65,7 +79,7 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
     }
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| role_list(ui, roles, mine, s, send));
-        ui.add_space(16.0);
+        ui.add_space(18.0);
         ui.vertical(|ui| role_details(ui, view, roles, mine, s, send));
     });
 }
@@ -74,10 +88,10 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
 fn role_list(ui: &mut egui::Ui, roles: &Roles, mine: Rank, s: &mut ServerSettings, send: &mut Vec<C2S>) {
     let below = |role: RoleId| mine > roles.height(role);
     let change = |send: &mut Vec<C2S>, change| send.push(C2S::ChangeRoles(change));
-    ui.set_width(190.0);
+    ui.set_width(160.0);
     ui.spacing_mut().item_spacing.y = 2.0;
     let owner = roles.owner.and_then(|o| roles.members.get(&o)).map_or("nobody yet", |m| m.nickname.as_str());
-    if role_row(ui, "Owner", owner, s.picked == Pick::Owner, false).clicked() {
+    if list_row(ui, "Owner", owner, s.picked == Pick::Owner, Sense::click()).clicked() {
         s.picked = Pick::Owner;
     }
     let dragging = egui::DragAndDrop::payload::<DragRole>(ui.ctx()).map(|d| d.0);
@@ -85,7 +99,11 @@ fn role_list(ui: &mut egui::Ui, roles: &Roles, mine: Rank, s: &mut ServerSetting
         let holders = roles.members.values().filter(|m| m.roles.contains(&role.id)).count();
         let count = if holders == 0 { String::new() } else { holders.to_string() };
         let picked = s.picked == Pick::Role(role.id);
-        let resp = role_row(ui, &role.name, &count, picked, below(role.id));
+        let sense = if below(role.id) { Sense::click_and_drag() } else { Sense::click() };
+        let resp = list_row(ui, &role.name, &count, picked, sense);
+        if resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
         if resp.clicked() {
             s.picked = Pick::Role(role.id);
         }
@@ -102,22 +120,32 @@ fn role_list(ui: &mut egui::Ui, roles: &Roles, mine: Rank, s: &mut ServerSetting
             }
         }
     }
-    if role_row(ui, "Everyone", "", s.picked == Pick::Everyone, false).clicked() {
+    if list_row(ui, "Everyone", "", s.picked == Pick::Everyone, Sense::click()).clicked() {
         s.picked = Pick::Everyone;
     }
     if mine > Rank::EVERYONE {
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            let width = ui.available_width() - 56.0;
-            let field = ui.add(
-                text_input(&mut s.new_role).desired_width(width).hint_text("New role").char_limit(MAX_ROLE_NAME_LEN),
-            );
-            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let ready = !s.new_role.trim().is_empty();
-            if ui.add_enabled(ready, Btn::secondary("Add").min_width(48.0)).clicked() || (ready && enter) {
-                change(send, RoleChange::Create { name: std::mem::take(&mut s.new_role).trim().to_owned() });
+        ui.add_space(6.0);
+        match &mut s.new_role {
+            None => {
+                if ui.add(Btn::ghost("+  New role").small()).clicked() {
+                    s.new_role = Some(String::new());
+                }
             }
-        });
+            Some(name) => {
+                let edit = text_input(name).hint_text(placeholder("Name, then Enter")).char_limit(MAX_ROLE_NAME_LEN);
+                let field = ui.add(edit);
+                if field.lost_focus() {
+                    // Enter adds it; Escape or clicking away puts the field away.
+                    let name = std::mem::take(name).trim().to_owned();
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !name.is_empty() {
+                        change(send, RoleChange::Create { name });
+                    }
+                    s.new_role = None;
+                } else if !field.has_focus() {
+                    field.request_focus();
+                }
+            }
+        }
     }
 }
 
@@ -132,7 +160,8 @@ fn role_details(
 ) {
     let below = |role: RoleId| mine > roles.height(role);
     let change = |send: &mut Vec<C2S>, change| send.push(C2S::ChangeRoles(change));
-    egui::ScrollArea::vertical().max_height(440.0).auto_shrink([false, true]).show(ui, |ui| match s.picked {
+    let height = ui.available_height();
+    egui::ScrollArea::vertical().max_height(height).auto_shrink([false, true]).show(ui, |ui| match s.picked {
         Pick::Owner => {
             hint(
                 ui,
@@ -141,7 +170,7 @@ fn role_details(
             );
         }
         Pick::Everyone => {
-            hint(ui, "Everyone has this role, below all the others.");
+            hint(ui, "Everyone has this role. It's the baseline for all the others.");
             section(ui, "Permissions");
             perm_switches(ui, roles.everyone, below(RoleId::EVERYONE), |perms| {
                 change(send, RoleChange::SetPermissions { id: RoleId::EVERYONE, perms });
@@ -150,19 +179,17 @@ fn role_details(
         Pick::Role(id) => {
             let role = roles.role(id).expect("checked above");
             let editable = below(id);
-            field_label(ui, "Name");
             let name_id = egui::Id::unique(("role-name", id));
             if !ui.memory(|m| m.has_focus(name_id)) {
                 s.name_draft.clone_from(&role.name);
             }
-            let field =
-                ui.add_enabled(editable, text_input(&mut s.name_draft).id(name_id).char_limit(MAX_ROLE_NAME_LEN));
+            let edit = text_input(&mut s.name_draft).id(name_id).char_limit(MAX_ROLE_NAME_LEN);
+            let field = ui.add_enabled_ui(editable, |ui| field(ui, "Name", edit)).inner;
             let name = s.name_draft.trim();
             if field.lost_focus() && !name.is_empty() && name != role.name {
                 change(send, RoleChange::Rename { id, name: name.to_owned() });
             }
             if id == RoleId::MODERATOR {
-                ui.add_space(4.0);
                 hint(ui, "Channel moderators and owners of temporary channels also hold it, where they moderate.");
             }
             section(ui, "Permissions");
@@ -176,14 +203,16 @@ fn role_details(
             }
             for (identity, member) in holders {
                 ui.horizontal(|ui| {
-                    ui.set_min_height(28.0);
+                    ui.set_min_height(32.0);
+                    let (rect, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+                    paint_avatar(ui.painter(), rect.center(), 10.0, &member.nickname);
                     ui.label(RichText::new(&member.nickname).color(theme::TEXT));
                     if !view.clients.values().any(|c| c.identity == *identity) {
                         ui.label(RichText::new("offline").size(11.5).color(theme::TEXT_FAINT));
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let may = editable && mine > roles.rank(*identity);
-                        if ui.add_enabled(may, Btn::secondary("Remove").small()).clicked() {
+                        if ui.add_enabled(may, Btn::ghost("Remove").small()).clicked() {
                             change(send, RoleChange::Assign { identity: *identity, role: id, held: false });
                         }
                     });
@@ -199,33 +228,7 @@ fn role_details(
     });
 }
 
-fn role_row(ui: &mut egui::Ui, name: &str, note: &str, picked: bool, draggable: bool) -> egui::Response {
-    let sense = if draggable { Sense::click_and_drag() } else { Sense::click() };
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), sense);
-    let p = ui.painter();
-    let fill = if picked {
-        theme::SURFACE_ACTIVE
-    } else if resp.hovered() {
-        theme::SURFACE_HOVER
-    } else {
-        Color32::TRANSPARENT
-    };
-    p.rect_filled(rect, CornerRadius::same(6), fill);
-    let color = if picked { theme::TEXT } else { theme::TEXT_DIM };
-    p.text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, name, FontId::proportional(13.5), color);
-    p.text(
-        rect.right_center() - vec2(10.0, 0.0),
-        Align2::RIGHT_CENTER,
-        note,
-        FontId::proportional(11.5),
-        theme::TEXT_FAINT,
-    );
-    if resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
+/// A switch per permission, in two columns.
 fn perm_switches(ui: &mut egui::Ui, perms: Perms, enabled: bool, mut changed: impl FnMut(Perms)) {
     ui.add_enabled_ui(enabled, |ui| {
         ui.columns(2, |columns| {
@@ -261,40 +264,51 @@ pub(super) fn perm_label(perm: Perm) -> &'static str {
     }
 }
 
-/// One ban in the ban list. Returns whether Unban was clicked.
-fn ban_card(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
-    let local = |secs: u64| {
+/// One ban in the ban list: who, until when, why, and who banned them.
+/// Returns whether Unban was clicked.
+fn ban_row(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
+    let local = |secs: u64, format: &str| {
         chrono::DateTime::from_timestamp(secs as i64, 0)
-            .map_or_default(|t| t.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string())
+            .map_or_default(|t| t.with_timezone(&chrono::Local).format(format).to_string())
     };
-    let mut details = vec![ban.identity.to_string(), format!("by {} on {}", ban.banned_by, local(ban.created_unix))];
-    details.push(match ban.expires_unix {
-        Some(end) => format!("until {}", local(end)),
-        None => "permanent".into(),
-    });
-    if let Some(ip) = ban.ip {
-        details.push(format!("IP {ip}"));
+    let mut length = match ban.expires_unix {
+        Some(end) => format!("until {}", local(end, "%b %-d, %H:%M")),
+        None => "permanent".to_owned(),
+    };
+    if ban.ip.is_some() {
+        length.push_str(" · IP too");
     }
+    let by = format!(" · by {} on {}", ban.banned_by, local(ban.created_unix, "%b %-d"));
     let mut unban = false;
-    egui::Frame::new()
-        .fill(theme::SURFACE)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(12, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 3.0;
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&ban.nickname).strong().color(theme::TEXT));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    unban = ui.add(Btn::secondary("Unban").small()).clicked();
-                });
+    egui::Frame::new().inner_margin(Margin::symmetric(12, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+            paint_avatar(ui.painter(), rect.center(), 14.0, &ban.nickname);
+            let who = ui.vertical(|ui| {
+                ui.set_width(ui.available_width() - 80.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let text =
+                    |size, color| TextFormat { font_id: FontId::proportional(size), color, ..Default::default() };
+                let mut first = LayoutJob::default();
+                first.append(&ban.nickname, 0.0, text(13.5, theme::TEXT));
+                first.append(&format!("  · {length}"), 0.0, text(11.5, theme::TEXT_FAINT));
+                ui.label(first);
+                let mut second = LayoutJob::default();
+                match ban.reason.as_str() {
+                    "" => second.append("No reason given", 0.0, text(12.0, theme::TEXT_FAINT)),
+                    reason => second.append(reason, 0.0, text(12.0, theme::TEXT_DIM)),
+                }
+                second.append(&by, 0.0, text(12.0, theme::TEXT_DIM));
+                ui.label(second);
             });
-            ui.label(RichText::new(details.join(" · ")).size(12.0).color(theme::TEXT_FAINT));
-            if !ban.reason.is_empty() {
-                ui.label(RichText::new(&ban.reason).size(13.0).color(theme::TEXT_DIM));
-            }
+            who.response.on_hover_text(format!("Identity {}", ban.identity));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                unban = ui.add(Btn::secondary("Unban").small()).clicked();
+            });
         });
+    });
     unban
 }
 
@@ -307,7 +321,7 @@ impl App {
         }
         let picked = Pick::Role(RoleId::MODERATOR);
         self.server_settings =
-            Some(ServerSettings { tab, bans: None, picked, name_draft: String::new(), new_role: String::new() });
+            Some(ServerSettings { tab, bans: None, picked, name_draft: String::new(), new_role: None });
     }
 
     pub(super) fn server_settings_dialog(&mut self, ctx: &egui::Context) {
@@ -330,27 +344,35 @@ impl App {
         }
         let mut send = Vec::new();
         let mut done = false;
+        // A short window keeps the title and Done on screen and scrolls the rest.
+        let body_h = (ctx.content_rect().height() - 170.0).clamp(160.0, BODY_H);
         let modal = theme::modal("server-settings").show(ctx, |ui| {
             ui.set_width(720.0);
-            dialog_header(ui, "Server settings", "");
-            if tabs.len() > 1 {
-                theme::segmented(ui, &mut settings.tab, &tabs);
-                ui.add_space(14.0);
-            }
-            match (settings.tab, &view.roles) {
-                (SettingsTab::Roles, Some(roles)) => roles_tab(ui, view, roles, settings, &mut send),
-                (SettingsTab::Roles, None) => {
-                    ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Server settings").size(17.0).strong().color(theme::TEXT));
+                if tabs.len() > 1 {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        theme::segmented(ui, &mut settings.tab, &tabs);
+                    });
                 }
-                (SettingsTab::Bans, _) => bans_tab(ui, settings.bans.as_deref(), &mut send),
-            }
+            });
+            ui.add_space(16.0);
+            // With both tabs, each is as tall as the other, so switching doesn't resize the dialog.
+            let min_h = if tabs.len() > 1 { body_h } else { 0.0 };
+            let size = vec2(ui.available_width(), body_h);
+            ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+                ui.set_min_height(min_h);
+                match (settings.tab, &view.roles) {
+                    (SettingsTab::Roles, Some(roles)) => roles_tab(ui, view, roles, settings, &mut send),
+                    (SettingsTab::Roles, None) => {
+                        ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
+                    }
+                    (SettingsTab::Bans, _) => bans_tab(ui, settings.bans.as_deref(), &mut send),
+                }
+            });
             ui.add_space(18.0);
-            // Top-aligned: a centered row would keep the height the
-            // scroll area took on the frame the list arrived.
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                if ui.add(Btn::primary("Done")).clicked() {
-                    done = true;
-                }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                done = ui.add(Btn::primary("Done")).clicked();
             });
         });
         for msg in send {

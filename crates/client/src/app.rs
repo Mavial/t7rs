@@ -312,7 +312,7 @@ impl App {
         self.poke_dialog(&ctx);
         self.moderation_dialog(&ctx);
         self.server_settings_dialog(&ctx);
-        self.poke_alert(&ctx);
+        self.poke_card(&ctx);
         self.channel_dialog(&ctx);
         self.cert_change_dialog(&ctx);
     }
