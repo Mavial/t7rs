@@ -351,23 +351,22 @@ impl App {
         if sharers.is_empty() {
             return;
         }
-        let watched = self.watching.as_ref().map(|w| w.sharer);
         let mut picked = None;
         let frame = egui::Frame::new().inner_margin(Margin { left: 20, right: 12, top: 6, bottom: 6 });
         egui::Panel::top("live").frame(frame).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for (id, name) in &sharers {
-                let watching = watched == Some(*id);
+                let watching = self.watching.iter().any(|w| w.sharer == *id);
                 let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
                 let p = ui.painter();
                 let y = rect.center().y;
                 paint_avatar(p, egui::pos2(rect.left() + 11.0, y), 11.0, name);
                 let mut x = rect.left() + 32.0;
                 if !watching {
-                    x = sharing::live_badge(p, egui::pos2(x, y)).right() + 8.0;
+                    x = sharing::live_badge(p, egui::pos2(x, y), false).right() + 8.0;
                 }
                 let (before, after) = if watching {
-                    ("You're watching ", " in its own window")
+                    ("You're watching ", " in the Screens window")
                 } else {
                     ("", " is sharing their screen")
                 };
@@ -391,7 +390,7 @@ impl App {
             }
         });
         match picked {
-            Some((_, true)) => self.stop_watching(),
+            Some((id, true)) => self.stop_watching(id),
             Some((id, false)) => self.watch(id),
             None => {}
         }

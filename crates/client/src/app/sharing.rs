@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use egui::{Align2, Color32, CornerRadius, FontId, PopupCloseBehavior, RectAlign, RichText, Sense, vec2};
 use t7_proto::model::ServerView;
-use t7_proto::{C2S, ClientId, Speech};
+use t7_proto::{C2S, ClientId, MAX_WATCHED, Speech};
 
 use super::chat::LineKind;
 use super::widgets::{icon_button, mic_held, toggle};
@@ -10,7 +10,7 @@ use super::{App, Conn};
 use crate::icons::Icon;
 use crate::screen::{Quality, Share, Source, SourceInfo};
 use crate::theme;
-use crate::watch::{self, Frames};
+use crate::watch::{self, Frames, Stream};
 
 const QUALITIES: [(Quality, &str); 3] =
     [(Quality::P720_30, "720p 30"), (Quality::P1080_30, "1080p 30"), (Quality::P1080_60, "1080p 60")];
@@ -50,28 +50,43 @@ fn cannot_share(app: &App) -> Option<&'static str> {
 }
 
 impl App {
-    pub fn watching(&self) -> Option<(&Arc<Frames>, String)> {
-        let watching = self.watching.as_ref()?;
-        let name = self.view.as_ref().and_then(|v| v.nickname(watching.sharer)).unwrap_or("Someone");
-        Some((&watching.frames, format!("{name}'s screen — T7")))
+    /// The screens watched, in the order started, for the Screens window.
+    pub fn screens(&self) -> Vec<Stream> {
+        let name = |id| self.view.as_ref().and_then(|v| v.nickname(id)).unwrap_or("Someone").to_owned();
+        self.watching
+            .iter()
+            .map(|w| Stream { sharer: w.sharer, name: name(w.sharer), frames: w.frames.clone() })
+            .collect()
     }
 
-    pub fn stop_watching(&mut self) {
-        if self.watching.take().is_some() {
-            self.net.watch(None);
+    pub fn stop_watching(&mut self, sharer: ClientId) {
+        if let Some(i) = self.watching.iter().position(|w| w.sharer == sharer) {
+            self.watching.remove(i);
+            self.net.unwatch(sharer);
+        }
+    }
+
+    pub fn stop_watching_all(&mut self) {
+        for w in std::mem::take(&mut self.watching) {
+            self.net.unwatch(w.sharer);
         }
     }
 
     pub(super) fn watch(&mut self, sharer: ClientId) {
         let Some(view) = &self.view else { return };
-        if sharer == view.my_id || self.watching.as_ref().is_some_and(|w| w.sharer == sharer) {
+        if sharer == view.my_id || self.watching.iter().any(|w| w.sharer == sharer) {
             return;
         }
         let name = view.nickname(sharer).unwrap_or("Someone").to_owned();
+        if self.watching.len() >= MAX_WATCHED {
+            let tab = self.active_tab;
+            let line = format!("You can watch {MAX_WATCHED} screens at once. Close one to watch {name}'s.");
+            return self.push(tab, LineKind::System, line);
+        }
         match watch::start(self.screen_wake.clone()) {
             Ok((frames, sink)) => {
-                self.net.watch(Some((sharer, sink)));
-                self.watching = Some(Watching { sharer, frames });
+                self.net.watch(sharer, sink);
+                self.watching.push(Watching { sharer, frames });
             }
             Err(e) => {
                 let tab = self.active_tab;
@@ -125,11 +140,13 @@ impl App {
                 self.stop_sharing();
             }
         }
-        let still_there =
-            |v: &ServerView, id| v.clients.get(&id).is_some_and(|c| c.sharing && Some(c.channel) == v.my_channel());
-        let watched = self.watching.as_ref().map(|w| w.sharer);
-        if watched.is_some_and(|id| !self.view.as_ref().is_some_and(|v| still_there(v, id))) {
-            self.stop_watching();
+        let still_there = |id| {
+            let v = self.view.as_ref();
+            v.is_some_and(|v| v.clients.get(&id).is_some_and(|c| c.sharing && Some(c.channel) == v.my_channel()))
+        };
+        let gone: Vec<ClientId> = self.watching.iter().map(|w| w.sharer).filter(|&id| !still_there(id)).collect();
+        for sharer in gone {
+            self.stop_watching(sharer);
         }
     }
 
@@ -180,11 +197,17 @@ impl App {
     }
 }
 
-pub(super) fn live_badge(p: &egui::Painter, at: egui::Pos2) -> egui::Rect {
-    let galley = p.layout_no_wrap("LIVE".into(), FontId::proportional(9.5), Color32::WHITE);
+/// LIVE in white on red, or WATCHING in red outline once you watch it.
+pub(super) fn live_badge(p: &egui::Painter, at: egui::Pos2, watching: bool) -> egui::Rect {
+    let (text, color) = if watching { ("WATCHING", theme::RED) } else { ("LIVE", Color32::WHITE) };
+    let galley = p.layout_no_wrap(text.into(), FontId::proportional(9.5), color);
     let rect = egui::Rect::from_min_size(at - vec2(0.0, 7.0), vec2(galley.size().x + 8.0, 14.0));
-    p.rect_filled(rect, CornerRadius::same(3), theme::RED);
-    p.galley(Align2::CENTER_CENTER.anchor_size(rect.center(), galley.size()).min, galley, Color32::WHITE);
+    if watching {
+        p.rect_stroke(rect, CornerRadius::same(3), egui::Stroke::new(1.0, theme::RED), egui::StrokeKind::Inside);
+    } else {
+        p.rect_filled(rect, CornerRadius::same(3), theme::RED);
+    }
+    p.galley(Align2::CENTER_CENTER.anchor_size(rect.center(), galley.size()).min, galley, color);
     rect
 }
 

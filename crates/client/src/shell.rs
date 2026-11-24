@@ -122,15 +122,15 @@ impl Shell {
     }
 
     fn sync_screen(&mut self, event_loop: &ActiveEventLoop) {
-        let wanted = self.app.watching().map(|(frames, title)| (frames.clone(), title));
-        match (wanted, &mut self.screen) {
-            (None, screen) => *screen = None,
-            (Some((frames, title)), Some(screen)) => screen.show(&frames, &title),
-            (Some((frames, title)), screen @ None) => match watch::Window::open(event_loop, frames, title) {
-                Ok(window) => *screen = Some(window),
+        let streams = self.app.screens();
+        match &mut self.screen {
+            _ if streams.is_empty() => self.screen = None,
+            Some(screen) => screen.show(streams),
+            None => match watch::Window::open(event_loop, streams) {
+                Ok(window) => self.screen = Some(window),
                 Err(e) => {
-                    tracing::error!("cannot open the screen window: {e}");
-                    self.app.stop_watching();
+                    tracing::error!("cannot open the screens window: {e}");
+                    self.app.stop_watching_all();
                 }
             },
         }
@@ -179,10 +179,16 @@ impl ApplicationHandler<Wake> for Shell {
         self.gfx = Some(Gfx { window, surface, input, renderer });
     }
 
-    fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
-        if let StartCause::ResumeTimeReached { .. } = cause {
+    // Checked on every wakeup, not only when the wait ran out: frames from a
+    // watched screen can keep the loop busy past the deadline.
+    fn new_events(&mut self, _: &ActiveEventLoop, _: StartCause) {
+        let now = Instant::now();
+        if self.next_repaint.is_some_and(|at| at <= now) {
             self.next_repaint = None;
             self.schedule(Duration::ZERO);
+        }
+        if let Some(screen) = &mut self.screen {
+            screen.tick(now);
         }
     }
 
@@ -201,12 +207,16 @@ impl ApplicationHandler<Wake> for Shell {
         if let Some(screen) = &mut self.screen
             && screen.id() == id
         {
-            if screen.event(&event) {
-                self.screen = None;
-                self.app.stop_watching();
-                self.schedule(Duration::ZERO);
+            match screen.event(&event) {
+                Some(watch::Action::Close) => {
+                    self.screen = None;
+                    self.app.stop_watching_all();
+                }
+                Some(watch::Action::Stop(sharer)) => self.app.stop_watching(sharer),
+                None => return,
             }
-            return;
+            // The tree shows who is watched.
+            return self.schedule(Duration::ZERO);
         }
         let Some(g) = self.gfx.as_mut().filter(|g| g.window.id() == id) else { return };
         let response = g.input.on_window_event(&g.window, &event);
@@ -234,7 +244,8 @@ impl ApplicationHandler<Wake> for Shell {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(match self.next_repaint {
+        let screen = self.screen.as_ref().and_then(watch::Window::wake_at);
+        event_loop.set_control_flow(match self.next_repaint.into_iter().chain(screen).min() {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });

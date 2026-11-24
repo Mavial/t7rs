@@ -45,7 +45,7 @@ enum TreeAction {
     MoveMember { target: ClientId, channel: ChannelId },
     Fold(String),
     Watch(ClientId),
-    StopWatching,
+    StopWatching(ClientId),
 }
 
 /// Payload while dragging yourself onto another channel.
@@ -88,7 +88,7 @@ struct Tree<'a> {
     me_talking: bool,
     dragging: Dragging,
     pointer: Option<egui::Pos2>,
-    watched: Option<ClientId>,
+    watched: &'a [sharing::Watching],
     picked: Option<TreeAction>,
 }
 
@@ -122,6 +122,7 @@ struct MemberRow<'a> {
     owns_room: bool,
     volume: f32,
     watchable: bool,
+    watched: bool,
 }
 
 impl App {
@@ -142,7 +143,7 @@ impl App {
             me_talking: self.voice.shared.transmitting(),
             dragging: Dragging::of(ui.ctx()),
             pointer: ui.input(|i| i.pointer.interact_pos()),
-            watched: self.watching.as_ref().map(|w| w.sharer),
+            watched: &self.watching,
             picked: None,
         };
         if let Some(action) = tree.show(ui).filter(|_| !lost) {
@@ -176,7 +177,7 @@ impl App {
             TreeAction::Fold(name) => self.toggle_folded(name),
             TreeAction::MoveMember { target, channel } => self.net.send(C2S::MoveMember { target, channel }),
             TreeAction::Watch(sharer) => self.watch(sharer),
-            TreeAction::StopWatching => self.stop_watching(),
+            TreeAction::StopWatching(sharer) => self.stop_watching(sharer),
         }
     }
 
@@ -439,10 +440,11 @@ impl<'a> Tree<'a> {
             owns_room: row.ch.temporary && row.ch.owner == Some(c.id),
             volume: self.volumes.get(&c.nickname).copied().unwrap_or(1.0),
             watchable: c.sharing && !is_me && view.my_channel() == Some(c.channel),
+            watched: self.watched.iter().any(|w| w.sharer == c.id),
         };
         if let Some(live) = member.paint(&painter, rect, row.indent()) {
             let id = ui.scope_id().with(("live", c.id));
-            if sharing::live_badge_clicked(ui, live, id, &member.live_tip(), member.watchable) {
+            if sharing::live_badge_clicked(ui, live, id, &member.live_tip(), member.watchable && !member.watched) {
                 self.picked = Some(TreeAction::Watch(c.id));
             }
         }
@@ -477,8 +479,8 @@ impl<'a> Tree<'a> {
         let (view, c) = (self.view, member.c);
         self.volume_control(ui, c, member.volume);
         menu_separator(ui);
-        if member.watchable && self.watched == Some(c.id) {
-            self.entry(ui, Item::new(Icon::ScreenStop, "Stop watching"), TreeAction::StopWatching);
+        if member.watchable && member.watched {
+            self.entry(ui, Item::new(Icon::ScreenStop, "Stop watching"), TreeAction::StopWatching(c.id));
         } else if member.watchable {
             self.entry(ui, Item::new(Icon::Screen, "Watch screen"), TreeAction::Watch(c.id));
         }
@@ -731,7 +733,7 @@ impl MemberRow<'_> {
             icons::paint(p, r, icon, color);
             name_end += 16.0;
         }
-        let live = c.sharing.then(|| sharing::live_badge(p, egui::pos2(name_end + 6.0, rect.center().y)));
+        let live = c.sharing.then(|| sharing::live_badge(p, egui::pos2(name_end + 6.0, rect.center().y), self.watched));
         if let Some(live) = live {
             name_end = live.right();
         }
@@ -772,6 +774,8 @@ impl MemberRow<'_> {
     fn live_tip(&self) -> String {
         if self.is_me {
             "You're sharing your screen".to_owned()
+        } else if self.watched {
+            format!("You're watching {}'s screen. Right-click to stop", self.c.nickname)
         } else if self.watchable {
             format!("Watch {}'s screen", self.c.nickname)
         } else {

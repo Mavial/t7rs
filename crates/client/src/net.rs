@@ -5,6 +5,7 @@
 //! Each session has a TLS control connection and, once welcomed, a UDP voice
 //! link to the same server address.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
@@ -82,7 +83,7 @@ pub enum Ended {
 
 pub type VideoSink = Arc<dyn Fn(AccessUnit) + Send + Sync>;
 
-/// Takes each decodable frame of the screen watched, in order, on the
+/// Takes each decodable frame of one screen watched, in order, on the
 /// network thread: keep it quick. Returning false says it could not take the
 /// frame: the screen then waits for its next keyframe, which the net layer
 /// asks for, as it does after a lost frame.
@@ -152,35 +153,43 @@ impl Net {
         })
     }
 
-    pub fn watch(&self, watch: Option<(ClientId, ScreenSink)>) {
-        let sharer = watch.as_ref().map(|(sharer, _)| *sharer);
-        let watched = watch.map(|(sharer, sink)| Watched::new(sharer, sink, Instant::now()));
-        self.viewer.lock().unwrap().watched = watched;
-        self.send(C2S::Watch(sharer));
+    /// Starts watching `sharer`'s screen: their frames go to `sink`.
+    pub fn watch(&self, sharer: ClientId, sink: ScreenSink) {
+        self.viewer.lock().unwrap().watched.insert(sharer, Watched::new(sink, Instant::now()));
+        self.send(C2S::Watch { sharer, on: true });
+    }
+
+    pub fn unwatch(&self, sharer: ClientId) {
+        self.viewer.lock().unwrap().watched.remove(&sharer);
+        self.send(C2S::Watch { sharer, on: false });
     }
 }
 
+/// The screens watched, by sharer.
 #[derive(Default)]
 struct Viewer {
-    watched: Option<Watched>,
+    watched: BTreeMap<ClientId, Watched>,
 }
 
 struct Watched {
-    sharer: ClientId,
     sink: ScreenSink,
     assembler: Assembler,
     next_ask: Instant,
 }
 
 impl Watched {
-    fn new(sharer: ClientId, sink: ScreenSink, watch_sent: Instant) -> Watched {
-        Watched { sharer, sink, assembler: Assembler::default(), next_ask: watch_sent + voice::KEYFRAME_INTERVAL }
+    fn new(sink: ScreenSink, watch_sent: Instant) -> Watched {
+        Watched { sink, assembler: Assembler::default(), next_ask: watch_sent + voice::KEYFRAME_INTERVAL }
+    }
+
+    fn keyframe_due(&self) -> Option<Instant> {
+        self.assembler.waiting_for_keyframe().then_some(self.next_ask)
     }
 }
 
 impl Viewer {
     fn push(&mut self, from: ClientId, part: VideoPart<'_>) {
-        let Some(w) = self.watched.as_mut().filter(|w| w.sharer == from) else { return };
+        let Some(w) = self.watched.get_mut(&from) else { return };
         if let Some(Assembled::Frame(au)) = w.assembler.push(part)
             && !(w.sink)(au)
         {
@@ -188,24 +197,23 @@ impl Viewer {
         }
     }
 
+    /// When the next keyframe ask is due, for any screen.
     fn keyframe_due(&self) -> Option<Instant> {
-        let w = self.watched.as_ref()?;
-        w.assembler.waiting_for_keyframe().then_some(w.next_ask)
+        self.watched.values().filter_map(Watched::keyframe_due).min()
     }
 
-    fn ask(&mut self, now: Instant) -> Option<ClientId> {
-        if now < self.keyframe_due()? {
-            return None;
-        }
-        let w = self.watched.as_mut()?;
-        w.next_ask = now + voice::KEYFRAME_INTERVAL;
-        Some(w.sharer)
+    /// The sharers to ask for a keyframe now.
+    fn ask(&mut self, now: Instant) -> Vec<ClientId> {
+        let due = self.watched.iter_mut().filter(|(_, w)| w.keyframe_due().is_some_and(|at| at <= now));
+        due.map(|(&sharer, w)| {
+            w.next_ask = now + voice::KEYFRAME_INTERVAL;
+            sharer
+        })
+        .collect()
     }
 
     fn share_ended(&mut self, sharer: ClientId) {
-        if self.watched.as_ref().is_some_and(|w| w.sharer == sharer) {
-            self.watched = None;
-        }
+        self.watched.remove(&sharer);
     }
 }
 
@@ -275,7 +283,7 @@ async fn run_session(
 ) {
     let ended = session(id, attempt, outgoing, &events, &playback, &viewer).await;
     playback.clear();
-    viewer.lock().unwrap().watched = None;
+    viewer.lock().unwrap().watched.clear();
     events.emit(NetEvent::Closed(id, ended));
 }
 
@@ -451,9 +459,11 @@ async fn session(
                 }
             }
             () = keyframe_due => {
-                let ask = viewer.lock().unwrap().ask(Instant::now());
-                if let Some(from) = ask && let Err(e) = write_frame(&mut writer, &C2S::NeedKeyframe { from }).await {
-                    return Ended::Failed(format!("Connection lost: {e}"));
+                let due = viewer.lock().unwrap().ask(Instant::now());
+                for from in due {
+                    if let Err(e) = write_frame(&mut writer, &C2S::NeedKeyframe { from }).await {
+                        return Ended::Failed(format!("Connection lost: {e}"));
+                    }
                 }
             }
             () = video_due => {
@@ -539,11 +549,13 @@ mod tests {
         assert_ne!(ServerKey::of("example.com:9989"), ServerKey::of("example.com:9988"));
     }
 
+    const NOBODY: [ClientId; 0] = [];
+
     fn au(frame: u32, key: bool) -> AccessUnit {
         AccessUnit { frame, key, data: vec![1] }
     }
 
-    fn watching(at: Instant, take: fn(u32) -> bool) -> (Viewer, Arc<Mutex<Vec<u32>>>) {
+    fn sink(take: fn(u32) -> bool) -> (ScreenSink, Arc<Mutex<Vec<u32>>>) {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink_got = got.clone();
         let sink: ScreenSink = Box::new(move |au| {
@@ -553,7 +565,12 @@ mod tests {
             }
             taken
         });
-        (Viewer { watched: Some(Watched::new(1, sink, at)) }, got)
+        (sink, got)
+    }
+
+    fn watching(at: Instant, take: fn(u32) -> bool) -> (Viewer, Arc<Mutex<Vec<u32>>>) {
+        let (sink, got) = sink(take);
+        (Viewer { watched: BTreeMap::from([(1, Watched::new(sink, at))]) }, got)
     }
 
     fn push(viewer: &mut Viewer, from: ClientId, au: &AccessUnit) {
@@ -566,16 +583,16 @@ mod tests {
         let after = |interval: u32, ms: u64| start + voice::KEYFRAME_INTERVAL * interval + Duration::from_millis(ms);
         let (mut viewer, got) = watching(start, |_| true);
         assert_eq!(viewer.keyframe_due(), Some(after(1, 0)), "starting to watch asked");
-        assert_eq!(viewer.ask(after(0, 249)), None);
-        assert_eq!(viewer.ask(after(1, 0)), Some(1), "a still screen sends nothing: ask again");
-        assert_eq!(viewer.ask(after(1, 1)), None, "asked just now");
-        assert_eq!(viewer.ask(after(2, 3)), Some(1), "that keyframe was lost");
+        assert_eq!(viewer.ask(after(0, 249)), NOBODY);
+        assert_eq!(viewer.ask(after(1, 0)), [1], "a still screen sends nothing: ask again");
+        assert_eq!(viewer.ask(after(1, 1)), NOBODY, "asked just now");
+        assert_eq!(viewer.ask(after(2, 3)), [1], "that keyframe was lost");
 
         push(&mut viewer, 2, &au(0, true));
         assert_eq!(viewer.keyframe_due(), Some(after(3, 3)), "from someone else: still waiting");
         push(&mut viewer, 1, &au(5, true));
         assert_eq!(viewer.keyframe_due(), None, "no timer once a keyframe came");
-        assert_eq!(viewer.ask(after(9, 0)), None);
+        assert_eq!(viewer.ask(after(9, 0)), NOBODY);
         assert_eq!(*got.lock().unwrap(), [5]);
     }
 
@@ -587,10 +604,10 @@ mod tests {
         push(&mut viewer, 1, &au(0, true));
         push(&mut viewer, 1, &au(2, false));
         assert_eq!(viewer.keyframe_due(), Some(after(1, 0)), "frame 1 is lost, but the watch asked just now");
-        assert_eq!(viewer.ask(after(3, 0)), Some(1), "due since long ago: ask at once");
+        assert_eq!(viewer.ask(after(3, 0)), [1], "due since long ago: ask at once");
         push(&mut viewer, 1, &au(3, false));
-        assert_eq!(viewer.ask(after(3, 100)), None, "asked 100 ms ago");
-        assert_eq!(viewer.ask(after(4, 0)), Some(1));
+        assert_eq!(viewer.ask(after(3, 100)), NOBODY, "asked 100 ms ago");
+        assert_eq!(viewer.ask(after(4, 0)), [1]);
         push(&mut viewer, 1, &au(4, true));
         push(&mut viewer, 1, &au(5, false));
         assert_eq!(viewer.keyframe_due(), None);
@@ -616,5 +633,34 @@ mod tests {
         push(&mut viewer, 1, &au(4, false));
         assert_eq!(viewer.keyframe_due(), None);
         assert_eq!(*got.lock().unwrap(), [0, 3, 4]);
+    }
+
+    #[test]
+    fn each_screen_watched_asks_for_its_own_keyframes() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut viewer = Viewer::default();
+        let (sink_1, got_1) = sink(|_| true);
+        let (sink_2, got_2) = sink(|_| true);
+        viewer.watched.insert(1, Watched::new(sink_1, at(0)));
+        viewer.watched.insert(2, Watched::new(sink_2, at(100)));
+        assert_eq!(viewer.keyframe_due(), Some(at(250)), "the first watch asks first");
+        assert_eq!(viewer.ask(at(250)), [1]);
+        assert_eq!(viewer.ask(at(350)), [2]);
+        assert_eq!(viewer.ask(at(600)), [1, 2], "both still waiting");
+
+        push(&mut viewer, 1, &au(0, true));
+        push(&mut viewer, 2, &au(4, false));
+        assert_eq!(viewer.ask(at(900)), [2], "only the screen without a keyframe");
+        push(&mut viewer, 2, &au(5, true));
+        assert_eq!(viewer.keyframe_due(), None);
+        assert_eq!(*got_1.lock().unwrap(), [0]);
+        assert_eq!(*got_2.lock().unwrap(), [5]);
+
+        push(&mut viewer, 1, &au(2, false));
+        viewer.share_ended(1);
+        assert_eq!(viewer.keyframe_due(), None, "the screen that lost a frame stopped sharing");
+        push(&mut viewer, 2, &au(6, false));
+        assert_eq!(*got_2.lock().unwrap(), [5, 6], "the other screen plays on");
     }
 }
