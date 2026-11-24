@@ -216,7 +216,8 @@ impl ApplicationHandler<Wake> for Shell {
             }
             return;
         }
-        let Some(g) = &mut self.gfx else { return };
+        // A closed screen window's last events, such as losing focus, are not the main window's.
+        let Some(g) = self.gfx.as_mut().filter(|g| g.window.id() == id) else { return };
         let response = g.input.on_window_event(&g.window, &event);
         match event {
             WindowEvent::CloseRequested => {

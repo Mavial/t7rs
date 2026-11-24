@@ -118,7 +118,7 @@ impl App {
             if sharing.share.ended() {
                 self.stop_sharing();
                 let tab = self.active_tab;
-                self.push(tab, LineKind::System, "Stopped sharing: what you shared is gone");
+                self.push(tab, LineKind::System, "Stopped sharing: the shared window or screen is gone");
             } else if shared.is_none() || (sharing.confirmed && shared == Some(false)) {
                 // Disconnected, or the server stopped it because we changed channels.
                 self.stop_sharing();
