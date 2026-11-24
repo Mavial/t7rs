@@ -1,9 +1,10 @@
 //! Screen sharing end to end on one machine: capture, encode, decode, show.
 //!
-//!     cargo run --release --example screenloop -- [SECONDS] [--monitor N] [--quality 720p30|1080p30|1080p60] [--at X,Y]
+//!     cargo run --release --example screenloop -- [SECONDS] [--monitor N | --window TITLE] [--quality 720p30|1080p30|1080p60] [--at X,Y]
 //!     cargo run --release --example screenloop -- --decode-bench [SECONDS]
 //!
-//! The loop shares monitor N (0 is the primary) and shows what a viewer
+//! The loop shares monitor N (0 is the primary), or the first window whose
+//! title contains TITLE, and shows what a viewer
 //! would see in a window (`--at` places it, e.g. on another monitor), with a
 //! forced keyframe every 5 s. Each second it prints the capture rate, the
 //! bitrate, encode latency (frame on screen to access unit out), decode
@@ -31,6 +32,7 @@ use winit::window::{Window, WindowId};
 struct Args {
     seconds: u64,
     monitor: usize,
+    window: Option<String>,
     quality: Quality,
     at: Option<(i32, i32)>,
     decode_bench: bool,
@@ -41,28 +43,37 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let args = parse_args();
-    let monitors: Vec<Source> =
-        screen::sources().into_iter().map(|s| s.source).filter(|s| matches!(s, Source::Monitor(_))).collect();
-    for info in screen::sources() {
+    let sources = screen::sources();
+    for info in &sources {
         println!("source: {}", info.name);
     }
-    let Some(&monitor) = monitors.get(if args.decode_bench { 0 } else { args.monitor }) else {
-        eprintln!("no such monitor (screen sharing may not be supported here)");
+    let mut monitors = sources.iter().filter(|s| matches!(s.source, Source::Monitor(_)));
+    let chosen = match &args.window {
+        Some(title) if !args.decode_bench => {
+            sources.iter().find(|s| matches!(s.source, Source::Window(_)) && s.name.contains(title.as_str()))
+        }
+        _ => monitors.nth(if args.decode_bench { 0 } else { args.monitor }),
+    };
+    let Some(chosen) = chosen else {
+        eprintln!("no such source (screen sharing may not be supported here)");
         std::process::exit(1);
     };
+    println!("sharing: {}", chosen.name);
     if args.decode_bench {
-        decode_bench(monitor, args.seconds);
+        decode_bench(chosen.source, args.seconds);
     } else {
-        share_loop(monitor, &args);
+        share_loop(chosen.source, &args);
     }
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { seconds: 20, monitor: 0, quality: Quality::P1080_60, at: None, decode_bench: false };
+    let mut args =
+        Args { seconds: 20, monitor: 0, window: None, quality: Quality::P1080_60, at: None, decode_bench: false };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--monitor" => args.monitor = it.next().and_then(|n| n.parse().ok()).unwrap_or(0),
+            "--window" => args.window = it.next(),
             "--quality" => {
                 args.quality = match it.next().as_deref() {
                     Some("720p30") => Quality::P720_30,
