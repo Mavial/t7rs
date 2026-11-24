@@ -47,16 +47,29 @@ fn rows(src: &Nv12, out: &mut [u32]) {
     for (row, out) in out.chunks_exact_mut(width).take(src.height).enumerate() {
         let luma = &src.y[row * src.stride..][..width];
         let chroma = &src.uv[row / 2 * src.stride..][..width.next_multiple_of(2)];
-        for ((out, luma), &[cb, cr]) in out.chunks_mut(2).zip(luma.chunks(2)).zip(chroma.as_chunks::<2>().0) {
-            let (cb, cr) = (i32::from(cb) - 128, i32::from(cr) - 128);
-            let (red, green, blue) = (RV * cr, -GU * cb - GV * cr, BU * cb);
-            for (out, &luma) in out.iter_mut().zip(luma) {
-                let base = (i32::from(luma) - 16) * Y + ROUND;
-                let channel = |c: i32| ((base + c) >> SHIFT).clamp(0, 255) as u32;
-                *out = channel(red) << 16 | channel(green) << 8 | channel(blue);
-            }
+        let (chroma, _) = chroma.as_chunks::<2>();
+        let (out_pairs, out_last) = out.as_chunks_mut::<2>();
+        let (luma_pairs, luma_last) = luma.as_chunks::<2>();
+        for ((out, luma), chroma) in out_pairs.iter_mut().zip(luma_pairs).zip(chroma) {
+            let tint = tint(*chroma);
+            *out = [pixel(luma[0], tint), pixel(luma[1], tint)];
+        }
+        if let ([out], [luma], Some(&chroma)) = (out_last, luma_last, chroma.last()) {
+            *out = pixel(*luma, tint(chroma));
         }
     }
+}
+
+/// The red, green and blue offsets one U, V pair adds to its pixels.
+fn tint([cb, cr]: [u8; 2]) -> [i32; 3] {
+    let (cb, cr) = (i32::from(cb) - 128, i32::from(cr) - 128);
+    [RV * cr, -GU * cb - GV * cr, BU * cb]
+}
+
+fn pixel(luma: u8, [red, green, blue]: [i32; 3]) -> u32 {
+    let base = (i32::from(luma) - 16) * Y + ROUND;
+    let channel = |c: i32| ((base + c) >> SHIFT).clamp(0, 255) as u32;
+    channel(red) << 16 | channel(green) << 8 | channel(blue)
 }
 
 #[cfg(test)]
