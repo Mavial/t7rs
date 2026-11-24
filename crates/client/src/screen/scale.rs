@@ -1,8 +1,9 @@
 //! Fits a picture into a window, its aspect ratio kept and black around it.
 //! Shrinking averages every picture pixel a window pixel covers, so thin
 //! text stays readable. Enlarging repeats pixels, which keeps text sharp and
-//! costs little more than a copy. Weights are 8-bit fixed point, and red and
-//! blue are weighed together in one `u32`, 16 bits each.
+//! costs little more than a copy. Weights are 8-bit fixed point, and each
+//! channel is weighed in a 16-bit lane: a row's bytes at once down the
+//! column, and a pixel's four channels in one `u64` along the row.
 
 use super::Picture;
 
@@ -13,10 +14,9 @@ pub struct Scaler {
     sizes: (usize, usize, usize, usize),
     x: Axis,
     y: Axis,
-    /// One picture row, weighed down the column.
-    red_blue: Vec<u32>,
-    green: Vec<u32>,
-    row: Vec<u32>,
+    /// One picture row weighed down the column, a pixel's channels in the
+    /// 16-bit lanes of each `u64`.
+    row: Vec<u64>,
 }
 
 impl Scaler {
@@ -36,8 +36,6 @@ impl Scaler {
             self.sizes = (pw, ph, w, h);
             self.x = Axis::new(pw, w);
             self.y = Axis::new(ph, h);
-            self.red_blue = vec![0; pw];
-            self.green = vec![0; pw];
             self.row = vec![0; pw];
         }
         out[..y0 * width].fill(0);
@@ -72,17 +70,17 @@ impl Scaler {
     fn down_the_column(&mut self, picture: &Picture, i: usize) {
         let pw = picture.width as usize;
         let (start, weights) = self.y.at(i);
-        self.red_blue.fill(0);
-        self.green.fill(0);
+        let lanes: &mut [u16] = bytemuck::cast_slice_mut(&mut self.row);
+        lanes.fill(0);
         for (k, &weight) in weights.iter().enumerate().filter(|(_, w)| **w > 0) {
-            let src = &picture.pixels[(start + k) * pw..][..pw];
-            for ((rb, g), &p) in self.red_blue.iter_mut().zip(&mut self.green).zip(src) {
-                *rb += (p & 0x00FF_00FF) * weight;
-                *g += (p & 0x0000_FF00) * weight;
+            let src: &[u8] = bytemuck::cast_slice(&picture.pixels[(start + k) * pw..][..pw]);
+            let weight = weight as u16;
+            for (lane, &channel) in lanes.iter_mut().zip(src) {
+                *lane += u16::from(channel) * weight;
             }
         }
-        for ((out, &rb), &g) in self.row.iter_mut().zip(&self.red_blue).zip(&self.green) {
-            *out = pack(rb, g);
+        for lane in lanes {
+            *lane = (*lane + 0x80) >> 8;
         }
     }
 
@@ -101,19 +99,20 @@ impl Scaler {
         let taps = if TAPS == 0 { self.x.taps } else { TAPS };
         let weights = self.x.weights.chunks_exact(taps);
         for ((o, &start), weights) in out.iter_mut().zip(&self.x.start).zip(weights) {
-            let (mut rb, mut g) = (0, 0);
+            let mut sum = 0;
             for (&p, &weight) in self.row[start..start + taps].iter().zip(weights) {
-                rb += (p & 0x00FF_00FF) * weight;
-                g += (p & 0x0000_FF00) * weight;
+                sum += p * u64::from(weight);
             }
-            *o = pack(rb, g);
+            *o = pack(sum);
         }
     }
 }
 
-/// Back to one pixel from sums weighed by 256, rounded.
-fn pack(red_blue: u32, green: u32) -> u32 {
-    (((red_blue + 0x0080_0080) >> 8) & 0x00FF_00FF) | (((green + 0x8000) >> 8) & 0x0000_FF00)
+/// One pixel from its four channels weighed by 256 in 16-bit lanes, rounded.
+fn pack(lanes: u64) -> u32 {
+    let lanes = ((lanes + 0x0080_0080_0080_0080) >> 8) & 0x00FF_00FF_00FF_00FF;
+    let bytes = lanes | lanes >> 8;
+    ((bytes & 0xFFFF) | ((bytes >> 16) & 0xFFFF_0000)) as u32
 }
 
 /// Where a `picture`-sized image goes in a `window` of at least 1 × 1: x, y, width, height.
@@ -230,7 +229,7 @@ mod tests {
     #[ignore = "a timing, not a check: cargo test --release -p t7-client scaling_cost -- --ignored --nocapture"]
     fn scaling_cost() {
         let p = picture(1920, 1080, |x, y| (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) & 0x00FF_FFFF);
-        for (w, h) in [(1920, 1080), (1600, 900), (1280, 720), (960, 540), (2560, 1440), (3840, 2160)] {
+        for (w, h) in [(1920, 1080), (1874, 1054), (1600, 900), (1280, 720), (960, 540), (2560, 1440), (3840, 2160)] {
             let mut scaler = Scaler::default();
             let mut out = vec![0; w * h];
             scaler.draw(&p, &mut out, w, h);
