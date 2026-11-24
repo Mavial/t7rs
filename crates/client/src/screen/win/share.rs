@@ -14,7 +14,7 @@ use super::super::{AccessUnit, Handle, Params, ShareStats, Source, annexb, fit};
 use super::capture::{self, Capture};
 use super::convert::{Converter, Gpu};
 use super::encode::Encoder;
-use super::{Running, now_100ns};
+use super::{Running, TICKS_PER_SECOND, now_100ns};
 
 pub enum Wake {
     Frame,
@@ -155,7 +155,7 @@ impl Pipeline {
     fn run(&mut self, wakes: &Receiver<Wake>, shared: &Shared, sink: &mut dyn FnMut(AccessUnit)) -> Result<(), String> {
         let interval = Duration::from_secs(1) / self.fps;
         let early = interval / 4;
-        let duration = 10_000_000 / i64::from(self.fps);
+        let duration = TICKS_PER_SECOND / i64::from(self.fps);
         let mut due = Instant::now();
         let mut credit = 0u32;
         let mut pending: Option<(Direct3D11CaptureFrame, i64)> = None;

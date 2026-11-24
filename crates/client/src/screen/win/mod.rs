@@ -25,6 +25,8 @@ impl<T> Context<T> for windows::core::Result<T> {
     }
 }
 
+const TICKS_PER_SECOND: i64 = 10_000_000;
+
 struct Runtime(CO_MTA_USAGE_COOKIE);
 
 impl Runtime {
@@ -87,5 +89,5 @@ fn now_100ns() -> i64 {
         let _ = QueryPerformanceCounter(&raw mut count);
         let _ = QueryPerformanceFrequency(&raw mut freq);
     }
-    (i128::from(count) * 10_000_000 / i128::from(freq)) as i64
+    (i128::from(count) * i128::from(TICKS_PER_SECOND) / i128::from(freq)) as i64
 }

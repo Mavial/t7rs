@@ -22,8 +22,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, Interface};
 
 use super::super::{Handle, Source, SourceInfo};
-use super::Context;
 use super::share::Wake;
+use super::{Context, TICKS_PER_SECOND};
+
+const MIN_UPDATE_INTERVAL_AT_1_FPS: i64 = TICKS_PER_SECOND * 3 / 4;
 
 pub fn sources() -> Vec<SourceInfo> {
     let mut monitors: Vec<(bool, RECT, HMONITOR)> = Vec::new();
@@ -146,7 +148,7 @@ impl Capture {
         {
             let _ = session.SetIsBorderRequired(false);
         }
-        let _ = session.SetMinUpdateInterval(TimeSpan { Duration: 7_500_000 / i64::from(fps) });
+        let _ = session.SetMinUpdateInterval(TimeSpan { Duration: MIN_UPDATE_INTERVAL_AT_1_FPS / i64::from(fps) });
         session.StartCapture().context("starting capture")?;
         Ok(Capture { session, pool, source, device, size })
     }

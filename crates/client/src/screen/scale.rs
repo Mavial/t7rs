@@ -1,5 +1,8 @@
 use super::Picture;
 
+const WEIGHT_BITS: u32 = 8;
+const WEIGHT_ONE: u32 = 1 << WEIGHT_BITS;
+
 #[derive(Default)]
 pub struct Scaler {
     sizes: (usize, usize, usize, usize),
@@ -67,7 +70,7 @@ impl Scaler {
             }
         }
         for lane in lanes {
-            *lane = (*lane + 0x80) >> 8;
+            *lane = (*lane + (WEIGHT_ONE / 2) as u16) >> WEIGHT_BITS;
         }
     }
 
@@ -94,7 +97,7 @@ impl Scaler {
 }
 
 fn pack(lanes: u64) -> u32 {
-    let lanes = ((lanes + 0x0080_0080_0080_0080) >> 8) & 0x00FF_00FF_00FF_00FF;
+    let lanes = ((lanes + 0x0001_0001_0001_0001 * u64::from(WEIGHT_ONE / 2)) >> WEIGHT_BITS) & 0x00FF_00FF_00FF_00FF;
     let bytes = lanes | lanes >> 8;
     ((bytes & 0xFFFF) | ((bytes >> 16) & 0xFFFF_0000)) as u32
 }
@@ -132,11 +135,11 @@ impl Axis {
             let total: f64 = span.iter().map(|c| c.1).sum();
             let start = span[0].0.min(src - taps);
             for &(j, w) in span {
-                weights[j - start] += (w / total * 256.0).round() as u32;
+                weights[j - start] += (w / total * f64::from(WEIGHT_ONE)).round() as u32;
             }
             let sum: u32 = weights.iter().sum();
             let heaviest = (0..taps).max_by_key(|&k| weights[k]).unwrap_or(0);
-            weights[heaviest] = (weights[heaviest] + 256).saturating_sub(sum);
+            weights[heaviest] = (weights[heaviest] + WEIGHT_ONE).saturating_sub(sum);
             axis.start.push(start);
         }
         axis

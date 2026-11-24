@@ -82,6 +82,8 @@ impl Client {
     }
 }
 
+const VIDEO_BITS_PER_SEC: u32 = 12_000_000;
+
 struct TokenBucket {
     tokens: f32,
     burst: f32,
@@ -101,7 +103,7 @@ impl TokenBucket {
     }
 
     fn video() -> Self {
-        Self::new(voice::MAX_ACCESS_UNIT as f32, 1_500_000.0)
+        Self::new(voice::MAX_ACCESS_UNIT as f32, VIDEO_BITS_PER_SEC as f32 / 8.0)
     }
 
     fn new(burst: f32, per_sec: f32) -> Self {

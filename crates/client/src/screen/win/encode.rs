@@ -32,6 +32,8 @@ use super::Context;
 use super::convert::Gpu;
 use super::share::Wake;
 
+const BACKSTOP_KEYFRAME_INTERVAL_SECS: u32 = 600;
+
 pub struct Encoder {
     transform: IMFTransform,
     codec: Option<ICodecAPI>,
@@ -112,7 +114,7 @@ impl Encoder {
                     (CODECAPI_AVEncCommonRateControlMode, uint(eAVEncCommonRateControlMode_CBR.0 as u32)),
                     (CODECAPI_AVEncCommonMeanBitRate, uint(params.bitrate)),
                     (CODECAPI_AVEncMPVDefaultBPictureCount, uint(0)),
-                    (CODECAPI_AVEncMPVGOPSize, uint(params.fps * 600)),
+                    (CODECAPI_AVEncMPVGOPSize, uint(params.fps * BACKSTOP_KEYFRAME_INTERVAL_SECS)),
                 ];
                 for (api, value) in &settings {
                     if let Err(e) = codec.SetValue(api, value) {
