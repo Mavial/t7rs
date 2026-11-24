@@ -19,7 +19,7 @@ cargo build --release
 # Server: writes t7-server.toml with defaults on first run.
 ./target/release/t7-server
 
-# Client: open the GUI and press Ctrl+S (or "Connect").
+# Client: open the GUI, pick a nickname and enter the server's address.
 ./target/release/t7-client
 # ...or connect straight away:
 ./target/release/t7-client 127.0.0.1 --nick Santiago
@@ -45,21 +45,23 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 
 | Action | How |
 | --- | --- |
-| Connect | `Ctrl+S`, the Connect button, or click a recent server |
-| Switch channel | Double-click a channel, drag yourself onto it, or right-click → Join. Channels with a lock ask for a password |
-| New channel | The ⋯ button next to CHANNELS, or right-click a channel → Create sub-channel. Yours are temporary: they disappear once everyone has left |
+| Connect | `Ctrl+S`, the + next to T7 at the top of the sidebar, or click a server you've been on. The first time, T7 opens on the connect form |
+| Switch channel | Double-click a channel, drag yourself onto it, or right-click (or hover and click ⋯) → Join channel. Channels with a lock ask for a password |
+| New channel | The ⋯ next to the server's name, or a channel's menu → Create sub-channel. Yours are temporary: they disappear once everyone has left |
 | A room of your own | Double-click a lobby, like **Create a room**. T7 opens a temporary room for you in it, and you own it |
-| Edit, rearrange, delete | Right-click a channel. Those who manage channels can also drag a channel above, below or into another one. A room's owner can edit or delete the room, and a channel's moderators can rename it |
-| Claim a server | ⋯ → Claim ownership…, with the claim token from the server's log. See [Roles & permissions](#roles--permissions) |
+| Edit, rearrange, delete | Right-click a channel, or hover it and click ⋯. Those who manage channels can also drag a channel above, below or into another one. A room's owner can edit or delete the room, and a channel's moderators can rename it |
+| Claim a server | ⋯ next to the server's name → Claim ownership…, with the claim token from the server's log. See [Roles & permissions](#roles--permissions) |
 | Kick, ban, mute, move | Right-click a user. The menu shows what your role allows. Drag someone onto a channel to move them |
-| Roles and the ban list | ⋯ → Server settings…, with a Roles tab and a Bans tab |
+| Roles and the ban list | ⋯ next to the server's name → Server settings…, with a Roles tab and a Bans tab |
+| Disconnect, reconnect | ⋯ next to the server's name → Disconnect. If the connection drops or you're kicked, the tree stays dimmed with why, and Reconnect |
 | Private message | Double-click a user, or right-click → Send private message |
-| Close a PM tab | Middle-click it, or right-click → Close |
-| Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right. Sound off silences the other people, not notification sounds |
+| Close a PM tab | Its ×, a middle-click, or right-click → Close |
+| Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons next to your name, bottom-left. Sound off silences the other people, not notification sounds |
+| Away, nickname | Click your name bottom-left, or `Ctrl+Shift+A` for away. A new nickname is used the next time you connect |
 | Someone's volume | Right-click them: 0% (muted for you) to 200%. Remembered by nickname |
-| Share your screen | The screen button bottom-right: pick a screen or window, and a quality (720p 30, 1080p 30 or 1080p 60). Click it again to stop. Windows only for now |
-| Watch someone's screen | Click the red **LIVE** badge next to someone in your channel, or right-click them → Watch screen. It opens in a window of its own: double-click or `F11` for full screen, `Esc` to leave it. Windows only for now |
-| Voice settings | The sliders button bottom-right: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), notification sounds and sound pack, volumes |
+| Share your screen | The screen button next to your name: pick a screen or window, and a quality (720p 30, 1080p 30 or 1080p 60). Click it again to stop. Windows only for now |
+| Watch someone's screen | **Watch** in the strip over the chat, the red **LIVE** badge next to someone in your channel, or right-click them → Watch screen. It opens in a window of its own: double-click or `F11` for full screen, `Esc` to leave it. Windows only for now |
+| Voice settings | Click your name bottom-left → Settings…, or `Ctrl+,`: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), notification sounds and sound pack, volumes |
 | Poke | Right-click a user → Poke…, with an optional message. They get a popup, a sound and a flashing taskbar entry |
 
 A green ring around an avatar means that person is talking. On Windows the
@@ -98,12 +100,12 @@ permissions of the roles below it.
 | Everyone | Every connection | View, Join, Speak, Send messages, Create temporary channels |
 
 - **Claim the server:** on first start the server logs a claim token. In T7,
-  open ⋯ next to CHANNELS, pick **Claim ownership…** and enter the token. The
+  open ⋯ next to the server's name, pick **Claim ownership…** and enter the token. The
   first person to use it becomes the owner, and the token stops working. If
   the owner loses their identity, stop the server and run
   `t7-server owner reset`. It prints a new claim token. The old owner stays
   the owner until someone redeems it.
-- **Roles:** ⋯ → **Server settings…** → **Roles** lists the roles. There you
+- **Roles:** ⋯ next to the server's name → **Server settings…** → **Roles** lists the roles. There you
   create, rename and reorder roles, switch their permissions, and remove
   members, online or not. To give someone a role, right-click them and open
   **Roles**.
@@ -300,7 +302,8 @@ crates/
 - **Client:** immediate-mode egui UI drawn on the CPU (winit + softbuffer + a
   software rasterizer). No GPU driver is loaded: an empty OpenGL window alone
   commits ~66 MB, more than eight times this whole client. The UI redraws only on
-  input or network events, and a full redraw takes ~1.2 ms (median, 1100×720), so it
+  input or network events, and a full redraw takes ~1.0 ms (median, 1100×720, the
+  `frame_time` test), so it
   sits at ~0% CPU when idle. Networking runs on its own thread with a
   current-thread tokio runtime. Icons are painted vectors (no image assets).
   Settings live in `T7/settings.toml` in the user's config directory.
@@ -322,6 +325,8 @@ cargo nextest run --workspace                # unit + end-to-end server tests
 cargo nextest run -p t7-server               # just the crate you changed
 cargo run --example bot -- 127.0.0.1:9988    # fill a server with demo users
 cargo run --example bot -- 127.0.0.1:9988 500   # crude load test
+cargo test -p t7-client snapshots -- --ignored  # every screen to PNG, in target/snapshots
+cargo test --release -p t7-client frame_time -- --ignored --nocapture   # time a full redraw
 ```
 
 Tests run with [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`),
@@ -335,8 +340,8 @@ Release builds update themselves. Shortly after start and every 6 hours T7
 reads `latest.json` from the latest GitHub release; if it lists a newer version
 for the platform, T7 downloads it next to itself and accepts it only if the
 SHA-256 matches and the ed25519 signature verifies against the key built into
-the client. A small download icon then appears in the top bar. The new build
-replaces the old one when T7 closes, or right away when you click the icon.
+the client. A banner then says so above your name, bottom-left. The new build
+replaces the old one when T7 closes, or right away when you click Restart.
 When a server says the client is too old, T7 checks immediately. Local builds
 (without `T7_RELEASE` set) never update themselves.
 
