@@ -181,7 +181,7 @@ impl App {
     }
 }
 
-/// Paints the red LIVE badge with its left edge centered at `at`; its rect.
+/// Paints the red LIVE badge from `at`, the middle of its left edge, and returns where it went.
 pub(super) fn live_badge(p: &egui::Painter, at: egui::Pos2) -> egui::Rect {
     let galley = p.layout_no_wrap("LIVE".into(), FontId::proportional(9.5), Color32::WHITE);
     let rect = egui::Rect::from_min_size(at - vec2(0.0, 7.0), vec2(galley.size().x + 8.0, 14.0));

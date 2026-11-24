@@ -1567,7 +1567,6 @@ impl App {
                                 icons::paint(p, r, icon, color);
                                 name_end += 16.0;
                             }
-                            // Those in our channel we can watch.
                             let watchable = c.sharing && !is_me && view.my_channel() == Some(ch_id);
                             if c.sharing {
                                 let live = sharing::live_badge(p, egui::pos2(name_end + 6.0, rect.center().y));
