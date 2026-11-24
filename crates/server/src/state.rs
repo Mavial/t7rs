@@ -68,11 +68,8 @@ struct Client {
     /// Learned from the first authenticated datagram (works behind NAT).
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
-    /// Whose screen they watch. The only record of who watches whom: it
-    /// names someone sharing in their channel, or nobody.
     watching: Option<ClientId>,
     video_bucket: TokenBucket,
-    /// When they were last asked for a keyframe.
     keyframe_asked: Option<Instant>,
     last_sent_permissions: Permissions,
     last_sent_locations: HashMap<ClientId, ChannelId>,
@@ -85,7 +82,6 @@ impl Client {
     }
 }
 
-/// Rate limiter: `burst` tokens at once, refilled at `per_sec`.
 struct TokenBucket {
     tokens: f32,
     burst: f32,
@@ -104,7 +100,6 @@ impl TokenBucket {
         Self::new(40.0, 60.0)
     }
 
-    /// Video, in payload bytes: 12 Mbit/s, and the largest access unit at once.
     fn video() -> Self {
         Self::new(voice::MAX_ACCESS_UNIT as f32, 1_500_000.0)
     }
@@ -504,7 +499,6 @@ impl Server {
         self.broadcast(&S2C::ClientSharing { id, sharing }, |c| c.last_sent_locations.contains_key(&id));
     }
 
-    /// Watching someone who isn't sharing in your channel watches nobody.
     fn watch(&mut self, id: ClientId, target: Option<ClientId>) {
         let channel = self.clients[&id].info.channel;
         let sharing_here =
@@ -516,10 +510,6 @@ impl Server {
         }
     }
 
-    /// Sends `sharer` at most one [`S2C::SendKeyframe`] per [`voice::KEYFRAME_INTERVAL`].
-    /// Asking again sooner does nothing: the keyframe already asked for reaches
-    /// everyone watching by the time it is sent, and a viewer that starts
-    /// watching after it left, or loses it, asks again a little later.
     fn ask_for_keyframe(&mut self, sharer: ClientId) {
         let client = self.clients.get_mut(&sharer).expect("a watched sharer exists");
         let now = Instant::now();
@@ -709,7 +699,6 @@ impl Server {
         self.sync_about(id);
     }
 
-    /// Every move goes through here. It ends their share and what they watch.
     fn place(&mut self, id: ClientId, channel: ChannelId) {
         self.set_sharing(id, false);
         let client = self.clients.get_mut(&id).expect("exists");
@@ -1237,12 +1226,10 @@ fn speech(server_muted: bool, permissions: &Permissions, channel: ChannelId) -> 
     }
 }
 
-/// Seals `msg` for each recipient with their key and sends it to their voice address.
 fn forward<'a>(udp: &UdpSocket, buf: &mut Vec<u8>, msg: ToClient<'_>, to: impl Iterator<Item = &'a mut Client>) {
     for client in to {
         let Some(addr) = client.voice_addr else { continue };
         client.voice.seal(msg, buf);
-        // Non-blocking: a full socket buffer drops the datagram, like any lost packet.
         let _ = udp.try_send_to(buf, addr);
     }
 }

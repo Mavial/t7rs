@@ -5,8 +5,6 @@
 //! commits ~65 MB, several times what this whole client needs, while drawing
 //! a mostly static UI on the CPU costs a few milliseconds per repaint, and
 //! the UI only repaints on input or network events.
-//!
-//! While watching someone's screen, a second window shows it (`watch`).
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -24,11 +22,8 @@ use crate::app::App;
 use crate::settings::Store;
 use crate::watch;
 
-/// Wakes the event loop, from any thread.
 enum Wake {
-    /// egui wants a repaint after this delay.
     Repaint(Duration),
-    /// The screen watched has a new picture.
     Screen,
 }
 
@@ -46,13 +41,11 @@ struct Shell {
     gfx: Option<Gfx>,
     next_repaint: Option<Instant>,
     title: String,
-    /// The window showing the screen watched, while watching one.
     screen: Option<watch::Window>,
 }
 
 /// Runs the UI until the window closes. `make_app` runs after the repaint
-/// wakeup is wired, so nothing the app starts can miss a repaint. It gets
-/// what wakes the screen window when a new picture is ready.
+/// wakeup is wired, so nothing the app starts can miss a repaint.
 pub fn run(
     ctx: egui::Context,
     store: Store,
@@ -128,7 +121,6 @@ impl Shell {
         self.schedule(delay);
     }
 
-    /// Opens, switches or closes the screen window to match what the app watches.
     fn sync_screen(&mut self, event_loop: &ActiveEventLoop) {
         let wanted = self.app.watching().map(|(frames, title)| (frames.clone(), title));
         match (wanted, &mut self.screen) {
@@ -216,7 +208,6 @@ impl ApplicationHandler<Wake> for Shell {
             }
             return;
         }
-        // A closed screen window's last events, such as losing focus, are not the main window's.
         let Some(g) = self.gfx.as_mut().filter(|g| g.window.id() == id) else { return };
         let response = g.input.on_window_event(&g.window, &event);
         match event {

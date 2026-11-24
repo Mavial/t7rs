@@ -1,6 +1,3 @@
-//! H.264 encoding with a Media Foundation transform: the GPU's encoder when
-//! it has one, else Microsoft's software encoder.
-
 use std::mem::ManuallyDrop;
 use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
@@ -38,10 +35,7 @@ use super::share::Wake;
 pub struct Encoder {
     transform: IMFTransform,
     codec: Option<ICodecAPI>,
-    /// Hardware encoders are asynchronous: they say when they take input and
-    /// have output through events, which this thread forwards to the share.
     events: Option<JoinHandle<()>>,
-    /// Set when the transform wants output samples from us; reused.
     output: Option<IMFSample>,
     params: ParamSets,
     name: String,
@@ -52,7 +46,6 @@ pub struct Encoder {
 impl Encoder {
     pub fn new(gpu: &Gpu, size: (u32, u32), params: &Params, wake: &Sender<Wake>) -> Result<Encoder, String> {
         let (mut token, mut manager) = (0, None);
-        // SAFETY: out-pointers to locals; the device is alive.
         let manager: IMFDXGIDeviceManager = unsafe {
             MFCreateDXGIDeviceManager(&raw mut token, &raw mut manager).context("DXGI device manager")?;
             let manager = manager.ok_or("no DXGI device manager")?;
@@ -63,7 +56,6 @@ impl Encoder {
         if std::env::var_os("T7_SOFTWARE_ENCODER").is_none() {
             for activate in hardware_encoders(gpu.luid) {
                 let name = friendly_name(&activate);
-                // SAFETY: activates an enumerated transform.
                 let transform = unsafe { activate.ActivateObject::<IMFTransform>() }.context("activating");
                 match transform.and_then(|t| Encoder::setup(t, &manager, size, params, wake)) {
                     Ok(mut encoder) => {
@@ -73,13 +65,11 @@ impl Encoder {
                     }
                     Err(e) => {
                         errors.push(format!("{name}: {e}"));
-                        // SAFETY: releases what ActivateObject made.
                         let _ = unsafe { activate.ShutdownObject() };
                     }
                 }
             }
         }
-        // SAFETY: creates an in-process COM object.
         let software = unsafe { CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER) };
         match software.context("software H.264 encoder").and_then(|t| Encoder::setup(t, &manager, size, params, wake)) {
             Ok(mut encoder) => {
@@ -103,7 +93,6 @@ impl Encoder {
         params: &Params,
         wake: &Sender<Wake>,
     ) -> Result<Encoder, String> {
-        // SAFETY: calls on a live transform with locals that outlive them.
         unsafe {
             let attributes = transform.GetAttributes().context("encoder attributes")?;
             let is_async = attributes.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) != 0;
@@ -123,7 +112,6 @@ impl Encoder {
                     (CODECAPI_AVEncCommonRateControlMode, uint(eAVEncCommonRateControlMode_CBR.0 as u32)),
                     (CODECAPI_AVEncCommonMeanBitRate, uint(params.bitrate)),
                     (CODECAPI_AVEncMPVDefaultBPictureCount, uint(0)),
-                    // Keyframes come when asked for, a long GOP is only a backstop.
                     (CODECAPI_AVEncMPVGOPSize, uint(params.fps * 600)),
                 ];
                 for (api, value) in &settings {
@@ -178,7 +166,6 @@ impl Encoder {
         self.events.is_some()
     }
 
-    /// Encodes `texture`, stamped `time` (100 ns units).
     pub fn input(&mut self, texture: &ID3D11Texture2D, time: i64, duration: i64, key: bool) -> Result<(), String> {
         // SAFETY: the texture stays alive in the sample for as long as the encoder holds it.
         unsafe {
@@ -223,7 +210,6 @@ impl Encoder {
                 Ok(()) => {}
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
                 Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-                    // SAFETY: plain calls on the live transform.
                     unsafe {
                         let output = self.transform.GetOutputAvailableType(0, 0).context("encoder output type")?;
                         self.transform.SetOutputType(0, &output, 0).context("encoder output type")?;
@@ -242,7 +228,6 @@ impl Encoder {
 impl Drop for Encoder {
     fn drop(&mut self) {
         // Shutting down ends the event thread's wait.
-        // SAFETY: plain calls; nothing uses the transform afterwards.
         unsafe {
             if let Ok(shutdown) = self.transform.cast::<IMFShutdown>() {
                 let _ = shutdown.Shutdown();
@@ -269,7 +254,6 @@ fn read(sample: &IMFSample) -> Result<Vec<u8>, String> {
     }
 }
 
-/// COM pointers of free-threaded Media Foundation objects.
 struct Unsent<T>(T);
 // SAFETY: Media Foundation transforms and their event queues are free-threaded.
 unsafe impl<T> Send for Unsent<T> {}
@@ -278,7 +262,6 @@ fn forward_events(transform: &IMFTransform, wake: Sender<Wake>) -> Result<JoinHa
     let events = Unsent(transform.cast::<IMFMediaEventGenerator>().context("encoder events")?);
     let spawned = std::thread::Builder::new().name("screen encoder events".into()).spawn(move || {
         let events = events;
-        // SAFETY: plain calls on the live generator; Shutdown makes GetEvent fail.
         while let Ok(event) = unsafe { events.0.GetEvent(MF_EVENT_FLAG_NONE) } {
             let kind = unsafe { event.GetType() }.map_or(MF_EVENT_TYPE(0), |t| MF_EVENT_TYPE(t as i32));
             let message = if kind == METransformNeedInput {
@@ -301,7 +284,6 @@ fn forward_events(transform: &IMFTransform, wake: Sender<Wake>) -> Result<JoinHa
     spawned.map_err(|e| format!("encoder event thread: {e}"))
 }
 
-/// The adapter's hardware H.264 encoders, best first.
 fn hardware_encoders(luid: LUID) -> Vec<IMFActivate> {
     let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
     let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
@@ -341,7 +323,6 @@ fn hardware_encoders(luid: LUID) -> Vec<IMFActivate> {
 fn friendly_name(activate: &IMFActivate) -> String {
     let mut name = [0u16; 128];
     let mut len = 0;
-    // SAFETY: `name` is a sized buffer.
     match unsafe { activate.GetString(&MFT_FRIENDLY_NAME_Attribute, &mut name, Some(&raw mut len)) } {
         Ok(()) => String::from_utf16_lossy(&name[..len as usize]),
         Err(_) => "hardware H.264 encoder".into(),
@@ -350,7 +331,6 @@ fn friendly_name(activate: &IMFActivate) -> String {
 
 fn video_type(subtype: GUID, size: (u32, u32), fps: u32) -> windows::core::Result<IMFMediaType> {
     let pair = |hi: u32, lo: u32| u64::from(hi) << 32 | u64::from(lo);
-    // SAFETY: plain calls on a fresh media type.
     unsafe {
         let t = MFCreateMediaType()?;
         t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -369,7 +349,6 @@ fn video_type(subtype: GUID, size: (u32, u32), fps: u32) -> windows::core::Resul
 
 fn uint(value: u32) -> VARIANT {
     let mut v = VARIANT::default();
-    // SAFETY: writes the tag and its matching field.
     unsafe {
         let inner = &mut *v.Anonymous.Anonymous;
         inner.vt = VT_UI4;
@@ -380,7 +359,6 @@ fn uint(value: u32) -> VARIANT {
 
 fn boolean(value: bool) -> VARIANT {
     let mut v = VARIANT::default();
-    // SAFETY: writes the tag and its matching field.
     unsafe {
         let inner = &mut *v.Anonymous.Anonymous;
         inner.vt = VT_BOOL;

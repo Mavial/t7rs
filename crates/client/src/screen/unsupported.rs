@@ -1,5 +1,3 @@
-//! Screen sharing where T7 has no capture or codec backend yet.
-
 use super::{AccessUnit, Params, Picture, ShareStats, SourceInfo};
 
 const UNSUPPORTED: &str = "screen sharing is not supported on this platform";

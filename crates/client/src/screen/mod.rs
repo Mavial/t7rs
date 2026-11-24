@@ -1,6 +1,3 @@
-//! Screen sharing: capture and encode on the sharer, decode and show on viewers.
-//! Frames travel as H.264 access units over the voice link (`t7_proto::voice`).
-
 #[cfg(any(windows, test))]
 mod annexb;
 #[cfg(any(windows, test))]
@@ -26,12 +23,10 @@ pub mod scale;
 pub struct AccessUnit {
     /// Counts up by one per frame on each share.
     pub frame: u32,
-    /// Decodable on its own (IDR).
     pub key: bool,
     pub data: Vec<u8>,
 }
 
-/// What to share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), expect(dead_code, reason = "only the Windows backend lists sources"))]
 pub enum Source {
@@ -39,7 +34,6 @@ pub enum Source {
     Window(Handle),
 }
 
-/// A monitor or window on this machine, as `sources` listed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Handle(isize);
 
@@ -68,10 +62,8 @@ pub enum Quality {
 
 #[cfg_attr(not(windows), expect(dead_code, reason = "only the Windows backend encodes"))]
 struct Params {
-    /// Sources larger than this are scaled down to fit; smaller ones are sent as they are.
     max: (u32, u32),
     fps: u32,
-    /// Constant bitrate, bits per second.
     bitrate: u32,
 }
 
@@ -120,12 +112,10 @@ impl Share {
         self.0.ended()
     }
 
-    /// The encoder in use, for diagnostics: its name and whether it runs on the GPU.
     pub fn encoder(&self) -> &str {
         self.0.encoder()
     }
 
-    /// Counters since the last call.
     pub fn take_stats(&self) -> ShareStats {
         self.0.take_stats()
     }
@@ -142,7 +132,6 @@ pub struct ShareStats {
     pub latency_max: Duration,
 }
 
-/// A decoded frame.
 #[derive(Debug, Clone, Default)]
 pub struct Picture {
     pub width: u32,
@@ -155,7 +144,6 @@ pub struct Picture {
 /// must be a keyframe, and each after it the next frame.
 pub struct Decoder {
     platform: platform::Decoder,
-    /// Decoding failed: access units are skipped until the next keyframe.
     failed: bool,
     spare: Picture,
 }
@@ -176,7 +164,6 @@ impl Decoder {
         decoded.map(|done| done.then(|| std::mem::take(&mut self.spare)))
     }
 
-    /// Hands a shown picture back so the next one reuses its memory.
     pub fn recycle(&mut self, picture: Picture) {
         self.spare = picture;
     }

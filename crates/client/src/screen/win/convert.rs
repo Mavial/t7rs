@@ -1,6 +1,3 @@
-//! The D3D11 device, and the GPU video processor that scales captured BGRA
-//! frames into the NV12 textures the encoder reads.
-
 use std::mem::ManuallyDrop;
 
 use windows::Win32::Foundation::{HMODULE, LUID, RECT};
@@ -30,7 +27,6 @@ use super::Context;
 pub struct Gpu {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,
-    /// The adapter, to pick an encoder that runs on it.
     pub luid: LUID,
 }
 
@@ -41,7 +37,6 @@ impl Gpu {
         let adapter = adapter_for(monitor);
         let driver = if adapter.is_some() { D3D_DRIVER_TYPE_UNKNOWN } else { D3D_DRIVER_TYPE_HARDWARE };
         let (mut device, mut context) = (None, None);
-        // SAFETY: out-pointers to locals.
         unsafe {
             D3D11CreateDevice(
                 adapter.as_ref(),
@@ -59,7 +54,6 @@ impl Gpu {
         let (device, context): (ID3D11Device, ID3D11DeviceContext) =
             device.zip(context).ok_or("Direct3D 11 returned no device")?;
         // Capture, conversion and the encoder all use it from their own threads.
-        // SAFETY: plain calls on a live device.
         unsafe {
             let _ = device.cast::<ID3D11Multithread>().context("multithread protection")?.SetMultithreadProtected(true);
             let luid = device.cast::<IDXGIDevice>().and_then(|d| d.GetAdapter()).and_then(|a| a.GetDesc());
@@ -69,7 +63,6 @@ impl Gpu {
 }
 
 fn adapter_for(monitor: HMONITOR) -> Option<IDXGIAdapter> {
-    // SAFETY: enumeration calls with no pointers of ours.
     unsafe {
         let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
         let adapters = (0..).map_while(|i| factory.EnumAdapters1(i).ok());
@@ -82,12 +75,8 @@ fn adapter_for(monitor: HMONITOR) -> Option<IDXGIAdapter> {
     }
 }
 
-/// Number of NV12 textures, so the encoder can still be reading a few while
-/// the next frame is converted.
 pub const SLOTS: usize = 4;
 
-/// Scales a frame into one of `SLOTS` NV12 textures of a fixed size, keeping
-/// its aspect ratio with black bars. BT.709, limited range.
 pub struct Converter {
     video: ID3D11VideoContext1,
     processor: ID3D11VideoProcessor,
@@ -113,7 +102,6 @@ impl Converter {
             OutputHeight: output_size.1,
             Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
         };
-        // SAFETY: descriptors are locals that outlive each call.
         unsafe {
             let enumerator = device.CreateVideoProcessorEnumerator(&raw const desc).context("video processor")?;
             let processor = device.CreateVideoProcessor(&enumerator, 0).context("video processor")?;
@@ -146,7 +134,6 @@ impl Converter {
         &self.outputs[slot].0
     }
 
-    /// Scales the top-left `content` of `frame` into `slot`.
     pub fn convert(&self, gpu: &Gpu, frame: &ID3D11Texture2D, content: (u32, u32), slot: usize) -> Result<(), String> {
         let content = (content.0.min(self.input_size.0), content.1.min(self.input_size.1));
         let source = RECT { left: 0, top: 0, right: content.0 as i32, bottom: content.1 as i32 };
@@ -172,7 +159,6 @@ impl Converter {
     }
 }
 
-/// Where a `content`-sized picture lands in `frame`, centred at its own aspect ratio.
 fn letterbox(content: (u32, u32), frame: (u32, u32)) -> RECT {
     let (cw, ch) = (u64::from(content.0.max(1)), u64::from(content.1.max(1)));
     let (fw, fh) = (u64::from(frame.0), u64::from(frame.1));
@@ -195,7 +181,6 @@ fn texture(gpu: &Gpu, size: (u32, u32), format: DXGI_FORMAT) -> Result<ID3D11Tex
         MiscFlags: 0,
     };
     let mut texture = None;
-    // SAFETY: `desc` outlives the call.
     unsafe { gpu.device.CreateTexture2D(&raw const desc, None, Some(&raw mut texture)) }.context("GPU texture")?;
     texture.ok_or_else(|| "GPU texture".into())
 }
@@ -213,7 +198,6 @@ unsafe fn input_view(
         },
     };
     let mut view = None;
-    // SAFETY: `desc` outlives the call.
     unsafe { device.CreateVideoProcessorInputView(texture, enumerator, &raw const desc, Some(&raw mut view)) }
         .context("video processor input")?;
     view.ok_or_else(|| "video processor input".into())
@@ -229,7 +213,6 @@ unsafe fn output_view(
         Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
     };
     let mut view = None;
-    // SAFETY: `desc` outlives the call.
     unsafe { device.CreateVideoProcessorOutputView(texture, enumerator, &raw const desc, Some(&raw mut view)) }
         .context("video processor output")?;
     view.ok_or_else(|| "video processor output".into())

@@ -1,21 +1,10 @@
-//! Fits a picture into a window, its aspect ratio kept and black around it.
-//! Shrinking averages every picture pixel a window pixel covers, so thin
-//! text stays readable. Enlarging repeats pixels, which keeps text sharp and
-//! costs little more than a copy. Weights are 8-bit fixed point, and each
-//! channel is weighed in a 16-bit lane: a row's bytes at once down the
-//! column, and a pixel's four channels in one `u64` along the row.
-
 use super::Picture;
 
-/// Draws pictures scaled to fit, keeping the weights while sizes stay the same.
 #[derive(Default)]
 pub struct Scaler {
-    /// Picture width and height, then the size drawn at.
     sizes: (usize, usize, usize, usize),
     x: Axis,
     y: Axis,
-    /// One picture row weighed down the column, a pixel's channels in the
-    /// 16-bit lanes of each `u64`.
     row: Vec<u64>,
 }
 
@@ -43,7 +32,6 @@ impl Scaler {
         for i in 0..h {
             let at = (y0 + i) * width;
             let (src_y, _) = self.y.at(i);
-            // Enlarging: a row the same as the one above.
             if self.y.taps == 1 && i > 0 && self.y.at(i - 1).0 == src_y {
                 out.copy_within(at - width..at, at);
                 continue;
@@ -66,7 +54,6 @@ impl Scaler {
         }
     }
 
-    /// Weighs the picture rows that output row `i` covers into `self.row`.
     fn down_the_column(&mut self, picture: &Picture, i: usize) {
         let pw = picture.width as usize;
         let (start, weights) = self.y.at(i);
@@ -85,7 +72,6 @@ impl Scaler {
     }
 
     fn along_the_row(&self, out: &mut [u32]) {
-        // A tap count known at compile time unrolls the inner loop.
         match self.x.taps {
             2 => self.along::<2>(out),
             3 => self.along::<3>(out),
@@ -94,7 +80,6 @@ impl Scaler {
         }
     }
 
-    /// `along_the_row` with `TAPS` taps, or any number with 0.
     fn along<const TAPS: usize>(&self, out: &mut [u32]) {
         let taps = if TAPS == 0 { self.x.taps } else { TAPS };
         let weights = self.x.weights.chunks_exact(taps);
@@ -108,14 +93,12 @@ impl Scaler {
     }
 }
 
-/// One pixel from its four channels weighed by 256 in 16-bit lanes, rounded.
 fn pack(lanes: u64) -> u32 {
     let lanes = ((lanes + 0x0080_0080_0080_0080) >> 8) & 0x00FF_00FF_00FF_00FF;
     let bytes = lanes | lanes >> 8;
     ((bytes & 0xFFFF) | ((bytes >> 16) & 0xFFFF_0000)) as u32
 }
 
-/// Where a `picture`-sized image goes in a `window` of at least 1 × 1: x, y, width, height.
 fn fit(picture: (usize, usize), window: (usize, usize)) -> (usize, usize, usize, usize) {
     let scale = (window.0 as f64 / picture.0 as f64).min(window.1 as f64 / picture.1 as f64);
     let w = ((picture.0 as f64 * scale).round() as usize).clamp(1, window.0);
@@ -123,8 +106,6 @@ fn fit(picture: (usize, usize), window: (usize, usize)) -> (usize, usize, usize,
     ((window.0 - w) / 2, (window.1 - h) / 2, w, h)
 }
 
-/// For each output pixel along one axis, the `taps` source pixels from its
-/// start that make it up and their weights, which sum to 256.
 #[derive(Default)]
 struct Axis {
     taps: usize,
@@ -135,7 +116,6 @@ struct Axis {
 impl Axis {
     fn new(src: usize, dst: usize) -> Axis {
         let scale = src as f64 / dst as f64;
-        // Each output pixel's source pixels, with how much of each it covers.
         let span = |i: usize| -> Vec<(usize, f64)> {
             if scale <= 1.0 {
                 return vec![((((i as f64 + 0.5) * scale) as usize).min(src - 1), 1.0)];
@@ -154,7 +134,6 @@ impl Axis {
             for &(j, w) in span {
                 weights[j - start] += (w / total * 256.0).round() as u32;
             }
-            // Rounding can leave the sum off by a little: the heaviest takes it.
             let sum: u32 = weights.iter().sum();
             let heaviest = (0..taps).max_by_key(|&k| weights[k]).unwrap_or(0);
             weights[heaviest] = (weights[heaviest] + 256).saturating_sub(sum);

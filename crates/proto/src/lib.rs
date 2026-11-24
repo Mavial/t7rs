@@ -394,7 +394,6 @@ pub enum S2C {
         id: ClientId,
         speech: Speech,
     },
-    /// Someone started or stopped sharing their screen.
     ClientSharing {
         id: ClientId,
         sharing: bool,

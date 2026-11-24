@@ -1,10 +1,7 @@
-//! Annex B H.264: NAL units behind `00 00 01` start codes.
-
 const IDR: u8 = 5;
 const SPS: u8 = 7;
 const PPS: u8 = 8;
 
-/// The NAL units in `data`, each without its start code.
 pub fn units(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut rest = start_code(data).map_or(&[][..], |at| &data[at + 3..]);
     std::iter::from_fn(move || {
@@ -31,7 +28,6 @@ fn kind(unit: &[u8]) -> u8 {
     unit[0] & 0x1f
 }
 
-/// Decodable on its own: holds an IDR slice.
 pub fn is_key(data: &[u8]) -> bool {
     units(data).any(|u| kind(u) == IDR)
 }
@@ -42,8 +38,6 @@ pub fn is_key(data: &[u8]) -> bool {
 pub struct ParamSets(Vec<u8>);
 
 impl ParamSets {
-    /// Remembers the parameter sets in `au`, or puts the remembered ones in
-    /// front of a keyframe that has none.
     pub fn complete(&mut self, au: &mut Vec<u8>) {
         let mut sets = Vec::new();
         for unit in units(au).filter(|u| matches!(kind(u), SPS | PPS)) {

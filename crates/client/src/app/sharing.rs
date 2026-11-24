@@ -1,6 +1,3 @@
-//! Screen sharing in the app: the share button and its picker, watching
-//! someone's screen, and keeping both in step with the server.
-
 use std::sync::Arc;
 
 use egui::{Align2, Color32, CornerRadius, FontId, PopupCloseBehavior, RectAlign, RichText, Sense, vec2};
@@ -18,20 +15,16 @@ use crate::watch::{self, Frames};
 const QUALITIES: [(Quality, &str); 3] =
     [(Quality::P720_30, "720p 30"), (Quality::P1080_30, "1080p 30"), (Quality::P1080_60, "1080p 60")];
 
-/// Our screen, while we share it.
 pub(super) struct Sharing {
     share: Share,
-    /// The server has said we share. Until then its view of us is stale.
     confirmed: bool,
 }
 
-/// Someone's screen we watch, shown in a window of its own.
 pub(super) struct Watching {
     pub(super) sharer: ClientId,
     frames: Arc<Frames>,
 }
 
-/// Why sharing is unavailable right now, if it is.
 fn cannot_share(app: &App) -> Option<&'static str> {
     if !cfg!(windows) {
         Some("Screen sharing is Windows-only for now")
@@ -45,7 +38,6 @@ fn cannot_share(app: &App) -> Option<&'static str> {
 }
 
 impl App {
-    /// The screen to show in the screen window, and that window's title.
     pub fn watching(&self) -> Option<(&Arc<Frames>, String)> {
         let watching = self.watching.as_ref()?;
         let name = self.view.as_ref().and_then(|v| v.nickname(watching.sharer)).unwrap_or("Someone");
@@ -58,7 +50,6 @@ impl App {
         }
     }
 
-    /// Watches `sharer`'s screen instead of any watched before.
     pub(super) fn watch(&mut self, sharer: ClientId) {
         let Some(view) = &self.view else { return };
         if sharer == view.my_id || self.watching.as_ref().is_some_and(|w| w.sharer == sharer) {
@@ -80,7 +71,6 @@ impl App {
     fn start_sharing(&mut self, source: Source, ctx: &egui::Context) {
         let video = self.net.video_sink();
         let ctx = ctx.clone();
-        // The share ending wakes the UI, which then stops it (`sync_screens`).
         match Share::start(source, self.settings.screen_quality, move |au| video(au), move || ctx.request_repaint()) {
             Ok(share) => {
                 tracing::info!(encoder = share.encoder(), "sharing the screen");
@@ -109,8 +99,6 @@ impl App {
         }
     }
 
-    /// Ends a share or a watch the server, the connection or the shared
-    /// window has ended. Runs every frame, after the network events.
     pub(super) fn sync_screens(&mut self) {
         let shared = self.view.as_ref().and_then(ServerView::me).map(|c| c.sharing);
         if let Some(sharing) = &mut self.sharing {
@@ -120,7 +108,6 @@ impl App {
                 let tab = self.active_tab;
                 self.push(tab, LineKind::System, "Stopped sharing: the shared window or screen is gone");
             } else if shared.is_none() || (sharing.confirmed && shared == Some(false)) {
-                // Disconnected, or the server stopped it because we changed channels.
                 self.stop_sharing();
             }
         }
@@ -132,8 +119,6 @@ impl App {
         }
     }
 
-    /// The share button, next to the voice buttons: a picker of what to
-    /// share, or a stop button while sharing.
     pub(super) fn share_button(&mut self, ui: &mut egui::Ui) {
         if let Some(tip) = cannot_share(self) {
             return mic_held(ui, Icon::Screen, theme::TEXT_FAINT, tip);
@@ -181,7 +166,6 @@ impl App {
     }
 }
 
-/// Paints the red LIVE badge from `at`, the middle of its left edge, and returns where it went.
 pub(super) fn live_badge(p: &egui::Painter, at: egui::Pos2) -> egui::Rect {
     let galley = p.layout_no_wrap("LIVE".into(), FontId::proportional(9.5), Color32::WHITE);
     let rect = egui::Rect::from_min_size(at - vec2(0.0, 7.0), vec2(galley.size().x + 8.0, 14.0));
@@ -190,7 +174,6 @@ pub(super) fn live_badge(p: &egui::Painter, at: egui::Pos2) -> egui::Rect {
     rect
 }
 
-/// The badge's click area and tooltip in the channel tree; true when clicked to watch.
 pub(super) fn live_badge_clicked(ui: &egui::Ui, rect: egui::Rect, id: egui::Id, tip: &str, watchable: bool) -> bool {
     let sense = if watchable { Sense::click() } else { Sense::hover() };
     let resp = ui.interact(rect, id, sense).on_hover_text(tip);

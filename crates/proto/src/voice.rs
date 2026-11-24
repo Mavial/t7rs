@@ -62,7 +62,6 @@ const AUDIO_OUT: u8 = 0x82;
 const VIDEO_OUT: u8 = 0x83;
 const CLIENT_HEADER: usize = 1 + 4 + 8;
 const SERVER_HEADER: usize = 1 + 8;
-/// frame u32, part u16, parts u16, key u8.
 const VIDEO_HEAD: usize = 4 + 2 + 2 + 1;
 const TAG_LEN: usize = 16;
 const TO_SERVER: u8 = 0;
@@ -211,7 +210,6 @@ fn put_video(out: &mut Vec<u8>, frame: u32, part: u16, parts: u16, key: bool, pa
     out.extend_from_slice(payload);
 }
 
-/// Frame, part, parts, key and payload of a video body, if well formed.
 fn video(body: &[u8]) -> Option<(u32, u16, u16, bool, &[u8])> {
     let (head, payload) = body.split_at_checked(VIDEO_HEAD)?;
     let frame = u32::from_le_bytes(head[..4].try_into().ok()?);
@@ -416,7 +414,6 @@ mod tests {
             assert_eq!(server.open(&mut buf), None, "{why}");
         }
 
-        // Sealed by hand, to put a key byte on the wire that `seal` never writes.
         let with_key_byte = |byte: u8, counter: u64| {
             let mut d = vec![VIDEO];
             d.extend_from_slice(&1u32.to_le_bytes());

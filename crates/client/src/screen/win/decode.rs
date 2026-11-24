@@ -1,6 +1,3 @@
-//! H.264 decoding with Microsoft's decoder transform into system memory, then
-//! NV12 to RGB on the CPU. No GPU device: the viewer draws with softbuffer.
-
 use std::mem::ManuallyDrop;
 
 use windows::Win32::Media::MediaFoundation::{
@@ -27,14 +24,11 @@ pub struct Decoder {
 // is only used through `&mut self`.
 unsafe impl Send for Decoder {}
 
-/// The negotiated NV12 output.
 struct Output {
-    /// Ours to write into, unless the decoder brings its own.
     sample: Option<IMFSample>,
     stride: usize,
     /// Rows in the Y plane, often more than shown (1088 for 1080p).
     rows: usize,
-    /// The part to show.
     x: usize,
     y: usize,
     width: usize,
@@ -44,7 +38,6 @@ struct Output {
 impl Decoder {
     pub fn new() -> Result<Decoder, String> {
         let runtime = Runtime::start()?;
-        // SAFETY: creates an in-process COM object and sets it up with locals.
         unsafe {
             let transform: IMFTransform =
                 CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER).context("H.264 decoder")?;
@@ -66,11 +59,9 @@ impl Decoder {
         let sample = input(data)?;
         let mut decoded = false;
         loop {
-            // SAFETY: a plain call with a live sample.
             match unsafe { self.transform.ProcessInput(0, &sample, 0) } {
                 Ok(()) => break,
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
-                    // Full: take what is ready, then the input fits.
                     if !self.drain(picture)? {
                         return Err("the decoder takes no input and has no output".into());
                     }
@@ -82,8 +73,6 @@ impl Decoder {
         Ok(self.drain(picture)? || decoded)
     }
 
-    /// Converts every ready picture into `picture`, each over the last; true
-    /// if there was one.
     fn drain(&mut self, picture: &mut Picture) -> Result<bool, String> {
         let mut decoded = false;
         let mut changes = 0;
@@ -126,10 +115,7 @@ impl Decoder {
         }
     }
 
-    /// Picks NV12 output at the stream's current size.
     fn negotiate(&mut self) -> Result<(), String> {
-        // SAFETY: plain calls on the live transform; the aperture blob is read
-        // into a buffer of its exact size.
         unsafe {
             let nv12 = (0..)
                 .map_while(|i| self.transform.GetOutputAvailableType(0, i).ok())

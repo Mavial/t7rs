@@ -83,9 +83,7 @@ pub struct App {
     quit: bool,
     sharing: Option<sharing::Sharing>,
     watching: Option<sharing::Watching>,
-    /// Wakes the screen window when the screen watched has a new picture.
     screen_wake: crate::watch::Wake,
-    /// What the share picker offers, listed when it opens.
     share_sources: Vec<crate::screen::SourceInfo>,
 }
 

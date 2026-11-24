@@ -1,5 +1,3 @@
-//! Listing sources and capturing them with Windows Graphics Capture.
-
 use std::sync::mpsc::Sender;
 
 use windows::Foundation::{TimeSpan, TypedEventHandler};
@@ -40,7 +38,6 @@ pub fn sources() -> Vec<SourceInfo> {
             name: format!("Screen {} ({} × {})", i + 1, r.right - r.left, r.bottom - r.top),
         })
         .collect();
-    // SAFETY: as above.
     unsafe {
         let _ = EnumWindows(Some(add_window), LPARAM(&raw mut list as isize));
     }
@@ -48,10 +45,8 @@ pub fn sources() -> Vec<SourceInfo> {
 }
 
 unsafe extern "system" fn add_monitor(monitor: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> BOOL {
-    // SAFETY: `sources` passes its vector.
     let list = unsafe { &mut *(list.0 as *mut Vec<(bool, RECT, HMONITOR)>) };
     let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-    // SAFETY: `info` is a sized MONITORINFO.
     if unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool() {
         list.push((info.dwFlags & MONITORINFOF_PRIMARY != 0, info.rcMonitor, monitor));
     }
@@ -59,7 +54,6 @@ unsafe extern "system" fn add_monitor(monitor: HMONITOR, _: HDC, _: *mut RECT, l
 }
 
 unsafe extern "system" fn add_window(window: HWND, list: LPARAM) -> BOOL {
-    // SAFETY: `sources` passes its vector.
     let list = unsafe { &mut *(list.0 as *mut Vec<SourceInfo>) };
     if let Some(name) = capturable(window) {
         list.push(SourceInfo { source: Source::Window(Handle(window.0 as isize)), name });
@@ -71,7 +65,6 @@ unsafe extern "system" fn add_window(window: HWND, list: LPARAM) -> BOOL {
 /// cloaked (other virtual desktops, suspended store apps), not a tool window
 /// or an owned dialog, not the desktop.
 fn capturable(window: HWND) -> Option<String> {
-    // SAFETY: plain queries on a window handle EnumWindows just gave us.
     unsafe {
         if !IsWindowVisible(window).as_bool() || window == GetShellWindow() {
             return None;
@@ -94,8 +87,6 @@ fn capturable(window: HWND) -> Option<String> {
     }
 }
 
-/// A capture session delivering frames into a two-buffer pool. Each new frame
-/// sends `Wake::Frame`.
 pub struct Capture {
     session: GraphicsCaptureSession,
     pool: Direct3D11CaptureFramePool,
@@ -117,7 +108,6 @@ impl Capture {
         }
         .context("cannot capture this source")?;
         let dxgi: IDXGIDevice = d3d.cast().context("DXGI device")?;
-        // SAFETY: wraps a live device.
         let device: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
             .and_then(|d| d.cast())
             .context("WinRT Direct3D device")?;
@@ -144,8 +134,6 @@ impl Capture {
         {
             let _ = session.SetIsBorderRequired(false);
         }
-        // A little under the frame interval, so a monitor whose refresh rate
-        // is not a multiple of `fps` still delivers at least `fps`.
         let _ = session.SetMinUpdateInterval(TimeSpan { Duration: 7_500_000 / i64::from(fps) });
         session.StartCapture().context("starting capture")?;
         Ok(Capture { session, pool, source, device, size })

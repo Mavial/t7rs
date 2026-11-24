@@ -39,8 +39,7 @@ embed-resource = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
-# Screen sharing: Windows Graphics Capture, D3D11 and Media Foundation. The
-# same version cpal already pulls in, so this only adds features.
+# The same version cpal already pulls in, so this only adds features.
 windows = { version = "0.62", features = [
     "Foundation",
     "Graphics_Capture",

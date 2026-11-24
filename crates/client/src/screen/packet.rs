@@ -1,5 +1,3 @@
-//! Access units on the wire: split into parts, paced out, put back together.
-
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -7,12 +5,9 @@ use t7_proto::voice::{MAX_ACCESS_UNIT, MAX_VIDEO_PAYLOAD};
 
 use super::AccessUnit;
 
-/// How long one access unit's parts take to leave: a frame at 60 fps.
 pub const FRAME_PACE: Duration = Duration::from_millis(16);
-/// At most this many parts leave at once, so voice and control traffic get a turn between them.
 const MAX_BURST: usize = 32;
 
-/// One datagram's share of an access unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoPart<'a> {
     pub frame: u32,
@@ -22,8 +17,6 @@ pub struct VideoPart<'a> {
     pub payload: &'a [u8],
 }
 
-/// The parts of `au`, each at most [`MAX_VIDEO_PAYLOAD`] bytes. `au` must be
-/// at most [`MAX_ACCESS_UNIT`] bytes, so its parts can be numbered on the wire.
 pub fn packetize(au: &AccessUnit) -> impl Iterator<Item = VideoPart<'_>> {
     debug_assert!(au.data.len() <= MAX_ACCESS_UNIT);
     let parts = au.data.len().div_ceil(MAX_VIDEO_PAYLOAD) as u16;
@@ -64,7 +57,6 @@ impl Pacer {
         true
     }
 
-    /// When the next part is due, if any is left.
     pub fn next_at(&self) -> Option<Instant> {
         let first = self.queue.front()?;
         Some(if self.queue.len() > 1 { first.since } else { first.due_at(first.sent) })
@@ -90,20 +82,17 @@ impl Pacer {
 }
 
 impl Sending {
-    /// Part `i` (from 0) is due `i / parts` of the way through [`FRAME_PACE`], rounded up.
     fn due_at(&self, i: usize) -> Instant {
         let nanos = (FRAME_PACE.as_nanos() * i as u128).div_ceil(self.parts as u128);
         self.since + Duration::from_nanos(nanos as u64)
     }
 
-    /// How many parts [`Self::due_at`] has made due by `now`.
     fn due_by(&self, now: Instant) -> usize {
         let elapsed = now.saturating_duration_since(self.since).as_nanos();
         ((elapsed * self.parts as u128 / FRAME_PACE.as_nanos()) as usize + 1).min(self.parts)
     }
 }
 
-/// What a pushed part completed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Assembled {
     /// The next access unit to decode: a keyframe, or the frame right after
@@ -118,11 +107,8 @@ pub enum Assembled {
 /// arrive in any order, twice, or not at all.
 #[derive(Default)]
 pub struct Assembler {
-    /// The frame being put together.
     pending: Option<Pending>,
-    /// The newest frame finished or given up on. Parts of it, or of older frames, are late.
     newest: Option<u32>,
-    /// The last frame handed out, while every frame since a keyframe has been.
     decodable: Option<u32>,
 }
 
@@ -169,12 +155,10 @@ impl Assembler {
         Some(self.finish(p))
     }
 
-    /// Treats the stream as broken: nothing more comes out until a keyframe.
     pub fn wait_for_keyframe(&mut self) {
         self.decodable = None;
     }
 
-    /// Nothing comes out until a keyframe: none has yet, or the stream broke since.
     pub fn waiting_for_keyframe(&self) -> bool {
         self.decodable.is_none()
     }
@@ -201,7 +185,6 @@ mod tests {
         AccessUnit { frame, key, data: (0..len).map(|i| (i * 7 + frame as usize) as u8).collect() }
     }
 
-    /// Pushes `parts` of `au` in that order; returns everything that came out.
     fn deliver(asm: &mut Assembler, au: &AccessUnit, parts: &[usize]) -> Vec<Assembled> {
         let all: Vec<VideoPart<'_>> = packetize(au).collect();
         parts.iter().filter_map(|&i| asm.push(all[i])).collect()
@@ -280,7 +263,6 @@ mod tests {
         assert_eq!(deliver(&mut asm, &unit, &[1]), [Assembled::Frame(unit)]);
     }
 
-    /// How many parts each `send_due` at `at` (after `t0`) hands out.
     fn sends(pacer: &mut Pacer, t0: Instant, at: &[u64]) -> Vec<usize> {
         at.iter()
             .map(|&ms| {

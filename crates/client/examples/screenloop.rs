@@ -1,17 +1,5 @@
-//! Screen sharing end to end on one machine: capture, encode, decode, show.
-//!
 //!     cargo run --release --example screenloop -- [SECONDS] [--monitor N | --window TITLE] [--quality 720p30|1080p30|1080p60] [--at X,Y]
 //!     cargo run --release --example screenloop -- --decode-bench [SECONDS]
-//!
-//! The loop shares monitor N (0 is the primary), or the first window whose
-//! title contains TITLE, and shows what a viewer would see in a window (`--at`
-//! places it, e.g. on another monitor), with a forced keyframe every 5 s. Each
-//! second it prints the capture rate, the bitrate, the largest frame, encode
-//! latency (frame handed over by the capture to access unit out), decode
-//! latency, keyframe sizes and the process's CPU.
-//!
-//! `--decode-bench` records SECONDS of the primary monitor at 1080p60, stops
-//! sharing, then decodes the recording at 60 fps and reports what that costs.
 
 #[path = "../src/screen/mod.rs"]
 #[allow(dead_code, reason = "the example has no network, so no use for the packet half")]
@@ -96,14 +84,11 @@ fn parse_args() -> Args {
     args
 }
 
-/// What the sink and the decoder saw in the current second.
 #[derive(Default)]
 struct Second {
     keyframes: Vec<usize>,
-    /// The largest access unit that is not a keyframe.
     largest: usize,
     decode: Vec<Duration>,
-    /// Access unit out of the encoder to decode start: the channel's queueing.
     queued: Duration,
     shown: u32,
 }
@@ -189,7 +174,6 @@ fn share_loop(monitor: Source, args: &Args) {
     reporting.join().unwrap();
     let ended = share.ended();
     drop(viewer);
-    // The decode thread ends once the share, and with it the sink, is gone.
     let stop = Instant::now();
     let mut share = share;
     while let Err(shared) = Arc::try_unwrap(share) {
@@ -302,7 +286,6 @@ impl Viewer {
 
 fn decode_bench(monitor: Source, seconds: u64) {
     let recording: Arc<Mutex<Vec<AccessUnit>>> = Arc::default();
-    // The share stops at the end of this block.
     let share_cpu = {
         let recording = recording.clone();
         let share = Share::start(monitor, Quality::P1080_60, move |au| recording.lock().unwrap().push(au), || {});
@@ -390,7 +373,6 @@ fn process_cpu() -> Duration {
         fn GetCurrentProcess() -> isize;
         fn QueryProcessCycleTime(process: isize, cycles: *mut u64) -> i32;
     }
-    // The cycle counter runs at a fixed rate; measure it once against the clock.
     static HZ: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     let hz = *HZ.get_or_init(|| {
         let (start, cycles) = (Instant::now(), unsafe { std::arch::x86_64::_rdtsc() });
@@ -398,7 +380,6 @@ fn process_cpu() -> Duration {
         (unsafe { std::arch::x86_64::_rdtsc() } - cycles) as f64 / start.elapsed().as_secs_f64()
     });
     let mut cycles = 0;
-    // SAFETY: an out-pointer to a local.
     unsafe { QueryProcessCycleTime(GetCurrentProcess(), &raw mut cycles) };
     Duration::from_secs_f64(cycles as f64 / hz)
 }

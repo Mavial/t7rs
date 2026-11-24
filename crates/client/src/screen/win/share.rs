@@ -1,6 +1,3 @@
-//! The share thread: paces capture to the frame rate, scales on the GPU,
-//! feeds the encoder and hands access units to the sink.
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
@@ -19,9 +16,7 @@ use super::convert::{Converter, Gpu, SLOTS};
 use super::encode::Encoder;
 use super::{Runtime, now_100ns};
 
-/// What the share thread waits for.
 pub enum Wake {
-    /// The capture delivered a frame.
     Frame,
     NeedInput,
     HaveOutput,
@@ -134,7 +129,6 @@ fn run(
     shared.ended.store(true, Relaxed);
 }
 
-/// Fields drop in order: capture stops first, the runtime goes last.
 struct Pipeline {
     capture: Capture,
     encoder: Encoder,
@@ -150,13 +144,10 @@ impl Pipeline {
         let runtime = Runtime::start()?;
         let monitor = match source {
             Source::Monitor(Handle(h)) => HMONITOR(h as _),
-            // SAFETY: a plain query; a stale handle gives the nearest monitor.
             Source::Window(Handle(h)) => unsafe { MonitorFromWindow(HWND(h as _), MONITOR_DEFAULTTONEAREST) },
         };
         let gpu = Gpu::new(monitor)?;
         let capture = Capture::start(&gpu.device, source, params.fps, wake)?;
-        // The encoded size is fixed for the share; a window that changes size
-        // later is scaled into it.
         let size = fit(capture.size(), params.max);
         let encoder = Encoder::new(&gpu, size, params, wake)?;
         let converter = Converter::new(&gpu, capture.size(), size, params.fps)?;
@@ -165,13 +156,10 @@ impl Pipeline {
 
     fn run(&mut self, wakes: &Receiver<Wake>, shared: &Shared, sink: &mut dyn FnMut(AccessUnit)) -> Result<(), String> {
         let interval = Duration::from_secs(1) / self.fps;
-        // Frames this early still count as on time, so capture jitter does not halve the rate.
         let early = interval / 4;
         let duration = 10_000_000 / i64::from(self.fps);
         let mut due = Instant::now();
-        // Input the asynchronous encoder asked for and has not had yet.
         let mut credit = 0u32;
-        // The newest frame not encoded yet, and when it reached this thread.
         let mut pending: Option<(Direct3D11CaptureFrame, i64)> = None;
         let mut keyframe = true;
         let mut out = Out { inflight: VecDeque::new(), frame: 0 };
@@ -180,8 +168,6 @@ impl Pipeline {
         let is_async = self.encoder.is_async();
         let ready = |credit: u32, out: &Out| (credit > 0 || !is_async) && out.inflight.len() < SLOTS - 1;
         loop {
-            // The frame time matters only while the encoder can take a frame.
-            // Until then, its NeedInput or HaveOutput wakes this thread.
             let waiting = ready(credit, &out) && (pending.is_some() || (keyframe && last.is_some()));
             let timeout = if waiting {
                 due.checked_sub(early).unwrap().saturating_duration_since(Instant::now())
@@ -212,8 +198,6 @@ impl Pipeline {
                     Wake::Stop => return Ok(()),
                 }
             }
-            // Take frames as they come, so the pool always has a free buffer
-            // and the newest picture is never the one dropped.
             if arrived && let Some(frame) = self.capture.newest()? {
                 pending = Some((frame, now_100ns()));
             }
@@ -225,7 +209,6 @@ impl Pipeline {
             let (input, time) = if let Some((frame, time)) = pending.take() {
                 let (texture, content) = capture::texture(&frame)?;
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
-                // SAFETY: writes into a local.
                 unsafe { texture.GetDesc(&raw mut desc) };
                 if (desc.Width, desc.Height) != self.converter.input_size() {
                     self.converter = Converter::new(&self.gpu, (desc.Width, desc.Height), self.size, self.fps)?;
@@ -236,7 +219,6 @@ impl Pipeline {
                 slot = (slot + 1) % SLOTS;
                 (used, time)
             } else if keyframe && let Some(last) = last {
-                // Nothing moved since: encode the last picture again.
                 (last, now_100ns())
             } else {
                 continue;
@@ -256,7 +238,6 @@ impl Pipeline {
 }
 
 struct Out {
-    /// Arrival times of the frames inside the encoder, oldest first.
     inflight: VecDeque<i64>,
     frame: u32,
 }

@@ -1,7 +1,3 @@
-//! Watching someone's screen. Their frames go from the network thread to a
-//! decode thread of the watch's own, which puts up the newest picture and
-//! wakes the window showing it. The main window does not repaint for video.
-
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -19,37 +15,27 @@ use crate::net::ScreenSink;
 use crate::screen::scale::Scaler;
 use crate::screen::{AccessUnit, Decoder, Picture};
 
-/// Asks the window showing a screen to draw its newest picture.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
-/// Frames waiting for the decoder: ~130 ms at 30 fps. When it falls further
-/// behind, the frames that don't fit are dropped and the screen starts again
-/// from a keyframe.
 const QUEUE: usize = 4;
 
-/// Two clicks this close together are a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
-/// The newest picture of a watched screen, on its way from the decode thread to the window.
 #[derive(Default)]
 pub struct Frames(Mutex<Slots>);
 
 #[derive(Default)]
 struct Slots {
-    /// Decoded and not drawn yet.
     newest: Option<Picture>,
-    /// Drawn and replaced since, for the decoder to reuse.
     spare: Option<Picture>,
 }
 
 impl Frames {
-    /// Puts up `picture` to draw, and returns a picture to reuse if there is one.
     fn put(&self, picture: Picture) -> Option<Picture> {
         let mut slots = self.0.lock().unwrap();
         slots.newest.replace(picture).or_else(|| slots.spare.take())
     }
 
-    /// Swaps the picture put up since the last call, if any, into `shown`.
     fn take_newest(&self, shown: &mut Option<Picture>) {
         let mut slots = self.0.lock().unwrap();
         if let Some(newest) = slots.newest.take() {
@@ -73,7 +59,6 @@ pub fn start(wake: Wake) -> Result<(Arc<Frames>, ScreenSink), String> {
         })
         .map_err(|e| format!("screen decoder thread: {e}"))?;
     let sink: ScreenSink = Box::new(move |au| {
-        // Refusing a frame makes the net layer ask for a keyframe.
         let failed = failed.swap(false, Relaxed);
         queue.try_send(au).is_ok() && !failed
     });
@@ -98,8 +83,6 @@ fn decode(units: &Receiver<AccessUnit>, mut decoder: Decoder, frames: &Frames, f
     }
 }
 
-/// The window showing the screen watched. It draws only when a new picture
-/// arrives or it changes size.
 pub struct Window {
     winit: Rc<winit::window::Window>,
     surface: softbuffer::Surface<Rc<winit::window::Window>, Rc<winit::window::Window>>,
@@ -107,7 +90,6 @@ pub struct Window {
     shown: Option<Picture>,
     scaler: Scaler,
     title: String,
-    /// When the left button last went down, to tell a double-click.
     pressed: Option<Instant>,
 }
 
@@ -130,7 +112,6 @@ impl Window {
         self.winit.id()
     }
 
-    /// Shows `frames` under `title` from now on, keeping the window where it is.
     pub fn show(&mut self, frames: &Arc<Frames>, title: &str) {
         if !Arc::ptr_eq(frames, &self.frames) {
             self.frames = frames.clone();
@@ -143,7 +124,6 @@ impl Window {
         }
     }
 
-    /// A new picture is ready.
     pub fn wake(&self) {
         self.winit.request_redraw();
     }

@@ -1,7 +1,3 @@
-//! NV12 (BT.709, limited range) to `0x00RRGGBB`, the viewer's last step.
-
-/// One decoded picture: a full-resolution Y plane and a half-resolution
-/// plane of interleaved U and V, both `stride` bytes per row.
 pub struct Nv12<'a> {
     pub y: &'a [u8],
     pub uv: &'a [u8],
@@ -22,18 +18,15 @@ const GV: i32 = fixed(0.468124 * 255.0 / 224.0);
 const BU: i32 = fixed(1.8556 * 255.0 / 224.0);
 const ROUND: i32 = 1 << (SHIFT - 1);
 
-/// Fills `out` (`width * height` pixels) from `src`.
 pub fn to_rgb(src: &Nv12, out: &mut [u32]) {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
-        // SAFETY: the CPU supports AVX2.
         unsafe { to_rgb_avx2(src, out) };
         return;
     }
     rows(src, out);
 }
 
-/// The same loop, vectorised eight pixels at a time.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 fn to_rgb_avx2(src: &Nv12, out: &mut [u32]) {
@@ -60,7 +53,6 @@ fn rows(src: &Nv12, out: &mut [u32]) {
     }
 }
 
-/// The red, green and blue offsets one U, V pair adds to its pixels.
 fn tint([cb, cr]: [u8; 2]) -> [i32; 3] {
     let (cb, cr) = (i32::from(cb) - 128, i32::from(cr) - 128);
     [RV * cr, -GU * cb - GV * cr, BU * cb]
@@ -88,7 +80,6 @@ mod tests {
 
     #[test]
     fn studio_swing_primaries_become_full_range_colors() {
-        // Black, white, red, green, blue, as BT.709 limited-range Y, U, V.
         let cases = [
             ((16, 128, 128), 0x000000),
             ((235, 128, 128), 0xffffff),
@@ -104,7 +95,6 @@ mod tests {
 
     #[test]
     fn each_two_by_two_block_shares_one_chroma_sample() {
-        // 4×2 picture: left block grey, right block red-ish, odd stride.
         let stride = 5;
         let y = [100, 100, 63, 63, 0, 100, 100, 63, 63, 0];
         let uv = [128, 128, 102, 240, 0];

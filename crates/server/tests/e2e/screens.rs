@@ -1,5 +1,3 @@
-//! Screen sharing: who receives a share's video, and when a share or a watch ends.
-
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -9,7 +7,6 @@ use t7_server::config::DEFAULT_CONFIG;
 
 use crate::harness::{Got, HOME, TestClient, Voice, error, id_of, set, start, start_owned};
 
-/// One whole access unit in a single datagram.
 fn frame(frame: u32, payload: &[u8]) -> voice::ToServer<'_> {
     voice::ToServer::Video { frame, part: 0, parts: 1, key: true, payload }
 }
@@ -18,7 +15,6 @@ fn got_frame(from: ClientId, frame: u32, payload: &[u8]) -> Got {
     Got::Video { from, frame, part: 0, parts: 1, key: true, payload: payload.to_vec() }
 }
 
-/// Connects `nick` with a voice link; also returns the channels it was welcomed with.
 async fn connect_with_voice(addr: SocketAddr, nick: &str) -> (TestClient, Voice, Vec<ChannelInfo>) {
     let (c, welcome) = TestClient::connect(addr, nick, None).await;
     let v = Voice::open(addr, &welcome).await;
@@ -26,7 +22,6 @@ async fn connect_with_voice(addr: SocketAddr, nick: &str) -> (TestClient, Voice,
     (c, v, channels)
 }
 
-/// Starts `sharer`'s share and has `viewer` watch it, once the server has done both.
 async fn share_and_watch(sharer: &mut TestClient, sharer_id: ClientId, viewer: &mut TestClient) {
     sharer.send(C2S::SetSharing(true)).await;
     sharer.until(|m| *m == S2C::ClientSharing { id: sharer_id, sharing: true }).await;

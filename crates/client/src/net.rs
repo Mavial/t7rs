@@ -3,7 +3,7 @@
 //! channels and gets woken up (`request_repaint`) only when something arrives.
 //!
 //! Each session has a TLS control connection and, once welcomed, a UDP voice
-//! link to the same server address. Screen video shares the voice link.
+//! link to the same server address.
 
 use std::net::SocketAddr;
 use std::sync::mpsc as std_mpsc;
@@ -80,7 +80,6 @@ pub enum Ended {
     },
 }
 
-/// Receives each encoded screen frame to send.
 pub type VideoSink = Arc<dyn Fn(AccessUnit) + Send + Sync>;
 
 /// Takes each decodable frame of the screen watched, in order, on the
@@ -146,7 +145,6 @@ impl Net {
         })
     }
 
-    /// Where the screen encoder sends access units while sharing.
     pub fn video_sink(&self) -> VideoSink {
         let tx = self.tx.clone();
         Arc::new(move |au| {
@@ -154,8 +152,6 @@ impl Net {
         })
     }
 
-    /// Watches `sharer`'s screen, its frames going to `sink`, instead of any
-    /// watched before. With `None`, watches nobody.
     pub fn watch(&self, watch: Option<(ClientId, ScreenSink)>) {
         let sharer = watch.as_ref().map(|(sharer, _)| *sharer);
         let watched = watch.map(|(sharer, sink)| Watched::new(sharer, sink, Instant::now()));
@@ -164,8 +160,6 @@ impl Net {
     }
 }
 
-/// Puts the watched screen's video back together for its [`ScreenSink`], and
-/// says when to ask for a keyframe.
 #[derive(Default)]
 struct Viewer {
     watched: Option<Watched>,
@@ -175,7 +169,6 @@ struct Watched {
     sharer: ClientId,
     sink: ScreenSink,
     assembler: Assembler,
-    /// When we last asked them for a keyframe. Starting to watch asks for one.
     asked: Instant,
 }
 
@@ -195,15 +188,11 @@ impl Viewer {
         }
     }
 
-    /// When to ask for a keyframe: while the watched video can't be decoded,
-    /// [`voice::KEYFRAME_INTERVAL`] after asking last. A still screen sends
-    /// no video until asked, so this does not wait for video to arrive.
     fn keyframe_due(&self) -> Option<Instant> {
         let w = self.watched.as_ref()?;
         w.assembler.waiting_for_keyframe().then(|| w.asked + voice::KEYFRAME_INTERVAL)
     }
 
-    /// Who to ask for a keyframe at `now`, if it is due.
     fn ask(&mut self, now: Instant) -> Option<ClientId> {
         if now < self.keyframe_due()? {
             return None;
@@ -213,7 +202,6 @@ impl Viewer {
         Some(w.sharer)
     }
 
-    /// The server ended `sharer`'s share, and with it the watch.
     fn share_ended(&mut self, sharer: ClientId) {
         if self.watched.as_ref().is_some_and(|w| w.sharer == sharer) {
             self.watched = None;
@@ -341,7 +329,6 @@ impl VoiceLink {
         let _ = self.sock.send(&self.buf).await;
     }
 
-    /// Like [`Self::send`] without waiting: a full socket buffer drops the datagram.
     fn try_send(&mut self, msg: ToServer<'_>) {
         self.crypto.seal(msg, &mut self.buf);
         let _ = self.sock.try_send(&self.buf);
@@ -439,7 +426,6 @@ async fn session(
                         }
                         voice_ping.reset_immediately();
                     }
-                    // Watching ends with the share, and a share starts again only after it ended.
                     if let S2C::ClientSharing { id: sharer, .. } | S2C::ClientLeft { id: sharer, .. } = &msg {
                         viewer.lock().unwrap().share_ended(*sharer);
                     }
@@ -519,7 +505,6 @@ async fn session(
     }
 }
 
-/// Waits until `at`, or forever with `None`.
 async fn until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at.into()).await,
@@ -558,8 +543,6 @@ mod tests {
         AccessUnit { frame, key, data: vec![1] }
     }
 
-    /// A viewer that started watching sharer 1 at `at`, and the frames its sink
-    /// took. The sink takes the frames `take` says yes to.
     fn watching(at: Instant, take: fn(u32) -> bool) -> (Viewer, Arc<Mutex<Vec<u32>>>) {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink_got = got.clone();

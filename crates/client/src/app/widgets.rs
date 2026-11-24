@@ -40,7 +40,6 @@ pub(super) fn mic_held(ui: &mut egui::Ui, icon: Icon, color: Color32, tip: &str)
     resp.on_hover_text(tip);
 }
 
-/// An icon toggle button, tinted with `on_color` while on (muted, deafened...).
 pub(super) fn toggle(
     ui: &mut egui::Ui,
     on: &mut bool,

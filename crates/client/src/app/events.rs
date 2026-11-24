@@ -169,7 +169,6 @@ impl App {
                 self.push(tab, LineKind::Error, message);
             }
             S2C::SendKeyframe => self.send_keyframe(),
-            // The net layer handles these.
             S2C::Rejected { .. } | S2C::Pong { .. } => {}
         }
     }

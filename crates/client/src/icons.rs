@@ -27,9 +27,7 @@ pub enum Icon {
     Dash,
     Crown,
     SpeakerPlus,
-    /// A monitor with an arrow going up: share your screen.
     Screen,
-    /// A monitor with a square in it: stop sharing.
     ScreenStop,
 }
 

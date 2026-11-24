@@ -25,7 +25,6 @@ pub struct Settings {
     pub folded: std::collections::BTreeMap<ServerKey, std::collections::BTreeSet<String>>,
     /// Made on the first connect.
     pub identity_key: Option<IdentityKey>,
-    /// What screen shares are sent at.
     pub screen_quality: Quality,
 }
 

@@ -85,7 +85,6 @@ struct Tree<'a> {
     me_talking: bool,
     dragging: Dragging,
     pointer: Option<egui::Pos2>,
-    /// Whose screen we watch.
     watched: Option<ClientId>,
     picked: Option<TreeAction>,
 }
@@ -115,7 +114,6 @@ struct MemberRow<'a> {
     badge: Option<(Icon, Color32)>,
     owns_room: bool,
     volume: f32,
-    /// They share their screen in our channel.
     watchable: bool,
 }
 
@@ -711,8 +709,6 @@ impl MemberRow<'_> {
         }
     }
 
-    /// The avatar, the name with its badges and volume note, and the status marks
-    /// on the right. Returns where the LIVE badge went, if they share their screen.
     fn paint(&self, p: &egui::Painter, rect: Rect, indent: f32) -> Option<Rect> {
         let c = self.c;
         // The avatar starts where the channel's name does.
