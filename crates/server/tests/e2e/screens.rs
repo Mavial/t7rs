@@ -289,3 +289,90 @@ async fn a_protocol_7_viewer_watches_one_screen_at_a_time() {
     vb.send(frame(1, &[3])).await;
     assert_eq!(vv.recv_owned().await, None, "watching nobody");
 }
+
+fn preview(sharer: ClientId) -> C2S {
+    C2S::Preview { sharer }
+}
+
+#[tokio::test]
+async fn a_preview_is_the_sharers_next_keyframe_once() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut sharer, mut vs, _) = connect_with_voice(addr, "sharer").await;
+    let (mut viewer, mut vv, _) = connect_with_voice(addr, "viewer").await;
+    let (_idle, mut vi, _) = connect_with_voice(addr, "idle").await;
+    sharer.send(C2S::SetSharing(true)).await;
+    viewer.until(|m| *m == S2C::ClientSharing { id: vs.id, sharing: true }).await;
+
+    viewer.send(preview(vs.id)).await;
+    sharer.until(|m| *m == S2C::SendKeyframe).await;
+    vs.send(voice::ToServer::Video { frame: 0, part: 0, parts: 1, key: false, payload: &[1] }).await;
+    assert_eq!(vv.recv_owned().await, None, "not a keyframe");
+    for part in 0..2 {
+        let payload = [2 + part as u8];
+        vs.send(voice::ToServer::Video { frame: 1, part, parts: 2, key: true, payload: &payload }).await;
+        let got = Got::Video { from: vs.id, frame: 1, part, parts: 2, key: true, payload: payload.to_vec() };
+        assert_eq!(vv.recv_owned().await, Some(got), "part {part} of the keyframe");
+    }
+    assert_eq!(vi.recv_owned().await, None, "asked by someone else");
+
+    vs.send(voice::ToServer::Video { frame: 2, part: 0, parts: 1, key: false, payload: &[4] }).await;
+    assert_eq!(vv.recv_owned().await, None, "the frame after it");
+    vs.send(frame(3, &[5])).await;
+    assert_eq!(vv.recv_owned().await, None, "the next keyframe: one preview per ask");
+}
+
+#[tokio::test]
+async fn only_someone_in_the_sharers_channel_gets_a_preview() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut sharer, mut vs, channels) = connect_with_voice(addr, "sharer").await;
+    let (mut viewer, mut vv, _) = connect_with_voice(addr, "viewer").await;
+    let (mut away, mut va, _) = connect_with_voice(addr, "away").await;
+    let [lobby, hangout] = ["Lobby", "Hangout"].map(|name| id_of(&channels, name));
+    away.send(C2S::JoinChannel { channel: hangout, password: None }).await;
+    sharer.send(C2S::SetSharing(true)).await;
+    away.until(|m| *m == S2C::ClientSharing { id: vs.id, sharing: true }).await;
+    sharer.sync().await;
+
+    away.send(preview(vs.id)).await;
+    viewer.send(preview(vv.id)).await;
+    away.sync().await;
+    viewer.sync().await;
+    assert!(!sharer.sync().await.contains(&S2C::SendKeyframe), "asked from another channel, or of yourself");
+    vs.send(frame(0, &[1])).await;
+    assert_eq!(va.recv_owned().await, None, "in another channel");
+    assert_eq!(vv.recv_owned().await, None, "didn't ask");
+
+    viewer.send(preview(vs.id)).await;
+    sharer.until(|m| *m == S2C::SendKeyframe).await;
+    viewer.send(C2S::JoinChannel { channel: hangout, password: None }).await;
+    viewer.send(C2S::JoinChannel { channel: lobby, password: None }).await;
+    viewer.sync().await;
+    vs.send(frame(1, &[2])).await;
+    assert_eq!(vv.recv_owned().await, None, "left the channel after asking");
+}
+
+#[tokio::test]
+async fn previews_are_rate_limited() {
+    let addr = start(DEFAULT_CONFIG).await;
+    let (mut sharer, mut vs, _) = connect_with_voice(addr, "sharer").await;
+    let (mut viewer, mut vv, _) = connect_with_voice(addr, "viewer").await;
+    sharer.send(C2S::SetSharing(true)).await;
+    viewer.until(|m| *m == S2C::ClientSharing { id: vs.id, sharing: true }).await;
+
+    for n in 0..PREVIEW_BURST {
+        viewer.send(preview(vs.id)).await;
+        viewer.sync().await;
+        vs.send(frame(n, &[n as u8])).await;
+        assert_eq!(vv.recv_owned().await, Some(got_frame(vs.id, n, &[n as u8])), "ask {n} of the burst");
+    }
+    viewer.send(preview(vs.id)).await;
+    viewer.sync().await;
+    vs.send(frame(PREVIEW_BURST, &[9])).await;
+    assert_eq!(vv.recv_owned().await, None, "one ask over the burst");
+
+    tokio::time::sleep(PREVIEW_REFILL).await;
+    viewer.send(preview(vs.id)).await;
+    viewer.sync().await;
+    vs.send(frame(PREVIEW_BURST + 1, &[10])).await;
+    assert_eq!(vv.recv_owned().await, Some(got_frame(vs.id, PREVIEW_BURST + 1, &[10])), "one more after a while");
+}
