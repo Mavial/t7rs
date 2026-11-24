@@ -9,6 +9,7 @@ mod icons;
 mod net;
 mod ptt;
 mod resample;
+mod screen;
 mod settings;
 mod shell;
 mod sounds;
