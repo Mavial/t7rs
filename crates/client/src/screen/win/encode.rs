@@ -254,12 +254,12 @@ fn read(sample: &IMFSample) -> Result<Vec<u8>, String> {
     }
 }
 
-struct Unsent<T>(T);
-// SAFETY: Media Foundation transforms and their event queues are free-threaded.
-unsafe impl<T> Send for Unsent<T> {}
+struct EventQueue(IMFMediaEventGenerator);
+// SAFETY: a Media Foundation transform's event queue is free-threaded.
+unsafe impl Send for EventQueue {}
 
 fn forward_events(transform: &IMFTransform, wake: Sender<Wake>) -> Result<JoinHandle<()>, String> {
-    let events = Unsent(transform.cast::<IMFMediaEventGenerator>().context("encoder events")?);
+    let events = EventQueue(transform.cast().context("encoder events")?);
     let spawned = std::thread::Builder::new().name("screen encoder events".into()).spawn(move || {
         let events = events;
         while let Ok(event) = unsafe { events.0.GetEvent(MF_EVENT_FLAG_NONE) } {
