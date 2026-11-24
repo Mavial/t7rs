@@ -426,7 +426,7 @@ async fn session(
                         }
                         voice_ping.reset_immediately();
                     }
-                    if let S2C::ClientSharing { id: sharer, .. } | S2C::ClientLeft { id: sharer, .. } = &msg {
+                    if let S2C::ClientSharing { id: sharer, sharing: false } | S2C::ClientLeft { id: sharer, .. } = &msg {
                         viewer.lock().unwrap().share_ended(*sharer);
                     }
                     events.emit(NetEvent::Message(id, msg));
