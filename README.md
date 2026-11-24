@@ -8,7 +8,8 @@ no cloud, no bloat.
 
 > **Status:** voice works. Server, channel tree, presence, voice chat per channel
 > (voice activation or push-to-talk), text chat (server, channel, private),
-> mute / sound off / away, roles and channel permissions, and rooms of your own.
+> mute / sound off / away, roles and channel permissions, rooms of your own, and
+> screen sharing (Windows only for now).
 
 ## Quick start
 
@@ -56,6 +57,8 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Close a PM tab | Middle-click it, or right-click → Close |
 | Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons bottom-right. Sound off silences the other people, not notification sounds |
 | Someone's volume | Right-click them: 0% (muted for you) to 200%. Remembered by nickname |
+| Share your screen | The screen button bottom-right: pick a screen or window, and a quality (720p 30, 1080p 30 or 1080p 60). Click it again to stop. Windows only for now |
+| Watch someone's screen | Click the red **LIVE** badge next to someone in your channel, or right-click them → Watch screen. It opens in a window of its own: double-click or `F11` for full screen, `Esc` to leave it. Windows only for now |
 | Voice settings | The sliders button bottom-right: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), notification sounds and sound pack, volumes |
 | Poke | Right-click a user → Poke…, with an optional message. They get a popup, a sound and a flashing taskbar entry |
 
@@ -275,7 +278,9 @@ crates/
   sharer's video past 12 Mbit/s or while they may not speak. After a lost
   frame a viewer waits for the next keyframe and asks the sharer for one
   through the server, which passes on at most one request per sharer every
-  250 ms. Changing channels ends your share and what you watch.
+  250 ms. Changing channels ends your share and what you watch. A watched
+  screen decodes on a thread of its own and draws in its own window, so the
+  main window doesn't repaint for video.
 - **Sound cleanup** (`crates/client/src/dsp.rs`), on the microphone, 10 ms at a time:
   high-pass filter and WebRTC AEC3 echo cancellation (pure-Rust `sonora`), then
   RNNoise noise suppression (`nnnoiseless`), then WebRTC AGC2 adaptive gain. Voice
