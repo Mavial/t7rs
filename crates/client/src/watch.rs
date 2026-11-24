@@ -411,19 +411,18 @@ impl Window {
             return tracing::error!("cannot resize the screens window: {e}");
         }
         let (width, height) = (size.width as usize, size.height as usize);
-        let look = self.look();
         let stale = std::mem::take(&mut self.stale);
         if stale {
             let focus = match self.layout {
                 Layout::Focus(sharer) => self.tiles.iter().position(|t| t.stream.sharer == sharer),
                 Layout::Grid => None,
             };
-            let areas = arrange((width, height), look.ppp, self.tiles.len(), focus, !look.fullscreen);
+            let areas = arrange((width, height), self.ppp(), self.tiles.len(), focus, !self.fullscreen());
             for (tile, area) in self.tiles.iter_mut().zip(areas) {
                 tile.area = area;
             }
         }
-        let look = Look { target: self.target(), ..look };
+        let look = self.look();
         for tile in &mut self.tiles {
             tile.redraw |= tile.stream.frames.take_newest(&mut tile.shown);
         }
