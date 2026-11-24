@@ -17,6 +17,7 @@ use win as platform;
 use std::time::Duration;
 
 pub mod packet;
+pub mod scale;
 
 /// One encoded H.264 frame in Annex B form, the unit the encoder emits and
 /// the decoder takes.

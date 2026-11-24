@@ -22,6 +22,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use screen::scale::Scaler;
 use screen::{AccessUnit, Decoder, Picture, Quality, Share, Source};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -181,7 +182,8 @@ fn share_loop(monitor: Source, args: &Args) {
         move || report(&share, &second, seconds, &proxy)
     });
 
-    let mut viewer = Viewer { window: None, surface: None, newest, recycle, at: args.at, second };
+    let mut viewer =
+        Viewer { window: None, surface: None, scaler: Scaler::default(), newest, recycle, at: args.at, second };
     event_loop.run_app(&mut viewer).expect("event loop");
     reporting.join().unwrap();
     let ended = share.ended();
@@ -239,6 +241,7 @@ fn report(share: &Share, second: &Mutex<Second>, seconds: u64, proxy: &EventLoop
 struct Viewer {
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    scaler: Scaler,
     newest: Arc<Mutex<Option<Picture>>>,
     recycle: mpsc::Sender<Picture>,
     at: Option<(i32, i32)>,
@@ -289,25 +292,10 @@ impl Viewer {
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
         surface.resize(w, h).expect("resize");
         let mut buffer = surface.buffer_mut().expect("buffer");
-        blit(&picture, &mut buffer, size.width as usize, size.height as usize);
+        self.scaler.draw(&picture, &mut buffer, size.width as usize, size.height as usize);
         buffer.present().expect("present");
         self.second.lock().unwrap().shown += 1;
         let _ = self.recycle.send(picture);
-    }
-}
-
-/// Nearest-neighbour scale of `picture` to fill `out`.
-fn blit(picture: &Picture, out: &mut [u32], width: usize, height: usize) {
-    let (pw, ph) = (picture.width as usize, picture.height as usize);
-    if pw == 0 || ph == 0 {
-        return;
-    }
-    let columns: Vec<usize> = (0..width).map(|x| x * pw / width).collect();
-    for (y, row) in out.chunks_exact_mut(width).enumerate().take(height) {
-        let src = &picture.pixels[(y * ph / height) * pw..][..pw];
-        for (o, &x) in row.iter_mut().zip(&columns) {
-            *o = src[x];
-        }
     }
 }
 
