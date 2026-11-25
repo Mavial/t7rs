@@ -6,18 +6,21 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use t7_proto::perms::{ChannelPerms, Member, Override, Perm, Permissions, Perms, RoleId, Roles};
 use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo, Speech};
 
-use egui::vec2;
+use egui::{Color32, ColorImage, TextureOptions, vec2};
 use t7_proto::tls::Fingerprint;
 use t7_proto::{BanInfo, S2C};
 
 use super::channel_dialog::FormTab;
 use super::chat::{Line, LineKind, TabKind};
 use super::server_settings::{Pick, SettingsTab};
+use super::sharing::Watching;
+use super::shelf::Card;
 use super::*;
 use crate::settings::Recent;
 
@@ -165,6 +168,45 @@ fn connected(ctx: &egui::Context) -> App {
         ),
     ];
     app
+}
+
+fn fake_still(ctx: &egui::Context, sharer: u32, tint: [u8; 3]) -> egui::TextureHandle {
+    let [w, h] = shelf::still_size(1.0);
+    let shade = move |k: u8| Color32::from_rgb(tint[0] + k, tint[1] + k, tint[2] + k);
+    let pixel = move |x: usize, y: usize| {
+        let (x, y) = (x * 320 / w, y * 180 / h);
+        let (left, right) = ((12..90).contains(&x), (100..308).contains(&x));
+        let body = (30..168).contains(&y);
+        let text = right && body && (y - 30) % 14 < 5 && x < 130 + (y * 37) % 170;
+        if y < 18 {
+            shade(28)
+        } else if text {
+            shade(60)
+        } else if body && (left || right) {
+            shade(14)
+        } else {
+            shade(0)
+        }
+    };
+    let pixels = (0..h).flat_map(|y| (0..w).map(move |x| pixel(x, y))).collect();
+    ctx.load_texture(format!("still {sharer}"), ColorImage::new([w, h], pixels), TextureOptions::LINEAR)
+}
+
+fn three_sharing(ctx: &egui::Context) -> App {
+    let mut app = connected(ctx);
+    let view = app.view.as_mut().unwrap();
+    view.apply(&S2C::ClientSharing { id: 3, sharing: true });
+    view.apply(&S2C::ClientMoved { id: 5, channel: 2 });
+    view.apply(&S2C::ClientSharing { id: 5, sharing: true });
+    let tints = [(2, [0x14, 0x1c, 0x2a]), (3, [0x26, 0x20, 0x12]), (5, [0x22, 0x14, 0x2a])];
+    app.shelf.cards = (tints.into_iter())
+        .map(|(sharer, tint)| Card { sharer, still: Some(fake_still(ctx, sharer, tint)), asked: Some(Instant::now()) })
+        .collect();
+    app
+}
+
+fn watching(sharers: &[u32]) -> Vec<Watching> {
+    sharers.iter().map(|&sharer| Watching { sharer, frames: Arc::default() }).collect()
 }
 
 fn disconnected(ctx: &egui::Context) -> App {
@@ -386,6 +428,31 @@ const SCENES: &[Scene] = &[
         app.conn = Conn::Connecting(Login { address: "friday.example.com".into(), password: String::new() });
         app
     }),
+    ("40-shelf-one", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        let still = Some(fake_still(ctx, 2, [0x14, 0x1c, 0x2a]));
+        app.shelf.cards = vec![Card { sharer: 2, still, asked: Some(Instant::now()) }];
+        app
+    }),
+    ("41-shelf-three", (1100, 720), three_sharing),
+    ("42-shelf-watching-two", (1100, 720), |ctx| {
+        let mut app = three_sharing(ctx);
+        app.watching = watching(&[2, 3]);
+        app
+    }),
+    ("43-shelf-folded", (1100, 720), |ctx| {
+        let mut app = three_sharing(ctx);
+        app.watching = watching(&[3]);
+        app.shelf.folded.insert(2);
+        app
+    }),
+    ("44-shelf-small", (760, 480), three_sharing),
+    ("45-shelf-one-watching", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.shelf.cards = vec![Card { sharer: 2, still: None, asked: Some(Instant::now()) }];
+        app.watching = watching(&[2]);
+        app
+    }),
 ];
 
 #[derive(Clone, Copy)]
@@ -552,12 +619,13 @@ fn snapshots() {
 fn frame_time() {
     const FRAMES: usize = 260;
     const KEPT: usize = 200;
-    let size = (1100, 720);
-    let mut canvas = Canvas::new(size, connected, 1.0);
+    let scene = std::env::var("T7_FRAME_SCENE").unwrap_or_else(|_| "02-connected".into());
+    let &(name, size, make) = SCENES.iter().find(|s| s.0 == scene).expect("T7_FRAME_SCENE names a scene");
+    let mut canvas = Canvas::new(size, make, 1.0);
     let mut times: Vec<f64> = (0..FRAMES)
         .map(|frame| {
             let raw = canvas.input(frame);
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             canvas.draw(raw);
             started.elapsed().as_secs_f64() * 1000.0
         })
@@ -566,7 +634,7 @@ fn frame_time() {
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times[((KEPT - 1) as f64 * q).round() as usize];
     println!(
-        "frame_time {}x{}, last {KEPT} of {FRAMES} frames: median {:.3} ms, p10 {:.3} ms, p90 {:.3} ms",
+        "frame_time {name} {}x{}, last {KEPT} of {FRAMES} frames: median {:.3} ms, p10 {:.3} ms, p90 {:.3} ms",
         size.0,
         size.1,
         at(0.5),

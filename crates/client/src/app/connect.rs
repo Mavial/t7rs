@@ -152,6 +152,7 @@ impl App {
         let key = self.settings.identity_key.get_or_insert_with(settings::new_identity_key).clone();
         self.session = self.net.connect(address.clone(), nickname, login_password, pinned, key);
         self.conn = Conn::Connecting(Login { address, password });
+        self.shelf.folded.clear();
         self.view = None;
         self.ping = None;
         self.last_error = None;

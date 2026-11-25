@@ -73,8 +73,8 @@ bind = "0.0.0.0:9988"
 # Leave empty for a public server.
 password = ""
 max_clients = 128
-# On first start the log shows a claim token. In T7, the menu next to
-# CHANNELS, then Claim ownership, makes whoever enters it first the owner.
+# On first start the log shows a claim token. In T7, the ⋯ next to the
+# server's name, then Claim ownership, makes whoever enters it first the owner.
 # Roles and who holds them are kept in roles.toml next to this file.
 
 # The channels a new server starts with. On first start they are copied to

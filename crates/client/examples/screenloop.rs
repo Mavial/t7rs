@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use screen::scale::Scaler;
+use screen::scale::{Area, Scaler};
 use screen::{AccessUnit, Decoder, Picture, Quality, Share, Source};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -277,7 +277,8 @@ impl Viewer {
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
         surface.resize(w, h).expect("resize");
         let mut buffer = surface.buffer_mut().expect("buffer");
-        self.scaler.draw(&picture, &mut buffer, size.width as usize, size.height as usize);
+        let (w, h) = (size.width as usize, size.height as usize);
+        self.scaler.draw(&picture, &mut buffer, w, Area::whole(w, h));
         buffer.present().expect("present");
         self.second.lock().unwrap().shown += 1;
         let _ = self.recycle.send(picture);

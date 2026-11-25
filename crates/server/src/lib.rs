@@ -105,7 +105,9 @@ fn load_or_init_roles(cfg: &Config, data_dir: Option<&Path>) -> std::io::Result<
         roles.save(&file)?;
     }
     if let Some(token) = roles.claim_token() {
-        tracing::info!("claim token: {token}  (in T7: the menu next to CHANNELS, then Claim ownership; it works once)");
+        tracing::info!(
+            "claim token: {token}  (in T7: the ⋯ next to the server's name, then Claim ownership; it works once)"
+        );
     }
     Ok(roles)
 }

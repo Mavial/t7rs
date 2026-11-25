@@ -7,6 +7,7 @@
 //! extremely cheap.
 
 use std::net::IpAddr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -20,7 +21,7 @@ pub mod voice;
 
 /// This build's protocol. New messages are only ever appended to the enums
 /// below, so older clients keep working for everything they know about.
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 9;
 /// Oldest client protocol a server still accepts.
 pub const MIN_PROTOCOL_VERSION: u16 = 7;
 /// Default port of a T7 server (TCP for control, UDP for voice).
@@ -41,6 +42,12 @@ pub const MAX_CHANNELS: usize = 200;
 pub const MAX_ROLE_NAME_LEN: usize = 32;
 /// Roles a server may have, besides Everyone.
 pub const MAX_ROLES: usize = 32;
+/// Screens one client may watch at once.
+pub const MAX_WATCHED: usize = 4;
+/// Stills one client may ask for at once. After that, one more per
+/// [`PREVIEW_REFILL`]; the server drops asks over the limit.
+pub const PREVIEW_BURST: u32 = 8;
+pub const PREVIEW_REFILL: Duration = Duration::from_secs(1);
 
 /// How often the client sends a ping, and how long the server waits for
 /// any traffic before considering the connection dead.
@@ -300,12 +307,26 @@ pub enum C2S {
     /// Starts or stops sharing your screen. Starting needs Speak where you
     /// are. Moving to another channel stops it.
     SetSharing(bool),
-    /// Whose screen to watch, of those sharing in your channel. The server
-    /// forwards their video to you until either of you moves or they stop.
-    Watch(Option<ClientId>),
+    /// Protocol 7 clients: watch only this screen, or none. Newer clients
+    /// send [`C2S::Watch`].
+    WatchOnly(Option<ClientId>),
     /// Video from `from` can't be decoded until its next keyframe.
     NeedKeyframe {
         from: ClientId,
+    },
+    /// Starts or stops watching one of those sharing in your channel, up to
+    /// [`MAX_WATCHED`] at once (protocol 8). The server forwards their video
+    /// to you until either of you moves or they stop.
+    Watch {
+        sharer: ClientId,
+        on: bool,
+    },
+    /// Asks for a still of one of those sharing in your channel (protocol
+    /// 9). The server asks them for a keyframe and forwards you every part
+    /// of the next one, once, as it forwards a watched screen's video. See
+    /// [`PREVIEW_BURST`] for how often.
+    Preview {
+        sharer: ClientId,
     },
 }
 
