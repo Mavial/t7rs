@@ -180,7 +180,7 @@ fn disconnected(ctx: &egui::Context) -> App {
 
 fn settings_on(ctx: &egui::Context, page: SettingsPage) -> App {
     let mut app = connected(ctx);
-    app.audio_dialog = Some(AudioDialog {
+    app.settings_dialog = Some(SettingsDialog {
         page,
         packs: vec![("Custom folder".into(), "custom".into())],
         inputs: vec!["Microphone (USB)".into()],
@@ -384,6 +384,17 @@ const SCENES: &[Scene] = &[
         form.name = "Squads".into();
         app
     }),
+    ("52-create-lobby-no-longer-offered", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.open_create_channel(Some(2));
+        let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
+        form.kind = ChannelKind::Lobby;
+        let view = app.view.as_mut().unwrap();
+        let member = ChannelPerms { perms: Perms::of(&[Perm::View, Perm::Join, Perm::Speak]), rename: false };
+        let channels = view.channels.keys().map(|&c| (c, member)).collect();
+        view.apply(&S2C::Permissions(Permissions { server: Perms::of(&[Perm::View]), channels }));
+        app
+    }),
     ("26-cant-speak", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         for id in [1, 5] {
@@ -394,7 +405,7 @@ const SCENES: &[Scene] = &[
     ("27-voice-settings-cant-speak", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         app.apply(&S2C::ClientSpeech { id: 1, speech: Speech::NotHere });
-        app.audio_dialog = Some(AudioDialog {
+        app.settings_dialog = Some(SettingsDialog {
             page: SettingsPage::Voice,
             packs: Vec::new(),
             inputs: vec!["Microphone (USB)".into()],
@@ -609,17 +620,20 @@ fn render(
     writer.write_image_data(&bytes).expect("png data");
 }
 
+fn picked_by_t7_snapshot(name: &str, when_unset: &str) -> bool {
+    name.contains(&std::env::var("T7_SNAPSHOT").unwrap_or_else(|_| when_unset.to_owned()))
+}
+
 #[test]
 #[ignore = "writes PNGs for visual review"]
 fn snapshots() {
     let dir = std::env::var_os("T7_SNAPSHOT_DIR")
         .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots"), PathBuf::from);
     std::fs::create_dir_all(&dir).expect("snapshot dir");
-    let only = std::env::var("T7_SNAPSHOT").ok();
     let scenes = SCENES.iter().map(|&(name, size, make)| (name, size, make, &[][..]));
     let menus = MENUS.iter().map(|m| (m.name, m.size, m.make, m.steps));
     for (name, size, make, steps) in scenes.chain(menus) {
-        if only.as_deref().is_none_or(|o| name.contains(o)) {
+        if picked_by_t7_snapshot(name, "") {
             render(name, size, make, steps, 1.0, &dir);
         }
     }
@@ -634,9 +648,8 @@ fn frame_time() {
     const FRAMES: usize = 260;
     const KEPT: usize = 200;
     let size = (1100, 720);
-    let only = std::env::var("T7_SNAPSHOT").ok();
-    let scene = only.as_deref().map(|o| SCENES.iter().find(|(name, ..)| name.contains(o)).expect("a scene"));
-    let (name, make) = scene.map_or(("connected", connected as fn(&egui::Context) -> App), |s| (s.0, s.2));
+    let &(name, _, make) =
+        SCENES.iter().find(|(name, ..)| picked_by_t7_snapshot(name, "02-connected")).expect("a scene");
     let mut canvas = Canvas::new(size, make, 1.0);
     let mut times: Vec<f64> = (0..FRAMES)
         .map(|frame| {

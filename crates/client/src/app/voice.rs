@@ -73,7 +73,7 @@ impl Voice {
     }
 }
 
-pub(super) struct AudioDialog {
+pub(super) struct SettingsDialog {
     pub(super) page: SettingsPage,
     /// (label, folder) of every selectable sound pack except the built-in one.
     pub(super) packs: Vec<(String, std::path::PathBuf)>,
@@ -105,7 +105,7 @@ impl SettingsPage {
         }
     }
 
-    fn note(self) -> &'static str {
+    fn subtitle(self) -> &'static str {
         match self {
             Self::Voice => "Changes apply right away.",
             Self::Cleanup => "Runs on your microphone before anyone hears it.",
@@ -138,27 +138,26 @@ fn open_sounds_folder() {
 }
 
 /// A device picker; `None` follows the system default.
-fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, names: &[String]) -> bool {
-    let mut changed = false;
+fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, names: &[String]) {
     let shown = value.clone().unwrap_or_else(|| "System default".to_owned());
     egui::ComboBox::from_id_salt(id).width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
-        changed |= ui.selectable_value(value, None, "System default").changed();
+        ui.selectable_value(value, None, "System default");
         for name in names {
-            changed |= ui.selectable_value(value, Some(name.clone()), name).changed();
+            ui.selectable_value(value, Some(name.clone()), name);
         }
     });
-    changed
 }
 
-const METER_MIN_DB: f32 = -70.0;
-const METER_MAX_DB: f32 = -5.0;
+const SENSITIVITY_MIN_DB: f32 = -70.0;
+const SENSITIVITY_MAX_DB: f32 = -5.0;
 
 impl App {
     pub(super) fn open_voice_settings(&mut self) {
         let (inputs, outputs) = audio::device_names();
         let custom = sounds_dir().map(|d| ("Custom folder".to_owned(), d));
         let packs = custom.into_iter().chain(sounds::installed_packs()).collect();
-        self.audio_dialog = Some(AudioDialog { page: SettingsPage::Voice, packs, inputs, outputs, binding: false });
+        self.settings_dialog =
+            Some(SettingsDialog { page: SettingsPage::Voice, packs, inputs, outputs, binding: false });
     }
 
     /// Keeps the audio engine and its shared state in line with the app state.
@@ -170,7 +169,7 @@ impl App {
         let connected = matches!(self.conn, Conn::Connected { .. });
         // A last sound (like "disconnected") finishes before the devices close.
         let finishing = v.engine.is_some() && v.playback.effects_active();
-        let wanted = connected || self.audio_dialog.is_some() || finishing;
+        let wanted = connected || self.settings_dialog.is_some() || finishing;
         if wanted && v.engine.is_none() {
             v.engine = Some(audio::Engine::start(&v.shared, &v.playback, v.sink.clone(), ctx));
         } else if !wanted {
@@ -180,7 +179,7 @@ impl App {
         if finishing && !connected {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
-        let binding = self.audio_dialog.as_ref().is_some_and(|d| d.binding);
+        let binding = self.settings_dialog.as_ref().is_some_and(|d| d.binding);
         if let (TxMode::PushToTalk, Some(key), false) = (self.settings.audio.mode, self.settings.audio.ptt_key, binding)
         {
             v.shared.set_ptt_local(ctx.input(|i| ptt::is_down(key.vk, i)));
@@ -198,12 +197,11 @@ impl App {
         }
     }
 
-    pub(super) fn audio_dialog(&mut self, ctx: &egui::Context) {
+    pub(super) fn settings_dialog(&mut self, ctx: &egui::Context) {
         let speech = self.my_speech();
-        let Some(dlg) = &mut self.audio_dialog else { return };
+        let Some(dlg) = &mut self.settings_dialog else { return };
         let mut a: AudioSettings = self.settings.audio.clone();
         let mut quality = self.settings.screen_quality;
-        let mut restart = false;
         let mut close = false;
         let mut test_sound = false;
         if dlg.binding {
@@ -215,7 +213,7 @@ impl App {
             }
         }
         let level = Level { db: self.voice.shared.level_db(), open: self.voice.shared.transmitting() };
-        let height = (ctx.content_rect().height() - 48.0).clamp(240.0, SETTINGS_H);
+        let height = (ctx.content_rect().height() - AROUND_SETTINGS_H).clamp(240.0, SETTINGS_H);
         let frame = theme::modal_frame().inner_margin(Margin::ZERO);
 
         let modal = theme::modal("voice-settings").frame(frame).show(ctx, |ui| {
@@ -226,12 +224,12 @@ impl App {
                 let inner = rect.shrink2(vec2(22.0, 20.0));
                 let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
                 let page = dlg.page;
-                dialog_header(ui, page.title(), page.note());
+                dialog_header(ui, page.title(), page.subtitle());
                 let body = ui.available_height() - theme::CONTROL_H - 14.0;
                 egui::ScrollArea::vertical().max_height(body).auto_shrink(false).show(ui, |ui| {
                     ui.spacing_mut().interact_size.x = SLIDER_VALUE_W;
                     match page {
-                        SettingsPage::Voice => restart = voice_page(ui, &mut a, dlg, speech, level),
+                        SettingsPage::Voice => voice_page(ui, &mut a, dlg, speech, level),
                         SettingsPage::Cleanup => cleanup_page(ui, &mut a),
                         SettingsPage::Notifications => test_sound = notifications_page(ui, &mut a, dlg),
                         SettingsPage::Sharing => sharing_page(ui, &mut quality),
@@ -252,6 +250,8 @@ impl App {
         if a.sound_pack != self.settings.audio.sound_pack {
             self.sound_pack = Pack::open(a.sound_pack.as_deref());
         }
+        let devices_changed =
+            a.input_device != self.settings.audio.input_device || a.output_device != self.settings.audio.output_device;
         if a != self.settings.audio {
             self.voice.shared.set_settings(&a);
             self.settings.audio = a;
@@ -260,11 +260,11 @@ impl App {
         if test_sound {
             self.sound(Sound::Poke);
         }
-        if restart {
+        if devices_changed {
             self.voice.engine = None; // reopened with the new devices next frame
         }
         if close {
-            self.audio_dialog = None;
+            self.settings_dialog = None;
         } else if page == SettingsPage::Voice {
             ctx.request_repaint_after(Duration::from_millis(50)); // live level meter
         }
@@ -272,6 +272,7 @@ impl App {
 }
 
 const SETTINGS_H: f32 = 530.0;
+const AROUND_SETTINGS_H: f32 = 48.0;
 const NAV_W: f32 = 180.0;
 const PAGE_W: f32 = 500.0;
 
@@ -301,10 +302,10 @@ fn settings_nav(ui: &mut egui::Ui, page: &mut SettingsPage, height: f32) {
     });
 }
 
-fn voice_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &mut AudioDialog, speech: Speech, level: Level) -> bool {
+fn voice_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &mut SettingsDialog, speech: Speech, level: Level) {
     section(ui, "Devices");
-    let mic = row(ui, "Microphone", |ui| device_combo(ui, "mic", &mut a.input_device, &dlg.inputs));
-    let speakers = row(ui, "Speakers", |ui| device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs));
+    row(ui, "Microphone", |ui| device_combo(ui, "mic", &mut a.input_device, &dlg.inputs));
+    row(ui, "Speakers", |ui| device_combo(ui, "speakers", &mut a.output_device, &dlg.outputs));
 
     section(ui, "Talk with");
     let modes = [(TxMode::VoiceActivation, "Voice activation"), (TxMode::PushToTalk, "Push to talk")];
@@ -352,7 +353,6 @@ fn voice_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &mut AudioDialog, s
     section(ui, "Volume");
     row(ui, "Microphone", |ui| slider(ui, &mut a.input_gain_db, -20.0..=20.0, Unit::Db));
     row(ui, "Speakers", |ui| slider(ui, &mut a.output_volume, 0.0..=2.0, Unit::Percent));
-    mic | speakers
 }
 
 fn sensitivity(ui: &mut egui::Ui, threshold_db: &mut f32, level: Level) {
@@ -361,12 +361,12 @@ fn sensitivity(ui: &mut egui::Ui, threshold_db: &mut f32, level: Level) {
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 16.0), Sense::click_and_drag());
     let knob = rect.height() / 2.5;
     let track = rect.x_range().shrink(knob);
-    let span = METER_MAX_DB - METER_MIN_DB;
+    let span = SENSITIVITY_MAX_DB - SENSITIVITY_MIN_DB;
     if let Some(pos) = resp.interact_pointer_pos() {
         let t = ((pos.x - track.min) / track.span()).clamp(0.0, 1.0);
-        *threshold_db = (METER_MIN_DB + t * span).round();
+        *threshold_db = (SENSITIVITY_MIN_DB + t * span).round();
     }
-    let x = |db: f32| track.min + track.span() * ((db - METER_MIN_DB) / span).clamp(0.0, 1.0);
+    let x = |db: f32| track.min + track.span() * ((db - SENSITIVITY_MIN_DB) / span).clamp(0.0, 1.0);
     let rail_h = ui.spacing().slider_rail_height / 2.0;
     let y = rect.center().y;
     let rail = egui::Rect::from_x_y_ranges(rect.x_range(), y - rail_h..=y + rail_h);
@@ -383,7 +383,7 @@ fn sensitivity(ui: &mut egui::Ui, threshold_db: &mut f32, level: Level) {
         fill: v.bg_fill,
         stroke: v.fg_stroke,
     });
-    value_box(ui, threshold_db, METER_MIN_DB..=METER_MAX_DB, Unit::Db);
+    value_box(ui, threshold_db, SENSITIVITY_MIN_DB..=SENSITIVITY_MAX_DB, Unit::Db);
 }
 
 fn cleanup_page(ui: &mut egui::Ui, a: &mut AudioSettings) {
@@ -396,7 +396,7 @@ fn cleanup_page(ui: &mut egui::Ui, a: &mut AudioSettings) {
 }
 
 /// Returns whether Test was clicked.
-fn notifications_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &AudioDialog) -> bool {
+fn notifications_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &SettingsDialog) -> bool {
     let mut test = false;
     let what = "Chimes for connecting, people joining and leaving, pokes and private messages.";
     described_switch(ui, &mut a.sounds, "Notification sounds", what);
@@ -404,7 +404,7 @@ fn notifications_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &AudioDialo
     ui.add_enabled_ui(a.sounds, |ui| {
         row(ui, "Sounds", |ui| {
             let shown = match &a.sound_pack {
-                None => BUILT_IN.to_owned(),
+                None => BUILT_IN_PACK.to_owned(),
                 Some(dir) => dlg
                     .packs
                     .iter()
@@ -413,7 +413,7 @@ fn notifications_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &AudioDialo
             };
             let width = ui.available_width() - 64.0;
             egui::ComboBox::from_id_salt("sound-pack").width(width).selected_text(shown).show_ui(ui, |ui| {
-                ui.selectable_value(&mut a.sound_pack, None, BUILT_IN);
+                ui.selectable_value(&mut a.sound_pack, None, BUILT_IN_PACK);
                 for (label, dir) in &dlg.packs {
                     ui.selectable_value(&mut a.sound_pack, Some(dir.clone()), label);
                 }
@@ -441,7 +441,7 @@ fn notifications_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &AudioDialo
     test
 }
 
-const BUILT_IN: &str = "T7 (built in)";
+const BUILT_IN_PACK: &str = "T7 (built in)";
 
 fn sharing_page(ui: &mut egui::Ui, quality: &mut Quality) {
     row(ui, "Quality", |ui| theme::segmented(ui, quality, &QUALITIES));

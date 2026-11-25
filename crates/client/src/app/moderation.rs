@@ -1,5 +1,6 @@
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align, Align2, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, vec2};
+use t7_proto::model::ServerView;
 use t7_proto::{C2S, ChannelId, ClientId, MAX_REASON_LEN};
 
 use super::chat::LineKind;
@@ -27,12 +28,21 @@ pub(super) enum Moderation {
     Ban { target: ClientId, name: String, reason: String, length: Option<u64>, include_ip: bool, focused: bool },
 }
 
-const BAN_LENGTHS: [(Option<u64>, &str); 4] =
-    [(Some(3600), "1 hour"), (Some(86_400), "1 day"), (Some(7 * 86_400), "1 week"), (None, "Permanent")];
+struct BanLength {
+    duration_secs: Option<u64>,
+    label: &'static str,
+}
+
+const BAN_LENGTHS: [BanLength; 4] = [
+    BanLength { duration_secs: Some(3600), label: "1 hour" },
+    BanLength { duration_secs: Some(86_400), label: "1 day" },
+    BanLength { duration_secs: Some(7 * 86_400), label: "1 week" },
+    BanLength { duration_secs: None, label: "Permanent" },
+];
 
 fn ban_button(length: Option<u64>) -> String {
-    match BAN_LENGTHS.iter().find(|(l, _)| *l == length) {
-        Some((Some(_), label)) => format!("Ban for {label}"),
+    match BAN_LENGTHS.iter().find(|l| l.duration_secs == length) {
+        Some(BanLength { duration_secs: Some(_), label }) => format!("Ban for {label}"),
         _ => "Ban permanently".to_owned(),
     }
 }
@@ -46,7 +56,12 @@ pub(super) struct PokeAlert {
 
 const POKES_SHOWN: usize = 3;
 
-fn pokers(pokes: &[PokeAlert]) -> (String, String) {
+struct CardTitle {
+    newest_poker: String,
+    rest: String,
+}
+
+fn card_title(pokes: &[PokeAlert]) -> CardTitle {
     let mut names: Vec<&str> = Vec::new();
     for p in pokes.iter().rev() {
         if !names.contains(&p.name.as_str()) {
@@ -59,7 +74,13 @@ fn pokers(pokes: &[PokeAlert]) -> (String, String) {
         (2, _) => format!(" and {} poked you", names[1]),
         (n, _) => format!(" and {} others poked you", n - 1),
     };
-    (names[0].to_owned(), rest)
+    CardTitle { newest_poker: names[0].to_owned(), rest }
+}
+
+fn channel_to_join(view: &ServerView, poker: ClientId) -> Option<(ChannelId, String)> {
+    let channel = view.clients.get(&poker)?.channel;
+    let name = &view.channels.get(&channel)?.name;
+    (view.my_channel() != Some(channel)).then(|| (channel, name.clone()))
 }
 
 enum CardAction {
@@ -132,7 +153,7 @@ impl App {
     pub(super) fn open_ban(&mut self, target: ClientId) {
         let Some(name) = self.view.as_ref().and_then(|v| v.nickname(target)) else { return };
         let name = name.to_owned();
-        let length = BAN_LENGTHS[1].0;
+        let length = BAN_LENGTHS[1].duration_secs;
         self.moderation =
             Some(Moderation::Ban { target, name, reason: String::new(), length, include_ip: true, focused: false });
     }
@@ -229,7 +250,8 @@ impl App {
                     );
                     reason_field(ui, reason, focused);
                     section(ui, "Length");
-                    theme::segmented(ui, length, &BAN_LENGTHS);
+                    let lengths = BAN_LENGTHS.map(|l| (l.duration_secs, l.label));
+                    theme::segmented(ui, length, &lengths);
                     ui.add_space(14.0);
                     described_switch(
                         ui,
@@ -264,14 +286,12 @@ impl App {
 
     pub(super) fn poke_card(&mut self, ctx: &egui::Context) {
         let Some(newest) = self.pokes.back() else { return };
-        let poker = self.view.as_ref().and_then(|v| Some((v, v.clients.get(&newest.from)?)));
-        let reply_to = poker.map(|(_, c)| c.id);
-        let join = poker
-            .filter(|(v, c)| v.my_channel() != Some(c.channel))
-            .and_then(|(v, c)| Some((c.channel, v.channels.get(&c.channel)?.name.clone())));
+        let online = self.view.as_ref().is_some_and(|v| v.clients.contains_key(&newest.from));
+        let reply_to = online.then_some(newest.from);
+        let join = self.view.as_ref().and_then(|v| channel_to_join(v, newest.from));
         let avatar = newest.name.clone();
         let pokes = self.pokes.make_contiguous();
-        let (first, rest) = pokers(pokes);
+        let title = card_title(pokes);
         let several = pokes.len() > 1;
         let mut action = None;
         let frame = egui::Frame::new()
@@ -297,8 +317,8 @@ impl App {
                             let mut job = LayoutJob::default();
                             let fmt =
                                 |color| TextFormat { font_id: FontId::proportional(13.5), color, ..Default::default() };
-                            job.append(&first, 0.0, fmt(theme::TEXT));
-                            job.append(&rest, 0.0, fmt(theme::TEXT_DIM));
+                            job.append(&title.newest_poker, 0.0, fmt(theme::TEXT));
+                            job.append(&title.rest, 0.0, fmt(theme::TEXT_DIM));
                             ui.label(job);
                             ui.label(RichText::new(&pokes[pokes.len() - 1].time).size(11.5).color(theme::TEXT_FAINT));
                         });
@@ -378,8 +398,8 @@ mod tests {
     #[test]
     fn the_card_names_the_newest_poker_and_counts_the_rest() {
         let title = |pokes: &[PokeAlert]| {
-            let (first, rest) = pokers(pokes);
-            first + &rest
+            let title = card_title(pokes);
+            title.newest_poker + &title.rest
         };
         assert_eq!(title(&[poke(2, "Marta")]), "Marta poked you");
         assert_eq!(title(&[poke(2, "Marta"), poke(2, "Marta")]), "Marta poked you 2 times");

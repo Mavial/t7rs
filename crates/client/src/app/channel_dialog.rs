@@ -22,7 +22,7 @@ use crate::{icons, theme};
 pub(super) enum ChannelDialog {
     Form(ChannelForm),
     Password { channel: ChannelId, name: String, password: String, focused: bool },
-    Delete { channel: ChannelId, name: String, below: Vec<String>, occupants: usize },
+    Delete { channel: ChannelId, name: String, sub_channels: Vec<String>, occupants: usize },
     ClaimOwnership { token: String, focused: bool },
 }
 
@@ -120,9 +120,6 @@ fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, cx: &FormContext) {
     let topic = text_input(&mut form.topic).hint_text(placeholder("Optional")).char_limit(MAX_CHANNEL_TOPIC_LEN);
     field(ui, "Topic", topic);
     if form.kind != ChannelKind::Voice {
-        if form.editing.is_some() {
-            hint(ui, kind_note(form.kind));
-        }
         return;
     }
     ui.add_enabled_ui(cx.may_manage, |ui| {
@@ -293,15 +290,15 @@ fn moderator_list(ui: &mut egui::Ui, kind: ChannelKind, list: &[(Identity, Optio
     removed
 }
 
-fn delete_note(below: &[String], occupants: usize, default: &str) -> String {
-    let channels = match below {
+fn delete_note(sub_channels: &[String], occupants: usize, default: &str) -> String {
+    let channels = match sub_channels {
         [] => String::new(),
         [one] => format!("{one} is deleted with it. "),
         [a, b] => format!("{a} and {b} are deleted with it. "),
         [a, b, rest @ ..] => format!("{a}, {b} and {} more are deleted with it. ", rest.len()),
     };
     let people = match occupants {
-        0 if below.is_empty() => "Nobody is in it.".to_owned(),
+        0 if sub_channels.is_empty() => "Nobody is in it.".to_owned(),
         0 => String::new(),
         1 => format!("The person inside moves to {default}."),
         n => format!("The {n} people inside move to {default}."),
@@ -378,16 +375,14 @@ impl App {
     pub(super) fn open_delete_channel(&mut self, channel: ChannelId) {
         let Some(view) = &self.view else { return };
         let Some(ch) = view.channels.get(&channel) else { return };
-        let mut all = vec![channel];
-        let mut i = 0;
-        while i < all.len() {
-            let parent = all[i];
-            all.extend(view.tree().iter().map(|(_, id)| *id).filter(|id| view.channels[id].parent == Some(parent)));
-            i += 1;
-        }
-        let occupants = view.clients.values().filter(|c| all.contains(&c.channel)).count();
-        let below = all[1..].iter().map(|id| view.channels[id].name.clone()).collect();
-        self.channel_dialog = Some(ChannelDialog::Delete { channel, name: ch.name.clone(), below, occupants });
+        let occupants = view.clients.values().filter(|c| view.within(c.channel, channel)).count();
+        let sub_channels = view
+            .tree()
+            .iter()
+            .filter(|&&(_, id)| id != channel && view.within(id, channel))
+            .map(|(_, id)| view.channels[id].name.clone())
+            .collect();
+        self.channel_dialog = Some(ChannelDialog::Delete { channel, name: ch.name.clone(), sub_channels, occupants });
     }
 
     pub(super) fn channel_dialog(&mut self, ctx: &egui::Context) {
@@ -433,10 +428,10 @@ impl App {
                         reply.close |= ui.add(Btn::secondary("Cancel")).clicked();
                     });
                 }
-                ChannelDialog::Delete { channel, name, below, occupants } => {
+                ChannelDialog::Delete { channel, name, sub_channels, occupants } => {
                     ui.set_width(380.0);
                     let default = view.map_or_else(|| "the default channel".to_owned(), default_channel_name);
-                    dialog_header(ui, &format!("Delete {name}?"), &delete_note(below, *occupants, &default));
+                    dialog_header(ui, &format!("Delete {name}?"), &delete_note(sub_channels, *occupants, &default));
                     dialog_footer(ui, |ui| {
                         if ui.add(Btn::danger("Delete")).clicked() {
                             reply.send.push(C2S::DeleteChannel { id: *channel });
@@ -556,27 +551,26 @@ fn channel_form(
     } else if cx.kinds.len() > 1 {
         theme::segmented(ui, &mut form.kind, &cx.kinds);
         ui.add_space(2.0);
-        hint(ui, kind_note(form.kind));
-        ui.add_space(12.0);
     }
     let saved = cx.saved_overrides.as_deref().unwrap_or_default();
-    match (form.tab, view.zip(form.editing)) {
-        (FormTab::Permissions, Some((view, channel))) => {
-            permissions_tab(ui, view, channel, form);
-            if let Some(list) = &cx.moderators
-                && let Some(identity) = moderator_list(ui, form.kind, list)
-            {
-                reply.now = Some(C2S::SetModerator { channel, identity, moderator: false });
+    if let (FormTab::Permissions, Some((view, channel))) = (form.tab, view.zip(form.editing)) {
+        permissions_tab(ui, view, channel, form);
+        if let Some(list) = &cx.moderators
+            && let Some(identity) = moderator_list(ui, form.kind, list)
+        {
+            reply.now = Some(C2S::SetModerator { channel, identity, moderator: false });
+        }
+    } else {
+        if cx.kinds.len() > 1 || form.kind != ChannelKind::Voice {
+            hint(ui, kind_note(form.kind));
+            ui.add_space(12.0);
+        }
+        ui.add_enabled_ui(cx.may_rename, |ui| {
+            channel_fields(ui, form, cx);
+            if cx.may_rename && !cx.may_manage {
+                hint(ui, "As its moderator you can change the name and topic.");
             }
-        }
-        _ => {
-            ui.add_enabled_ui(cx.may_rename, |ui| {
-                channel_fields(ui, form, cx);
-                if cx.may_rename && !cx.may_manage {
-                    hint(ui, "As its moderator you can change the name and topic.");
-                }
-            });
-        }
+        });
     }
     let ready = !form.name.trim().is_empty();
     let changes = if form.tab == FormTab::Permissions { form.changed_settings(saved) } else { 0 };

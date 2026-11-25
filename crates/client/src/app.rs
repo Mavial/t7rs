@@ -30,7 +30,7 @@ use chat::{Tab, base_tabs};
 use connect::{CertChange, ConnectForm};
 use moderation::{Moderation, PokeAlert, PokeForm};
 use server_settings::ServerSettings;
-use voice::{AudioDialog, Voice};
+use voice::{SettingsDialog, Voice};
 
 /// Where and how we log in: kept to retry after trusting a changed
 /// certificate, and to reconnect.
@@ -88,7 +88,7 @@ pub struct App {
     /// Shown on the empty state / connect dialog after a failed attempt.
     last_error: Option<String>,
     voice: Voice,
-    audio_dialog: Option<AudioDialog>,
+    settings_dialog: Option<SettingsDialog>,
     poke_form: Option<PokeForm>,
     pokes: std::collections::VecDeque<PokeAlert>,
     sound_pack: Pack,
@@ -138,7 +138,7 @@ impl App {
             form: None,
             last_error: None,
             voice,
-            audio_dialog: None,
+            settings_dialog: None,
             poke_form: None,
             pokes: std::collections::VecDeque::default(),
             sound_pack: Pack::BuiltIn,
@@ -279,7 +279,7 @@ impl App {
             let s = self.settings.status;
             self.set_status(ClientStatus { away: !s.away, ..s });
         }
-        if settings && self.audio_dialog.is_none() {
+        if settings && self.settings_dialog.is_none() {
             self.open_voice_settings();
         }
     }
@@ -308,7 +308,7 @@ impl App {
         self.sidebar(ui);
         self.main_pane(ui);
         self.connect_dialog(&ctx);
-        self.audio_dialog(&ctx);
+        self.settings_dialog(&ctx);
         self.poke_dialog(&ctx);
         self.moderation_dialog(&ctx);
         self.server_settings_dialog(&ctx);
