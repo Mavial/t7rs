@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::audio::{Playback, VoiceSink};
 use crate::screen::AccessUnit;
-use crate::screen::packet::{Assembled, Assembler, Pacer, VideoPart};
+use crate::screen::packet::{Assembled, Assembler, Pacer, Pushed, VideoPart};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 /// Also keeps NAT mappings alive, so it must stay well under typical UDP timeouts.
@@ -35,7 +35,7 @@ enum Command {
     Connect(Attempt),
     Send(C2S),
     Voice { seq: u32, payload: Vec<u8> },
-    Video(AccessUnit),
+    Video { au: AccessUnit, encoded_at: Instant },
     Disconnect,
 }
 
@@ -53,7 +53,7 @@ struct Attempt {
 enum Out {
     Control(C2S),
     Voice { seq: u32, payload: Vec<u8> },
-    Video(AccessUnit),
+    Video { au: AccessUnit, encoded_at: Instant },
 }
 
 /// Each connection attempt gets a fresh session id; the UI ignores events
@@ -67,6 +67,7 @@ pub enum NetEvent {
     VoicePing(SessionId, Duration),
     /// TLS is up, and this is the server's certificate.
     Secured(SessionId, Fingerprint),
+    NeedKeyframe(SessionId),
     Closed(SessionId, Ended),
 }
 
@@ -97,6 +98,16 @@ pub struct Net {
     pub rx: std_mpsc::Receiver<NetEvent>,
     session: SessionId,
     viewer: Arc<Mutex<Viewer>>,
+    sent: Arc<Mutex<VideoSent>>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VideoSent {
+    pub parts: u32,
+    pub socket_refused: u32,
+    pub too_large: u32,
+    pub stale: u32,
+    pub skipped: u32,
 }
 
 impl Net {
@@ -105,6 +116,8 @@ impl Net {
         let (ev_tx, rx) = std_mpsc::channel();
         let viewer = Arc::new(Mutex::new(Viewer::default()));
         let net_viewer = viewer.clone();
+        let sent = Arc::new(Mutex::new(VideoSent::default()));
+        let net_sent = sent.clone();
         std::thread::Builder::new()
             .name("t7-net".into())
             .spawn(move || {
@@ -112,10 +125,10 @@ impl Net {
                     .enable_all()
                     .build()
                     .expect("failed to start network runtime");
-                rt.block_on(command_loop(cmd_rx, Events { tx: ev_tx, ctx }, playback, net_viewer));
+                rt.block_on(command_loop(cmd_rx, Events { tx: ev_tx, ctx }, playback, net_viewer, net_sent));
             })
             .expect("failed to spawn network thread");
-        Self { tx, rx, session: 0, viewer }
+        Self { tx, rx, session: 0, viewer, sent }
     }
 
     /// Starts a new connection and returns its session id. `pinned` is the
@@ -152,8 +165,12 @@ impl Net {
     pub fn video_sink(&self) -> VideoSink {
         let tx = self.tx.clone();
         Arc::new(move |au| {
-            let _ = tx.send(Command::Video(au));
+            let _ = tx.send(Command::Video { au, encoded_at: Instant::now() });
         })
+    }
+
+    pub fn take_video_sent(&self) -> VideoSent {
+        std::mem::take(&mut *self.sent.lock().unwrap())
     }
 
     pub fn watch(&self, sharer: ClientId, sink: ScreenSink) {
@@ -187,44 +204,78 @@ struct Watched {
     sink: ScreenSink,
     assembler: Assembler,
     next_ask: Instant,
+    seen: Seen,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct Seen {
+    shown: u32,
+    undecodable: u32,
+    keyframes_asked: u32,
 }
 
 impl Watched {
     fn new(sink: ScreenSink, watch_sent: Instant) -> Watched {
-        Watched { sink, assembler: Assembler::default(), next_ask: watch_sent + voice::KEYFRAME_INTERVAL }
+        let next_ask = watch_sent + voice::KEYFRAME_INTERVAL;
+        Watched { sink, assembler: Assembler::default(), next_ask, seen: Seen::default() }
     }
 
-    fn keyframe_due(&self) -> Option<Instant> {
-        self.assembler.waiting_for_keyframe().then_some(self.next_ask)
+    fn due(&self) -> Option<Instant> {
+        if self.assembler.waiting_for_keyframe() { Some(self.next_ask) } else { self.assembler.deadline() }
+    }
+}
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        let Seen { shown, undecodable, keyframes_asked } = self.seen;
+        let abandoned = self.assembler.abandoned();
+        tracing::info!(shown, undecodable, abandoned, keyframes_asked, "stopped watching a screen");
     }
 }
 
 impl Viewer {
-    fn push(&mut self, from: ClientId, part: VideoPart<'_>) {
-        if let Some(w) = self.watched.get_mut(&from)
-            && let Some(Assembled::Frame(au)) = w.assembler.push(part)
-            && !(w.sink)(au)
-        {
-            w.assembler.wait_for_keyframe();
+    fn push(&mut self, from: ClientId, part: VideoPart<'_>, now: Instant) {
+        if let Some(w) = self.watched.get_mut(&from) {
+            match w.assembler.push(part, now) {
+                Some(Assembled::Frame(au)) => {
+                    if (w.sink)(au) {
+                        w.seen.shown += 1;
+                    } else {
+                        w.seen.undecodable += 1;
+                        w.assembler.wait_for_keyframe();
+                    }
+                }
+                Some(Assembled::NeedKeyframe) => w.seen.undecodable += 1,
+                None => {}
+            }
         }
         if let Entry::Occupied(mut asked) = self.previews.entry(from)
-            && let Some(Assembled::Frame(au)) = asked.get_mut().assembler.push(part)
+            && let Some(Assembled::Frame(au)) = asked.get_mut().assembler.push(part, now)
         {
             (asked.remove().sink)(au);
         }
     }
 
-    fn keyframe_due(&self) -> Option<Instant> {
-        self.watched.values().filter_map(Watched::keyframe_due).min()
+    fn due(&self) -> Option<Instant> {
+        self.watched.values().filter_map(Watched::due).min()
+    }
+
+    fn give_up_on_overdue_frames(&mut self, now: Instant) {
+        for w in self.watched.values_mut() {
+            w.assembler.give_up_if_overdue(now);
+        }
     }
 
     fn ask(&mut self, now: Instant) -> Vec<ClientId> {
-        let due = self.watched.iter_mut().filter(|(_, w)| w.keyframe_due().is_some_and(|at| at <= now));
-        due.map(|(&sharer, w)| {
-            w.next_ask = now + voice::KEYFRAME_INTERVAL;
-            sharer
-        })
-        .collect()
+        let mut ask = Vec::new();
+        for (&sharer, w) in &mut self.watched {
+            if w.assembler.waiting_for_keyframe() && w.next_ask <= now {
+                w.next_ask = now + voice::KEYFRAME_INTERVAL;
+                w.seen.keyframes_asked += 1;
+                ask.push(sharer);
+            }
+        }
+        ask
     }
 
     fn share_ended(&mut self, sharer: ClientId) {
@@ -252,6 +303,7 @@ async fn command_loop(
     events: Events,
     playback: Arc<Playback>,
     viewer: Arc<Mutex<Viewer>>,
+    sent: Arc<Mutex<VideoSent>>,
 ) {
     let mut session: SessionId = 0;
     let mut current: Option<(mpsc::UnboundedSender<Out>, tokio::task::JoinHandle<()>)> = None;
@@ -269,13 +321,14 @@ async fn command_loop(
                 }
                 session += 1;
                 let (tx, rx) = mpsc::unbounded_channel();
-                let run = run_session(session, attempt, rx, events.clone(), playback.clone(), viewer.clone());
+                let run =
+                    run_session(session, attempt, rx, events.clone(), playback.clone(), viewer.clone(), sent.clone());
                 current = Some((tx, tokio::spawn(run)));
                 continue;
             }
             Command::Send(msg) => Out::Control(msg),
             Command::Voice { seq, payload } => Out::Voice { seq, payload },
-            Command::Video(au) => Out::Video(au),
+            Command::Video { au, encoded_at } => Out::Video { au, encoded_at },
             Command::Disconnect => {
                 if let Some((tx, _)) = current.take() {
                     let _ = tx.send(Out::Control(C2S::Goodbye));
@@ -296,8 +349,9 @@ async fn run_session(
     events: Events,
     playback: Arc<Playback>,
     viewer: Arc<Mutex<Viewer>>,
+    sent: Arc<Mutex<VideoSent>>,
 ) {
-    let ended = session(id, attempt, outgoing, &events, &playback, &viewer).await;
+    let ended = session(id, attempt, outgoing, &events, &playback, &viewer, &sent).await;
     playback.clear();
     *viewer.lock().unwrap() = Viewer::default();
     events.emit(NetEvent::Closed(id, ended));
@@ -353,9 +407,9 @@ impl VoiceLink {
         let _ = self.sock.send(&self.buf).await;
     }
 
-    fn try_send(&mut self, msg: ToServer<'_>) {
+    fn try_send(&mut self, msg: ToServer<'_>) -> std::io::Result<()> {
         self.crypto.seal(msg, &mut self.buf);
-        let _ = self.sock.try_send(&self.buf);
+        self.sock.try_send(&self.buf).map(drop)
     }
 }
 
@@ -367,6 +421,7 @@ async fn session(
     events: &Events,
     playback: &Playback,
     viewer: &Mutex<Viewer>,
+    sent: &Mutex<VideoSent>,
 ) -> Ended {
     let target = with_default_port(&attempt.address);
     let stream = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target)).await {
@@ -434,7 +489,7 @@ async fn session(
             }
         };
         let video_due = until(pacer.next_at());
-        let keyframe_due = until(viewer.lock().unwrap().keyframe_due());
+        let viewer_due = until(viewer.lock().unwrap().due());
         tokio::select! {
             msg = incoming.recv() => match msg {
                 Some(Ok(S2C::Pong { nonce })) => {
@@ -464,7 +519,7 @@ async fn session(
                     match v.crypto.open(&mut buf[..n]) {
                         Some(ToClient::Audio { from, seq, payload }) => playback.push(from, seq, payload),
                         Some(ToClient::Video { from, frame, part, parts, key, payload }) => {
-                            viewer.lock().unwrap().push(from, VideoPart { frame, part, parts, key, payload });
+                            viewer.lock().unwrap().push(from, VideoPart { frame, part, parts, key, payload }, Instant::now());
                         }
                         Some(ToClient::Pong { nonce }) => {
                             let sent = Duration::from_micros(nonce);
@@ -474,8 +529,13 @@ async fn session(
                     }
                 }
             }
-            () = keyframe_due => {
-                let due = viewer.lock().unwrap().ask(Instant::now());
+            () = viewer_due => {
+                let due = {
+                    let now = Instant::now();
+                    let mut viewer = viewer.lock().unwrap();
+                    viewer.give_up_on_overdue_frames(now);
+                    viewer.ask(now)
+                };
                 for from in due {
                     if let Err(e) = write_frame(&mut writer, &C2S::NeedKeyframe { from }).await {
                         return Ended::Failed(format!("Connection lost: {e}"));
@@ -484,10 +544,15 @@ async fn session(
             }
             () = video_due => {
                 if let Some(v) = &mut voice {
+                    let (mut count, mut refused) = (0, 0);
                     pacer.send_due(Instant::now(), |p| {
                         let VideoPart { frame, part, parts, key, payload } = p;
-                        v.try_send(ToServer::Video { frame, part, parts, key, payload });
+                        count += 1;
+                        refused += u32::from(v.try_send(ToServer::Video { frame, part, parts, key, payload }).is_err());
                     });
+                    let mut sent = sent.lock().unwrap();
+                    sent.parts += count;
+                    sent.socket_refused += refused;
                 }
             }
             out = outgoing.recv() => match out {
@@ -496,9 +561,19 @@ async fn session(
                         v.send(ToServer::Audio { seq, payload: &payload }).await;
                     }
                 }
-                Some(Out::Video(au)) => {
-                    if voice.is_some() && !pacer.push(au, Instant::now()) {
-                        tracing::warn!("screen frame too large to send");
+                Some(Out::Video { au, encoded_at }) => {
+                    if voice.is_some() {
+                        let pushed = pacer.push(au, encoded_at, Instant::now());
+                        let mut sent = sent.lock().unwrap();
+                        match pushed {
+                            Pushed::Queued => {}
+                            Pushed::TooLarge => sent.too_large += 1,
+                            Pushed::Stale => sent.stale += 1,
+                            Pushed::Skipped => sent.skipped += 1,
+                        }
+                        if matches!(pushed, Pushed::TooLarge | Pushed::Stale) {
+                            events.emit(NetEvent::NeedKeyframe(id));
+                        }
                     }
                 }
                 Some(Out::Control(msg)) => {
@@ -549,7 +624,7 @@ impl Drop for AbortOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen::packet::packetize;
+    use crate::screen::packet::{PART_GAP_TIMEOUT, packetize};
 
     #[test]
     fn default_port() {
@@ -598,7 +673,7 @@ mod tests {
     }
 
     fn push(viewer: &mut Viewer, from: ClientId, au: &AccessUnit) {
-        packetize(au).for_each(|part| viewer.push(from, part));
+        packetize(au).for_each(|part| viewer.push(from, part, Instant::now()));
     }
 
     #[test]
@@ -606,16 +681,16 @@ mod tests {
         let start = Instant::now();
         let after = |interval: u32, ms: u64| start + voice::KEYFRAME_INTERVAL * interval + Duration::from_millis(ms);
         let (mut viewer, got) = watching(start, |_| true);
-        assert_eq!(viewer.keyframe_due(), Some(after(1, 0)), "starting to watch asked");
+        assert_eq!(viewer.due(), Some(after(1, 0)), "starting to watch asked");
         assert_eq!(viewer.ask(after(0, 249)), NOBODY);
         assert_eq!(viewer.ask(after(1, 0)), [1], "a still screen sends nothing: ask again");
         assert_eq!(viewer.ask(after(1, 1)), NOBODY, "asked just now");
         assert_eq!(viewer.ask(after(2, 3)), [1], "that keyframe was lost");
 
         push(&mut viewer, 2, &au(0, true));
-        assert_eq!(viewer.keyframe_due(), Some(after(3, 3)), "from someone else: still waiting");
+        assert_eq!(viewer.due(), Some(after(3, 3)), "from someone else: still waiting");
         push(&mut viewer, 1, &au(5, true));
-        assert_eq!(viewer.keyframe_due(), None, "no timer once a keyframe came");
+        assert_eq!(viewer.due(), None, "no timer once a keyframe came");
         assert_eq!(viewer.ask(after(9, 0)), NOBODY);
         assert_eq!(*got.lock().unwrap(), [5]);
     }
@@ -627,21 +702,40 @@ mod tests {
         let (mut viewer, got) = watching(start, |_| true);
         push(&mut viewer, 1, &au(0, true));
         push(&mut viewer, 1, &au(2, false));
-        assert_eq!(viewer.keyframe_due(), Some(after(1, 0)), "frame 1 is lost, but the watch asked just now");
+        assert_eq!(viewer.due(), Some(after(1, 0)), "frame 1 is lost, but the watch asked just now");
         assert_eq!(viewer.ask(after(3, 0)), [1], "due since long ago: ask at once");
         push(&mut viewer, 1, &au(3, false));
         assert_eq!(viewer.ask(after(3, 100)), NOBODY, "asked 100 ms ago");
         assert_eq!(viewer.ask(after(4, 0)), [1]);
         push(&mut viewer, 1, &au(4, true));
         push(&mut viewer, 1, &au(5, false));
-        assert_eq!(viewer.keyframe_due(), None);
+        assert_eq!(viewer.due(), None);
         assert_eq!(*got.lock().unwrap(), [0, 4, 5], "only what can be decoded");
 
         push(&mut viewer, 1, &au(7, false));
         viewer.share_ended(2);
-        assert!(viewer.keyframe_due().is_some(), "someone else's share ended");
+        assert!(viewer.due().is_some(), "someone else's share ended");
         viewer.share_ended(1);
-        assert_eq!(viewer.keyframe_due(), None, "the watch ended with the share");
+        assert_eq!(viewer.due(), None, "the watch ended with the share");
+    }
+
+    #[test]
+    fn a_last_frame_missing_parts_asks_for_a_keyframe_without_a_newer_frame() {
+        let start = Instant::now();
+        let (mut viewer, got) = watching(start, |_| true);
+        push(&mut viewer, 1, &au(0, true));
+        let last = AccessUnit { frame: 1, key: false, data: vec![0; 2 * voice::MAX_VIDEO_PAYLOAD] };
+        let first = packetize(&last).next().unwrap();
+        let arrived = start + voice::KEYFRAME_INTERVAL;
+        viewer.push(1, first, arrived);
+        let deadline = arrived + PART_GAP_TIMEOUT;
+        assert_eq!(viewer.due(), Some(deadline), "the rest of the frame may still come");
+        viewer.give_up_on_overdue_frames(arrived + PART_GAP_TIMEOUT / 2);
+        assert_eq!(viewer.ask(arrived + PART_GAP_TIMEOUT / 2), NOBODY);
+        viewer.give_up_on_overdue_frames(deadline);
+        assert_eq!(viewer.ask(deadline), [1], "it didn't, and the screen went still");
+        assert_eq!(viewer.due(), Some(deadline + voice::KEYFRAME_INTERVAL));
+        assert_eq!(*got.lock().unwrap(), [0]);
     }
 
     #[test]
@@ -649,13 +743,13 @@ mod tests {
         let start = Instant::now();
         let (mut viewer, got) = watching(start, |frame| frame != 1);
         push(&mut viewer, 1, &au(0, true));
-        assert_eq!(viewer.keyframe_due(), None);
+        assert_eq!(viewer.due(), None);
         push(&mut viewer, 1, &au(1, false));
-        assert_eq!(viewer.keyframe_due(), Some(start + voice::KEYFRAME_INTERVAL), "not taken: wait for a keyframe");
+        assert_eq!(viewer.due(), Some(start + voice::KEYFRAME_INTERVAL), "not taken: wait for a keyframe");
         push(&mut viewer, 1, &au(2, false));
         push(&mut viewer, 1, &au(3, true));
         push(&mut viewer, 1, &au(4, false));
-        assert_eq!(viewer.keyframe_due(), None);
+        assert_eq!(viewer.due(), None);
         assert_eq!(*got.lock().unwrap(), [0, 3, 4]);
     }
 
@@ -668,7 +762,7 @@ mod tests {
         let (sink_2, got_2) = sink(|_| true);
         viewer.watched.insert(1, Watched::new(sink_1, at(0)));
         viewer.watched.insert(2, Watched::new(sink_2, at(100)));
-        assert_eq!(viewer.keyframe_due(), Some(at(250)), "the first watch asks first");
+        assert_eq!(viewer.due(), Some(at(250)), "the first watch asks first");
         assert_eq!(viewer.ask(at(250)), [1]);
         assert_eq!(viewer.ask(at(350)), [2]);
         assert_eq!(viewer.ask(at(600)), [1, 2], "both still waiting");
@@ -677,13 +771,13 @@ mod tests {
         push(&mut viewer, 2, &au(4, false));
         assert_eq!(viewer.ask(at(900)), [2], "only the screen without a keyframe");
         push(&mut viewer, 2, &au(5, true));
-        assert_eq!(viewer.keyframe_due(), None);
+        assert_eq!(viewer.due(), None);
         assert_eq!(*got_1.lock().unwrap(), [0]);
         assert_eq!(*got_2.lock().unwrap(), [5]);
 
         push(&mut viewer, 1, &au(2, false));
         viewer.share_ended(1);
-        assert_eq!(viewer.keyframe_due(), None, "the screen that lost a frame stopped sharing");
+        assert_eq!(viewer.due(), None, "the screen that lost a frame stopped sharing");
         push(&mut viewer, 2, &au(6, false));
         assert_eq!(*got_2.lock().unwrap(), [5, 6], "the other screen plays on");
     }

@@ -26,6 +26,7 @@ impl App {
                         self.settings.server_certs.entry(ServerKey::of(address)).or_insert(fingerprint);
                     }
                 }
+                NetEvent::NeedKeyframe(s) if s == self.session => self.send_keyframe(),
                 NetEvent::Closed(s, ended) if s == self.session => self.on_closed(ended),
                 _ => {} // stale session
             }
