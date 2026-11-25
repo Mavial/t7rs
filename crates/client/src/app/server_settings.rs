@@ -20,7 +20,6 @@ pub(super) struct ServerSettings {
     pub(super) bans: Option<Vec<BanInfo>>,
     pub(super) picked: Pick,
     name_draft: String,
-    /// The name of a role being added, while its field shows.
     new_role: Option<String>,
 }
 
@@ -37,7 +36,6 @@ pub(super) enum Pick {
     Everyone,
 }
 
-/// Height of either tab, so switching tabs doesn't resize the dialog.
 const BODY_H: f32 = 480.0;
 
 fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
@@ -135,7 +133,6 @@ fn role_list(ui: &mut egui::Ui, roles: &Roles, mine: Rank, s: &mut ServerSetting
                 let edit = text_input(name).hint_text(placeholder("Name, then Enter")).char_limit(MAX_ROLE_NAME_LEN);
                 let field = ui.add(edit);
                 if field.lost_focus() {
-                    // Enter adds it; Escape or clicking away puts the field away.
                     let name = std::mem::take(name).trim().to_owned();
                     if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !name.is_empty() {
                         change(send, RoleChange::Create { name });
@@ -228,7 +225,6 @@ fn role_details(
     });
 }
 
-/// A switch per permission, in two columns.
 fn perm_switches(ui: &mut egui::Ui, perms: Perms, enabled: bool, mut changed: impl FnMut(Perms)) {
     ui.add_enabled_ui(enabled, |ui| {
         ui.columns(2, |columns| {
@@ -264,8 +260,6 @@ pub(super) fn perm_label(perm: Perm) -> &'static str {
     }
 }
 
-/// One ban in the ban list: who, until when, why, and who banned them.
-/// Returns whether Unban was clicked.
 fn ban_row(ui: &mut egui::Ui, ban: &BanInfo) -> bool {
     let local = |secs: u64, format: &str| {
         chrono::DateTime::from_timestamp(secs as i64, 0)
@@ -344,7 +338,6 @@ impl App {
         }
         let mut send = Vec::new();
         let mut done = false;
-        // A short window keeps the title and Done on screen and scrolls the rest.
         let body_h = (ctx.content_rect().height() - 170.0).clamp(160.0, BODY_H);
         let modal = theme::modal("server-settings").show(ctx, |ui| {
             ui.set_width(720.0);
@@ -357,7 +350,6 @@ impl App {
                 }
             });
             ui.add_space(16.0);
-            // With both tabs, each is as tall as the other, so switching doesn't resize the dialog.
             let min_h = if tabs.len() > 1 { body_h } else { 0.0 };
             let size = vec2(ui.available_width(), body_h);
             ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {

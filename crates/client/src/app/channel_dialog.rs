@@ -21,23 +21,9 @@ use crate::{icons, theme};
 /// The channel-related dialog on screen, if any (one at a time).
 pub(super) enum ChannelDialog {
     Form(ChannelForm),
-    Password {
-        channel: ChannelId,
-        name: String,
-        password: String,
-        focused: bool,
-    },
-    /// `below` names the sub-channels deleted with it.
-    Delete {
-        channel: ChannelId,
-        name: String,
-        below: Vec<String>,
-        occupants: usize,
-    },
-    ClaimOwnership {
-        token: String,
-        focused: bool,
-    },
+    Password { channel: ChannelId, name: String, password: String, focused: bool },
+    Delete { channel: ChannelId, name: String, below: Vec<String>, occupants: usize },
+    ClaimOwnership { token: String, focused: bool },
 }
 
 /// Creating (`editing: None`) or editing a channel.
@@ -66,13 +52,11 @@ pub(super) enum FormTab {
     Permissions,
 }
 
-/// A role's override in `list`, or one that inherits everything.
 fn override_of(list: &[Override], role: RoleId) -> Override {
     list.iter().find(|o| o.role == role).copied().unwrap_or(Override::inheriting(role))
 }
 
 impl ChannelForm {
-    /// Every role with an override in the form or in what was saved.
     fn roles_touched(&self, saved: &[Override]) -> std::collections::BTreeSet<RoleId> {
         self.overrides.iter().chain(saved).map(|o| o.role).collect()
     }
@@ -86,7 +70,6 @@ impl ChannelForm {
         changed.map(|o| C2S::SetOverride { channel, role: o.role, allow: o.allow(), deny: o.deny() }).collect()
     }
 
-    /// How many permissions, over all roles, are set differently from what was saved.
     fn changed_settings(&self, saved: &[Override]) -> usize {
         let roles = self.roles_touched(saved);
         let differ = |role| {
@@ -113,7 +96,6 @@ impl ChannelForm {
     }
 }
 
-/// What a kind of channel is for, in one line.
 fn kind_note(kind: ChannelKind) -> &'static str {
     match kind {
         ChannelKind::Voice => "A place to talk. People join it from the tree.",
@@ -138,7 +120,6 @@ fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, cx: &FormContext) {
     let topic = text_input(&mut form.topic).hint_text(placeholder("Optional")).char_limit(MAX_CHANNEL_TOPIC_LEN);
     field(ui, "Topic", topic);
     if form.kind != ChannelKind::Voice {
-        // Creating, the line under the type already said what it is.
         if form.editing.is_some() {
             hint(ui, kind_note(form.kind));
         }
@@ -177,8 +158,6 @@ fn channel_fields(ui: &mut egui::Ui, form: &mut ChannelForm, cx: &FormContext) {
     }
 }
 
-/// Each permission as deny, inherit or allow for one role. Inherit shows what
-/// the channels above give, and rows changed since opening are marked.
 fn permissions_tab(ui: &mut egui::Ui, view: &ServerView, channel: ChannelId, form: &mut ChannelForm) {
     let (Some(roles), Some(saved)) = (&view.roles, view.channels.get(&channel)) else {
         ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
@@ -314,7 +293,6 @@ fn moderator_list(ui: &mut egui::Ui, kind: ChannelKind, list: &[(Identity, Optio
     removed
 }
 
-/// What deleting a channel takes with it, and where the people inside go.
 fn delete_note(below: &[String], occupants: usize, default: &str) -> String {
     let channels = match below {
         [] => String::new(),
@@ -400,7 +378,6 @@ impl App {
     pub(super) fn open_delete_channel(&mut self, channel: ChannelId) {
         let Some(view) = &self.view else { return };
         let Some(ch) = view.channels.get(&channel) else { return };
-        // The channel and everything below it, in tree order.
         let mut all = vec![channel];
         let mut i = 0;
         while i < all.len() {
@@ -690,7 +667,6 @@ mod tests {
         let set = |o: Override| C2S::SetOverride { channel: 4, role: o.role, allow: o.allow(), deny: o.deny() };
         let cleared = Override::inheriting(RoleId::MODERATOR);
         assert_eq!(form.override_changes(4, &saved), [set(cleared), set(dj)]);
-        // The moderators' view went back to inheriting, and the new role may speak.
         assert_eq!(form.changed_settings(&saved), 2);
     }
 

@@ -128,7 +128,6 @@ fn line(time: &str, kind: LineKind, text: &str) -> Line {
     Line::new(chrono::Local::now().date_naive().and_time(time), kind, text.into())
 }
 
-/// A poke from `name` at `time`, like "20:21".
 fn poke(from: u32, name: &str, message: &str, time: &str) -> PokeAlert {
     PokeAlert { from, name: name.into(), message: message.into(), time: time.into() }
 }
@@ -179,7 +178,6 @@ fn disconnected(ctx: &egui::Context) -> App {
     App::new(ctx, settings, None, Arc::new(|| {}))
 }
 
-/// Connected, with the settings dialog open on `page`.
 fn settings_on(ctx: &egui::Context, page: SettingsPage) -> App {
     let mut app = connected(ctx);
     app.audio_dialog = Some(AudioDialog {
@@ -630,7 +628,6 @@ fn snapshots() {
 /// How long a full redraw of the connected window takes: layout, tessellation
 /// and rasterizing, as the shell does on every repaint.
 /// `cargo test --release -p t7-client frame_time -- --ignored --nocapture`.
-/// `T7_SNAPSHOT=05-voice-settings` times the first scene whose name contains it instead.
 #[test]
 #[ignore = "measures redraw time; run it in release"]
 fn frame_time() {

@@ -1,6 +1,3 @@
-//! Kicks, bans and pokes: their dialogs, the notices when they happen, and
-//! the card that shows the pokes you got.
-
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align, Align2, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, vec2};
 use t7_proto::{C2S, ChannelId, ClientId, MAX_REASON_LEN};
@@ -30,11 +27,9 @@ pub(super) enum Moderation {
     Ban { target: ClientId, name: String, reason: String, length: Option<u64>, include_ip: bool, focused: bool },
 }
 
-/// The ban lengths to pick from: (seconds, `None` for good; label).
 const BAN_LENGTHS: [(Option<u64>, &str); 4] =
     [(Some(3600), "1 hour"), (Some(86_400), "1 day"), (Some(7 * 86_400), "1 week"), (None, "Permanent")];
 
-/// The ban button says how long, so nobody bans for good by accident.
 fn ban_button(length: Option<u64>) -> String {
     match BAN_LENGTHS.iter().find(|(l, _)| *l == length) {
         Some((Some(_), label)) => format!("Ban for {label}"),
@@ -42,7 +37,6 @@ fn ban_button(length: Option<u64>) -> String {
     }
 }
 
-/// A poke someone sent us, shown until dismissed.
 pub(super) struct PokeAlert {
     pub(super) from: ClientId,
     pub(super) name: String,
@@ -50,10 +44,8 @@ pub(super) struct PokeAlert {
     pub(super) time: String,
 }
 
-/// The newest pokes the card shows; older ones are counted.
 const POKES_SHOWN: usize = 3;
 
-/// What the poke card's title says: who poked, newest first.
 fn pokers(pokes: &[PokeAlert]) -> (String, String) {
     let mut names: Vec<&str> = Vec::new();
     for p in pokes.iter().rev() {
@@ -70,7 +62,6 @@ fn pokers(pokes: &[PokeAlert]) -> (String, String) {
     (names[0].to_owned(), rest)
 }
 
-/// Picked on the poke card.
 enum CardAction {
     Dismiss,
     Reply(ClientId),
@@ -271,13 +262,8 @@ impl App {
         }
     }
 
-    /// The pokes you got, in one card at the top right of the main pane. It
-    /// stays until dismissed and doesn't take the keyboard, so you can keep
-    /// typing. Reply and Join act on the newest poke.
     pub(super) fn poke_card(&mut self, ctx: &egui::Context) {
         let Some(newest) = self.pokes.back() else { return };
-        // Whoever poked last, while they are still on the server, and their channel
-        // when it isn't yours.
         let poker = self.view.as_ref().and_then(|v| Some((v, v.clients.get(&newest.from)?)));
         let reply_to = poker.map(|(_, c)| c.id);
         let join = poker
@@ -360,7 +346,6 @@ impl App {
     }
 }
 
-/// One poke on the card: who and when if there are several, and its message.
 fn poke_line(ui: &mut egui::Ui, poke: &PokeAlert, named: bool) {
     egui::Frame::new()
         .fill(theme::SURFACE)

@@ -73,7 +73,6 @@ impl Voice {
     }
 }
 
-/// The settings dialog: which page is showing, and what its pickers offer.
 pub(super) struct AudioDialog {
     pub(super) page: SettingsPage,
     /// (label, folder) of every selectable sound pack except the built-in one.
@@ -84,7 +83,6 @@ pub(super) struct AudioDialog {
     pub(super) binding: bool,
 }
 
-/// A page of the settings dialog, picked in its sidebar.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SettingsPage {
     Voice,
@@ -107,7 +105,6 @@ impl SettingsPage {
         }
     }
 
-    /// The line under the page's title.
     fn note(self) -> &'static str {
         match self {
             Self::Voice => "Changes apply right away.",
@@ -153,7 +150,6 @@ fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, names: 
     changed
 }
 
-/// The range of the input level the sensitivity slider shows.
 const METER_MIN_DB: f32 = -70.0;
 const METER_MAX_DB: f32 = -5.0;
 
@@ -219,7 +215,6 @@ impl App {
             }
         }
         let level = Level { db: self.voice.shared.level_db(), open: self.voice.shared.transmitting() };
-        // Every page fits; a window too short for the dialog scrolls the page.
         let height = (ctx.content_rect().height() - 48.0).clamp(240.0, SETTINGS_H);
         let frame = theme::modal_frame().inner_margin(Margin::ZERO);
 
@@ -276,7 +271,6 @@ impl App {
     }
 }
 
-/// Height of the settings dialog, and the widths of its sidebar and its pages.
 const SETTINGS_H: f32 = 530.0;
 const NAV_W: f32 = 180.0;
 const PAGE_W: f32 = 500.0;
@@ -288,7 +282,6 @@ struct Level {
     open: bool,
 }
 
-/// The pages down the left, and the version under them.
 fn settings_nav(ui: &mut egui::Ui, page: &mut SettingsPage, height: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(NAV_W, height), Sense::hover());
     ui.painter().vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, theme::BORDER));
@@ -308,8 +301,6 @@ fn settings_nav(ui: &mut egui::Ui, page: &mut SettingsPage, height: f32) {
     });
 }
 
-/// Devices, how you talk, and volumes. Returns whether a device changed, so
-/// the engine reopens.
 fn voice_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &mut AudioDialog, speech: Speech, level: Level) -> bool {
     section(ui, "Devices");
     let mic = row(ui, "Microphone", |ui| device_combo(ui, "mic", &mut a.input_device, &dlg.inputs));
@@ -364,8 +355,6 @@ fn voice_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &mut AudioDialog, s
     mic | speakers
 }
 
-/// The voice activation threshold, as a slider whose rail shows the
-/// microphone's live level: green while it sends.
 fn sensitivity(ui: &mut egui::Ui, threshold_db: &mut f32, level: Level) {
     // Sized and painted like the other sliders, as egui lays one out.
     let width = ui.available_width() - SLIDER_VALUE_W - ui.spacing().item_spacing.x;
@@ -452,7 +441,6 @@ fn notifications_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &AudioDialo
     test
 }
 
-/// The sound pack that ships with T7.
 const BUILT_IN: &str = "T7 (built in)";
 
 fn sharing_page(ui: &mut egui::Ui, quality: &mut Quality) {
@@ -460,7 +448,6 @@ fn sharing_page(ui: &mut egui::Ui, quality: &mut Quality) {
     row_hint(ui, "Higher quality needs a faster upload. You can also change it each time you start sharing.");
 }
 
-/// The version, and whether an update is on its way.
 fn about_page(ui: &mut egui::Ui, updater: &Updater) {
     row(ui, "Version", |ui| ui.label(RichText::new(crate::update::VERSION).color(theme::TEXT)));
     if !updater.enabled() {
