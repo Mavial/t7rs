@@ -125,7 +125,10 @@ struct MemberRow<'a> {
 impl App {
     pub(super) fn channel_tree(&mut self, ui: &mut egui::Ui) {
         let Some(view) = self.shown_view() else { return };
-        let folded = self.server_key().and_then(|server| self.settings.folded.get(server));
+        let folded = match &self.conn {
+            Conn::Connected { server, .. } | Conn::Lost { server, .. } => self.settings.folded.get(server),
+            Conn::Disconnected | Conn::Connecting(_) => None,
+        };
         let lost = matches!(self.conn, Conn::Lost { .. });
         if lost {
             ui.disable();
@@ -354,12 +357,6 @@ impl<'a> Tree<'a> {
         }
     }
 
-    fn entry_keeping_menu_open(&mut self, ui: &mut egui::Ui, item: Item, action: TreeAction) {
-        if ui.add(item).clicked() {
-            self.picked = Some(action);
-        }
-    }
-
     fn channel_menu(&mut self, ui: &mut egui::Ui, row: &ChannelRow) {
         menu_style(ui, 220.0);
         let ch = row.ch;
@@ -371,7 +368,7 @@ impl<'a> Tree<'a> {
                 ui.close();
             }
         }
-        let manage = row.may_edit || row.may_create || row.may_rearrange || row.may_make_default;
+        let manage = row.may_manage();
         if manage && !category {
             menu_separator(ui);
         }
@@ -385,7 +382,9 @@ impl<'a> Tree<'a> {
         }
         if row.may_rearrange {
             for (icon, label, delta) in [(Icon::ArrowUp, "Move up", -1), (Icon::ArrowDown, "Move down", 1)] {
-                self.entry_keeping_menu_open(ui, Item::new(icon, label), TreeAction::Shift(ch.id, delta));
+                if ui.add(Item::new(icon, label)).clicked() {
+                    self.picked = Some(TreeAction::Shift(ch.id, delta));
+                }
             }
         }
         if row.may_make_default {
@@ -588,13 +587,12 @@ impl ChannelRow<'_> {
         self.depth as f32 * INDENT
     }
 
+    fn may_manage(&self) -> bool {
+        self.may_edit || self.may_create || self.may_rearrange || self.may_make_default
+    }
+
     fn has_menu(&self) -> bool {
-        self.ch.kind != ChannelKind::Category
-            || self.may_edit
-            || self.may_create
-            || self.may_rearrange
-            || self.may_make_default
-            || self.may_delete
+        self.ch.kind != ChannelKind::Category || self.may_manage() || self.may_delete
     }
 
     /// The row's fill, tinted for your channel, and where a dragged channel would land.
