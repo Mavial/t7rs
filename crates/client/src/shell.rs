@@ -188,7 +188,7 @@ impl ApplicationHandler<Wake> for Shell {
             self.schedule(Duration::ZERO);
         }
         if let Some(screen) = &mut self.screen {
-            screen.tick(now);
+            screen.hide_idle_controls(now);
         }
     }
 
