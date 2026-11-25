@@ -92,7 +92,6 @@ pub struct App {
     /// Set by the Restart button: the shell closes the window after this frame.
     quit: bool,
     sharing: Option<sharing::Sharing>,
-    /// In the order started.
     watching: Vec<sharing::Watching>,
     screen_wake: crate::watch::Wake,
     share_sources: Vec<crate::screen::SourceInfo>,

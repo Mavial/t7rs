@@ -5,7 +5,6 @@ use super::Picture;
 const WEIGHT_BITS: u32 = 8;
 const WEIGHT_ONE: u32 = 1 << WEIGHT_BITS;
 
-/// A rectangle of a pixel buffer, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Area {
     pub x: usize,

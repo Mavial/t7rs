@@ -1,8 +1,3 @@
-//! The Screens window: every screen being watched, in one OS window of its
-//! own. Each screen decodes on its own thread; the window draws a tile only
-//! when that screen has a new picture, so the main window never repaints for
-//! video and a still screen costs nothing.
-
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -32,13 +27,10 @@ const QUEUE: usize = 4;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
-/// How long names and buttons stay up after the mouse stops.
-const CONTROLS: Duration = Duration::from_secs(2);
+const CONTROLS_LINGER: Duration = Duration::from_secs(2);
 
-/// Around and between tiles, and the height of the strip below a focused
-/// screen, in points.
-const PAD: f32 = 8.0;
-const STRIP: f32 = 92.0;
+const PAD_PT: f32 = 8.0;
+const STRIP_HEIGHT_PT: f32 = 92.0;
 
 const BACKGROUND: u32 = 0x0010_1010;
 
@@ -57,7 +49,6 @@ impl Frames {
         slots.newest.replace(picture).or_else(|| slots.spare.take())
     }
 
-    /// Moves a newer picture, if one came, into `shown`.
     fn take_newest(&self, shown: &mut Option<Picture>) -> bool {
         let mut slots = self.0.lock().unwrap();
         let Some(newest) = slots.newest.take() else { return false };
@@ -105,25 +96,20 @@ fn decode(units: &Receiver<AccessUnit>, mut decoder: Decoder, frames: &Frames, f
     }
 }
 
-/// A screen to show, as the app hands it over.
 pub struct Stream {
     pub sharer: ClientId,
     pub name: String,
     pub frames: Arc<Frames>,
 }
 
-/// What the user did in the Screens window that the app acts on.
 pub enum Action {
-    /// Closed the window: stop watching every screen.
     Close,
     Stop(ClientId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
-    /// Side by side: 2 in a row, 3 or 4 in a 2×2.
     Grid,
-    /// One large, the others in a strip below.
     Focus(ClientId),
 }
 
@@ -134,7 +120,6 @@ enum Button {
     Stop,
 }
 
-/// What the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
     Nothing,
@@ -146,9 +131,7 @@ struct Tile {
     stream: Stream,
     shown: Option<Picture>,
     scaler: Scaler,
-    /// Where it is drawn, in pixels. `None` while another fills the screen.
     area: Option<Area>,
-    /// Draw it on the next paint: a new picture, or its controls changed.
     redraw: bool,
 }
 
@@ -157,15 +140,11 @@ pub struct Window {
     surface: softbuffer::Surface<Rc<winit::window::Window>, Rc<winit::window::Window>>,
     tiles: Vec<Tile>,
     layout: Layout,
-    /// In pixels, while over the window.
-    pointer: Option<Pos2>,
-    /// Names and buttons show until then.
+    pointer_px: Option<Pos2>,
     controls_until: Option<Instant>,
     pressed: Option<Instant>,
     cursor: CursorIcon,
-    /// Paints names and buttons; made the first time they show.
     overlay: Option<Overlay>,
-    /// Lay out and draw everything on the next paint.
     stale: bool,
     title: String,
 }
@@ -187,7 +166,7 @@ impl Window {
             surface,
             tiles: Vec::new(),
             layout: Layout::Grid,
-            pointer: None,
+            pointer_px: None,
             controls_until: None,
             pressed: None,
             cursor: CursorIcon::Default,
@@ -203,7 +182,6 @@ impl Window {
         self.winit.id()
     }
 
-    /// Shows these screens, in this order. A new one brings the window to the front.
     pub fn show(&mut self, streams: Vec<Stream>) {
         let same = |t: &Tile, s: &Stream| t.stream.sharer == s.sharer && Arc::ptr_eq(&t.stream.frames, &s.frames);
         let unchanged = streams.len() == self.tiles.len() && self.tiles.iter().zip(&streams).all(|(t, s)| same(t, s));
@@ -245,18 +223,15 @@ impl Window {
         }
     }
 
-    /// A screen has a new picture.
     pub fn wake(&self) {
         self.winit.request_redraw();
     }
 
-    /// When [`Window::tick`] has something to do.
     pub fn wake_at(&self) -> Option<Instant> {
         self.controls_until
     }
 
-    /// Hides names and buttons once the mouse has rested long enough.
-    pub fn tick(&mut self, now: Instant) {
+    pub fn hide_idle_controls(&mut self, now: Instant) {
         if self.controls_until.is_some_and(|at| at <= now) {
             self.controls_until = None;
             self.redraw_all();
@@ -329,11 +304,11 @@ impl Window {
         }
     }
 
-    fn pointer_moved(&mut self, pointer: Option<Pos2>) {
+    fn pointer_moved(&mut self, pointer_px: Option<Pos2>) {
         let (target, shown) = (self.target(), self.controls_until.is_some());
-        self.pointer = pointer;
-        self.controls_until = pointer.map(|_| Instant::now() + CONTROLS);
-        if pointer.is_some() && !shown {
+        self.pointer_px = pointer_px;
+        self.controls_until = pointer_px.map(|_| Instant::now() + CONTROLS_LINGER);
+        if pointer_px.is_some() && !shown {
             self.winit.set_cursor_visible(true);
         }
         if shown != self.controls_until.is_some() {
@@ -391,16 +366,16 @@ impl Window {
     }
 
     fn target(&self) -> Target {
-        let Some(pointer) = self.pointer else { return Target::Nothing };
+        let Some(pointer_px) = self.pointer_px else { return Target::Nothing };
         let ppp = self.ppp();
-        let Some(tile) = self.tiles.iter().find(|t| t.area.is_some_and(|a| rect_of(a, ppp).contains(pointer / ppp)))
-        else {
+        let pointer = pointer_px / ppp;
+        let Some(tile) = self.tiles.iter().find(|t| t.area.is_some_and(|a| rect_of(a, ppp).contains(pointer))) else {
             return Target::Nothing;
         };
         let sharer = tile.stream.sharer;
         let area = rect_of(tile.area.expect("found by its area"), ppp);
         let buttons = if self.controls_until.is_some() { buttons(self.layout, self.tiles.len(), sharer) } else { &[] };
-        let hit = buttons.iter().enumerate().find(|&(i, _)| button_rect(area, i).contains(pointer / ppp));
+        let hit = buttons.iter().enumerate().find(|&(i, _)| button_rect_from_right(area, i).contains(pointer));
         hit.map_or(Target::Tile(sharer), |(_, &button)| Target::Button(sharer, button))
     }
 
@@ -417,7 +392,8 @@ impl Window {
                 Layout::Focus(sharer) => self.tiles.iter().position(|t| t.stream.sharer == sharer),
                 Layout::Grid => None,
             };
-            let areas = arrange((width, height), self.ppp(), self.tiles.len(), focus, !self.fullscreen());
+            let strip = if self.fullscreen() { Strip::Hidden } else { Strip::Shown };
+            let areas = arrange((width, height), self.ppp(), self.tiles.len(), focus, strip);
             for (tile, area) in self.tiles.iter_mut().zip(areas) {
                 tile.area = area;
             }
@@ -454,8 +430,8 @@ impl Window {
         }
         self.tiles.iter_mut().for_each(|t| t.redraw = false);
 
-        // With nothing new, the system asked for a repaint: the buffer still holds the last pictures.
-        let presented = if stale || damage.is_empty() { buffer.present() } else { buffer.present_with_damage(&damage) };
+        let system_repaint = damage.is_empty();
+        let presented = if stale || system_repaint { buffer.present() } else { buffer.present_with_damage(&damage) };
         if let Err(e) = presented {
             tracing::error!("cannot present the screens window: {e}");
         }
@@ -473,19 +449,16 @@ impl Window {
     }
 }
 
-/// What decides how the tiles are dressed, read before drawing them.
 #[derive(Clone, Copy)]
 struct Look {
     layout: Layout,
     count: usize,
-    /// Names and buttons show.
     controls: bool,
     fullscreen: bool,
     target: Target,
     ppp: f32,
 }
 
-/// A tile's buttons, right to left, while controls show.
 fn buttons(layout: Layout, count: usize, sharer: ClientId) -> &'static [Button] {
     match layout {
         _ if count == 1 => &[Button::Stop, Button::Fullscreen],
@@ -495,7 +468,6 @@ fn buttons(layout: Layout, count: usize, sharer: ClientId) -> &'static [Button] 
     }
 }
 
-/// Paints a tile's name and its buttons; in a grid, buttons only on the tile under the pointer.
 fn dress(p: &egui::Painter, tile: &Tile, look: Look) {
     let Some(area) = tile.area else { return };
     let rect = rect_of(area, look.ppp);
@@ -508,17 +480,17 @@ fn dress(p: &egui::Painter, tile: &Tile, look: Look) {
     if !look.controls {
         return;
     }
-    name_tag(&p, rect, name, rect.height() < 2.0 * STRIP);
+    name_tag(&p, rect, name, rect.height() < 2.0 * STRIP_HEIGHT_PT);
 
     let hovered = matches!(look.target, Target::Tile(s) | Target::Button(s, _) if s == sharer);
     let buttons = buttons(look.layout, look.count, sharer);
     if buttons.is_empty() || (look.layout == Layout::Grid && look.count > 1 && !hovered) {
         return;
     }
-    let group = button_rect(rect, 0).union(button_rect(rect, buttons.len() - 1)).expand(6.0);
+    let group = button_rect_from_right(rect, 0).union(button_rect_from_right(rect, buttons.len() - 1)).expand(6.0);
     p.rect(group, CornerRadius::same(8), CONTROL_BG, Stroke::new(1.0, theme::BORDER_STRONG), StrokeKind::Inside);
     for (i, &button) in buttons.iter().enumerate() {
-        let at = button_rect(rect, i);
+        let at = button_rect_from_right(rect, i);
         let lit = look.target == Target::Button(sharer, button);
         if lit {
             p.rect_filled(at, CornerRadius::same(6), theme::SURFACE_HOVER);
@@ -550,20 +522,23 @@ fn dress(p: &egui::Painter, tile: &Tile, look: Look) {
 
 const CONTROL_BG: Color32 = Color32::from_rgba_premultiplied(15, 15, 15, 235);
 
-/// Where each of `count` tiles goes in a `size` window, in pixels. One fills
-/// the window; more sit in a grid, or around the focused one. A focused tile
-/// fills the window on its own without the strip, as in full screen.
-fn arrange(size: (usize, usize), ppp: f32, count: usize, focus: Option<usize>, strip: bool) -> Vec<Option<Area>> {
+#[derive(Clone, Copy, PartialEq)]
+enum Strip {
+    Shown,
+    Hidden,
+}
+
+fn arrange(size: (usize, usize), ppp: f32, count: usize, focus: Option<usize>, strip: Strip) -> Vec<Option<Area>> {
     let (width, height) = size;
     if count <= 1 {
         return vec![Some(Area::whole(width, height)); count];
     }
     let px = |points: f32| (points * ppp).round() as usize;
-    let (pad, strip_h) = (px(PAD), px(STRIP));
+    let (pad, strip_h) = (px(PAD_PT), px(STRIP_HEIGHT_PT));
     let (inner_w, inner_h) = (width.saturating_sub(2 * pad), height.saturating_sub(2 * pad));
     let area = |x, y, width, height| Some(Area { x, y, width, height });
     match focus {
-        Some(focused) if !strip || inner_h < 3 * strip_h => {
+        Some(focused) if strip == Strip::Hidden || inner_h < 3 * strip_h => {
             (0..count).map(|i| if i == focused { area(0, 0, width, height) } else { None }).collect()
         }
         Some(focused) => {
@@ -612,8 +587,7 @@ fn damage_rect(area: Area) -> softbuffer::Rect {
     }
 }
 
-/// The `i`th button from the right, in points.
-fn button_rect(tile: Rect, i: usize) -> Rect {
+fn button_rect_from_right(tile: Rect, i: usize) -> Rect {
     let right = tile.right() - 16.0 - i as f32 * 36.0;
     Rect::from_min_max(pos2(right - 30.0, tile.top() + 16.0), pos2(right, tile.top() + 46.0))
 }
@@ -639,7 +613,6 @@ fn name_tag(p: &egui::Painter, tile: Rect, name: &str, small: bool) {
     p.galley(text_at, galley, theme::TEXT);
 }
 
-/// Four corners pointing out, or in to leave full screen.
 fn paint_fullscreen(p: &egui::Painter, rect: Rect, inward: bool, color: Color32) {
     let stroke = Stroke::new(1.6, color);
     let arm = rect.width() * 0.35;
@@ -670,8 +643,6 @@ fn paint_grid(p: &egui::Painter, rect: Rect, color: Color32) {
     }
 }
 
-/// Paints names and buttons over the pictures with a small egui context of
-/// its own, which never touches the main window's.
 struct Overlay {
     ctx: egui::Context,
     renderer: EguiSoftwareRender,
@@ -708,30 +679,33 @@ mod tests {
 
     #[test]
     fn one_screen_fills_the_window() {
-        assert_eq!(arrange((960, 540), 1.0, 1, None, true), [Some(area(0, 0, 960, 540))]);
-        assert_eq!(arrange((960, 540), 1.0, 1, Some(0), true), [Some(area(0, 0, 960, 540))]);
+        assert_eq!(arrange((960, 540), 1.0, 1, None, Strip::Shown), [Some(area(0, 0, 960, 540))]);
+        assert_eq!(arrange((960, 540), 1.0, 1, Some(0), Strip::Shown), [Some(area(0, 0, 960, 540))]);
     }
 
     #[test]
     fn two_sit_side_by_side_and_three_or_four_in_two_rows() {
-        assert_eq!(arrange((960, 540), 1.0, 2, None, true), [Some(area(8, 8, 468, 524)), Some(area(484, 8, 468, 524))]);
-        let three = arrange((960, 540), 1.0, 3, None, true);
+        assert_eq!(
+            arrange((960, 540), 1.0, 2, None, Strip::Shown),
+            [Some(area(8, 8, 468, 524)), Some(area(484, 8, 468, 524))]
+        );
+        let three = arrange((960, 540), 1.0, 3, None, Strip::Shown);
         assert_eq!(
             three,
             [Some(area(8, 8, 468, 258)), Some(area(484, 8, 468, 258)), Some(area(246, 274, 468, 258))],
             "last one centered"
         );
-        let four = arrange((1920, 1080), 2.0, 4, None, true);
+        let four = arrange((1920, 1080), 2.0, 4, None, Strip::Shown);
         assert_eq!(four[3], Some(area(968, 548, 936, 516)), "in pixels at 200%");
     }
 
     #[test]
     fn a_focused_screen_fills_the_window_above_a_strip_of_the_others() {
-        let focused = arrange((960, 540), 1.0, 3, Some(1), true);
+        let focused = arrange((960, 540), 1.0, 3, Some(1), Strip::Shown);
         assert_eq!(focused, [Some(area(8, 440, 163, 92)), Some(area(8, 8, 944, 424)), Some(area(179, 440, 163, 92))]);
-        let full = arrange((1920, 1080), 1.0, 3, Some(2), false);
+        let full = arrange((1920, 1080), 1.0, 3, Some(2), Strip::Hidden);
         assert_eq!(full, [None, None, Some(area(0, 0, 1920, 1080))], "full screen shows only the focused one");
-        let low = arrange((960, 270), 1.0, 2, Some(0), true);
+        let low = arrange((960, 270), 1.0, 2, Some(0), Strip::Shown);
         assert_eq!(low, [Some(area(0, 0, 960, 270)), None], "no room for the strip");
     }
 

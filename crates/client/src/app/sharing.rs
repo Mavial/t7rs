@@ -50,7 +50,6 @@ fn cannot_share(app: &App) -> Option<&'static str> {
 }
 
 impl App {
-    /// The screens watched, in the order started, for the Screens window.
     pub fn screens(&self) -> Vec<Stream> {
         let name = |id| self.view.as_ref().and_then(|v| v.nickname(id)).unwrap_or("Someone").to_owned();
         self.watching

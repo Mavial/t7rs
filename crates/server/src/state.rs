@@ -69,7 +69,6 @@ struct Client {
     /// Learned from the first authenticated datagram (works behind NAT).
     voice_addr: Option<SocketAddr>,
     voice_bucket: TokenBucket,
-    /// Sharers in their channel whose video they get.
     watching: BTreeSet<ClientId>,
     video_bucket: TokenBucket,
     keyframe_asked: Option<Instant>,
