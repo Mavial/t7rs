@@ -89,6 +89,9 @@ pub type VideoSink = Arc<dyn Fn(AccessUnit) + Send + Sync>;
 /// asks for, as it does after a lost frame.
 pub type ScreenSink = Box<dyn FnMut(AccessUnit) -> bool + Send>;
 
+/// Takes the one keyframe a still was asked for, on the network thread.
+pub type PreviewSink = Box<dyn FnOnce(AccessUnit) + Send>;
+
 pub struct Net {
     tx: mpsc::UnboundedSender<Command>,
     pub rx: std_mpsc::Receiver<NetEvent>,
@@ -163,12 +166,26 @@ impl Net {
         self.viewer.lock().unwrap().watched.remove(&sharer);
         self.send(C2S::Watch { sharer, on: false });
     }
+
+    /// Asks for a still of `sharer`'s screen: the keyframe the server sends
+    /// for it goes to `sink`. Asking again before it comes replaces the ask.
+    pub fn preview(&self, sharer: ClientId, sink: PreviewSink) {
+        self.viewer.lock().unwrap().previews.insert(sharer, Asked { sink, assembler: Assembler::default() });
+        self.send(C2S::Preview { sharer });
+    }
 }
 
-/// The screens watched, by sharer.
+/// The screens watched, and those a still was asked of, by sharer.
 #[derive(Default)]
 struct Viewer {
     watched: BTreeMap<ClientId, Watched>,
+    previews: BTreeMap<ClientId, Asked>,
+}
+
+/// A still asked for, until its keyframe is whole.
+struct Asked {
+    sink: PreviewSink,
+    assembler: Assembler,
 }
 
 struct Watched {
@@ -189,11 +206,17 @@ impl Watched {
 
 impl Viewer {
     fn push(&mut self, from: ClientId, part: VideoPart<'_>) {
-        let Some(w) = self.watched.get_mut(&from) else { return };
-        if let Some(Assembled::Frame(au)) = w.assembler.push(part)
+        if let Some(w) = self.watched.get_mut(&from)
+            && let Some(Assembled::Frame(au)) = w.assembler.push(part)
             && !(w.sink)(au)
         {
             w.assembler.wait_for_keyframe();
+        }
+        if let Some(asked) = self.previews.get_mut(&from)
+            && let Some(Assembled::Frame(au)) = asked.assembler.push(part)
+            && let Some(asked) = self.previews.remove(&from)
+        {
+            (asked.sink)(au);
         }
     }
 
@@ -214,6 +237,7 @@ impl Viewer {
 
     fn share_ended(&mut self, sharer: ClientId) {
         self.watched.remove(&sharer);
+        self.previews.remove(&sharer);
     }
 }
 
@@ -283,7 +307,7 @@ async fn run_session(
 ) {
     let ended = session(id, attempt, outgoing, &events, &playback, &viewer).await;
     playback.clear();
-    viewer.lock().unwrap().watched.clear();
+    *viewer.lock().unwrap() = Viewer::default();
     events.emit(NetEvent::Closed(id, ended));
 }
 
@@ -570,7 +594,16 @@ mod tests {
 
     fn watching(at: Instant, take: fn(u32) -> bool) -> (Viewer, Arc<Mutex<Vec<u32>>>) {
         let (sink, got) = sink(take);
-        (Viewer { watched: BTreeMap::from([(1, Watched::new(sink, at))]) }, got)
+        (Viewer { watched: BTreeMap::from([(1, Watched::new(sink, at))]), ..Viewer::default() }, got)
+    }
+
+    /// Asks for a still of `sharer`; the frames its sink gets go to the list.
+    fn ask_preview(viewer: &mut Viewer, sharer: ClientId) -> Arc<Mutex<Vec<u32>>> {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink_got = got.clone();
+        let sink: PreviewSink = Box::new(move |au| sink_got.lock().unwrap().push(au.frame));
+        viewer.previews.insert(sharer, Asked { sink, assembler: Assembler::default() });
+        got
     }
 
     fn push(viewer: &mut Viewer, from: ClientId, au: &AccessUnit) {
@@ -662,5 +695,32 @@ mod tests {
         assert_eq!(viewer.keyframe_due(), None, "the screen that lost a frame stopped sharing");
         push(&mut viewer, 2, &au(6, false));
         assert_eq!(*got_2.lock().unwrap(), [5, 6], "the other screen plays on");
+    }
+
+    #[test]
+    fn a_preview_takes_the_first_keyframe_once() {
+        let mut viewer = Viewer::default();
+        let got = ask_preview(&mut viewer, 1);
+        push(&mut viewer, 1, &au(3, false));
+        push(&mut viewer, 2, &au(4, true));
+        assert_eq!(*got.lock().unwrap(), NOBODY, "not a keyframe, or someone else's");
+        push(&mut viewer, 1, &au(5, true));
+        push(&mut viewer, 1, &au(6, true));
+        assert_eq!(*got.lock().unwrap(), [5], "once");
+
+        let got = ask_preview(&mut viewer, 1);
+        viewer.share_ended(1);
+        push(&mut viewer, 1, &au(0, true));
+        assert_eq!(*got.lock().unwrap(), NOBODY, "the share ended before the keyframe came");
+    }
+
+    #[test]
+    fn a_watched_screen_also_gives_its_keyframe_to_a_preview() {
+        let (mut viewer, watched) = watching(Instant::now(), |_| true);
+        let still = ask_preview(&mut viewer, 1);
+        push(&mut viewer, 1, &au(0, true));
+        push(&mut viewer, 1, &au(1, false));
+        assert_eq!(*watched.lock().unwrap(), [0, 1]);
+        assert_eq!(*still.lock().unwrap(), [0]);
     }
 }

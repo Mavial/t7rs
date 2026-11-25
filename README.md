@@ -60,7 +60,7 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Away, nickname | Click your name bottom-left, or `Ctrl+Shift+A` for away. A new nickname is used the next time you connect |
 | Someone's volume | Right-click them: 0% (muted for you) to 200%. Remembered by nickname |
 | Share your screen | The screen button next to your name: pick a screen or window, and a quality (720p 30, 1080p 30 or 1080p 60). Click it again to stop. Windows only for now |
-| Watch screens | **Watch** in the strip over the chat, the red **LIVE** badge next to someone in your channel, or right-click them → Watch screen. Up to 4 screens share one Screens window, side by side. Click one to make it large with the others in a strip below, and **Show all** to go back. Hover a screen for its name and × to stop watching it. Double-click or `F11` for full screen, `Esc` to leave it. Windows only for now |
+| Watch screens | **Watch** under someone's still in the shelf over the chat, the red **LIVE** badge next to someone in your channel, or right-click them → Watch screen. Point at a still for a fresh one; **Hide** folds the shelf to one line in that channel. Up to 4 screens share one Screens window, side by side. Click one to make it large with the others in a strip below, and **Show all** to go back. Hover a screen for its name and × to stop watching it. Double-click or `F11` for full screen, `Esc` to leave it. Windows only for now |
 | Voice settings | Click your name bottom-left → Settings…, or `Ctrl+,`: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), notification sounds and sound pack, volumes |
 | Poke | Right-click a user → Poke…, with an optional message. They get a popup, a sound and a flashing taskbar entry |
 
@@ -285,7 +285,12 @@ crates/
   ends your share and everything you watch. Each watched screen decodes on a
   thread of its own. All of them draw in one Screens window, which redraws only
   the screen that has a new picture, so the main window doesn't repaint for
-  video.
+  video. For the shelf's stills, a client asks the server for a preview: the
+  server asks the sharer for a keyframe and forwards that one keyframe to
+  whoever asked, up to 8 asks at once and one more per second after that. The
+  client decodes it once to a 320×180 still on a thread of its own, then drops
+  the decoder. Stills come when you join a channel, when someone starts
+  sharing, and when you point at one, never on a timer.
 - **Sound cleanup** (`crates/client/src/dsp.rs`), on the microphone, 10 ms at a time:
   high-pass filter and WebRTC AEC3 echo cancellation (pure-Rust `sonora`), then
   RNNoise noise suppression (`nnnoiseless`), then WebRTC AGC2 adaptive gain. Voice

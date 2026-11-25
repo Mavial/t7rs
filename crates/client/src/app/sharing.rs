@@ -34,7 +34,7 @@ impl Sharing {
 
 pub(super) struct Watching {
     pub(super) sharer: ClientId,
-    frames: Arc<Frames>,
+    pub(super) frames: Arc<Frames>,
 }
 
 fn cannot_share(app: &App) -> Option<&'static str> {
