@@ -48,7 +48,6 @@ pub(super) struct Files {
     jump: Option<ChannelFile>,
     scroll_to: Option<FileId>,
     dialog: bool,
-    encoding: bool,
     workers: Workers,
     previews: HashMap<PreviewKey, (u64, Preview)>,
     preview_touch: u64,
@@ -86,7 +85,13 @@ impl Library {
 struct Staged {
     name: String,
     size: u64,
-    source: Source,
+    source: DraftSource,
+    thumbnail: Option<TextureHandle>,
+}
+
+enum DraftSource {
+    Preparing(u64),
+    Ready(Source),
 }
 
 struct Active {
@@ -128,7 +133,7 @@ impl Default for Workers {
 
 enum WorkerResult {
     Pick(ChannelId, Result<Vec<Result<Staged, String>>, String>),
-    Paste(ChannelId, Result<Staged, String>),
+    Paste(u64, Result<Vec<u8>, String>),
     Save(ChannelFile, Result<Option<PathBuf>, String>),
     Image(PreviewKey, Result<Option<ColorImage>, String>),
 }
@@ -150,6 +155,10 @@ impl Files {
 
     pub fn has_staged(&self) -> bool {
         !self.staged.is_empty()
+    }
+
+    pub fn preparing_image(&self) -> bool {
+        self.staged.iter().any(|file| matches!(file.source, DraftSource::Preparing(_)))
     }
 
     pub(super) fn reads(&self, channel: ChannelId) -> bool {
@@ -319,22 +328,25 @@ impl Files {
     }
 
     pub fn paste(&mut self, ctx: &egui::Context, image: Arc<ColorImage>) {
-        let Some(channel) = self.channel.filter(|_| self.can_post() && !self.encoding) else { return };
+        if self.channel.is_none() || !self.can_post() {
+            return;
+        }
         if self.staged.len() >= MAX_STAGED {
             self.error(format!("Attach up to {MAX_STAGED} files per message"));
             return;
         }
-        self.encoding = true;
-        self.worker(ctx, move || {
-            WorkerResult::Paste(
-                channel,
-                image_preview::clipboard_png(&image).map(|bytes| Staged {
-                    name: "Clipboard image.png".into(),
-                    size: bytes.len() as u64,
-                    source: Source::Clipboard(bytes),
-                }),
-            )
+        let thumb = match image_preview::clipboard_thumbnail(&image) {
+            Ok(thumb) => thumb,
+            Err(error) => return self.error(error),
+        };
+        let id = self.next_id();
+        self.staged.push(Staged {
+            name: "Clipboard image.png".into(),
+            size: 0,
+            source: DraftSource::Preparing(id),
+            thumbnail: Some(ctx.load_texture("Clipboard thumbnail", thumb, egui::TextureOptions::LINEAR)),
         });
+        self.worker(ctx, move || WorkerResult::Paste(id, image_preview::clipboard_png(&image)));
     }
 
     fn saving(&mut self, ctx: &egui::Context, file: ChannelFile) {
@@ -357,17 +369,23 @@ impl Files {
     }
 
     pub fn queue_uploads(&mut self, caption: &str, net: &Net) -> bool {
+        if self.preparing_image() {
+            return false;
+        }
         let Some(channel) = self.channel.filter(|_| self.can_post() && self.uploading.is_none()) else { return false };
         if self.staged.iter().any(|file| self.limit.is_none_or(|limit| file.size > limit)) {
             self.error("A selected file exceeds the server's per-file limit".into());
             return false;
         }
-        self.queued.extend(self.staged.drain(..).enumerate().map(|(i, stage)| Operation::Upload {
-            channel,
-            name: stage.name,
-            size: stage.size,
-            source: stage.source,
-            caption: if i == 0 { caption.to_owned() } else { String::new() },
+        self.queued.extend(self.staged.drain(..).enumerate().map(|(i, stage)| {
+            let DraftSource::Ready(source) = stage.source else { unreachable!("all staged files are ready") };
+            Operation::Upload {
+                channel,
+                name: stage.name,
+                size: stage.size,
+                source,
+                caption: if i == 0 { caption.to_owned() } else { String::new() },
+            }
         }));
         self.start_next(net);
         true
@@ -446,10 +464,28 @@ impl Files {
                         }
                     }
                 }
-                WorkerResult::Paste(channel, result) => {
-                    self.encoding = false;
-                    if self.channel == Some(channel) && self.can_post() {
-                        self.stage(result);
+                WorkerResult::Paste(id, result) => {
+                    let Some(index) = self
+                        .staged
+                        .iter()
+                        .position(|f| matches!(f.source, DraftSource::Preparing(wanted) if wanted == id))
+                    else {
+                        continue;
+                    };
+                    match result {
+                        Ok(bytes) if self.limit.is_some_and(|limit| bytes.len() as u64 <= limit) => {
+                            let file = &mut self.staged[index];
+                            file.size = bytes.len() as u64;
+                            file.source = DraftSource::Ready(Source::Clipboard(bytes));
+                        }
+                        other => {
+                            let file = self.staged.remove(index);
+                            self.error(
+                                other
+                                    .err()
+                                    .unwrap_or_else(|| format!("{} exceeds this server's per-file limit", file.name)),
+                            );
+                        }
                     }
                 }
                 WorkerResult::Save(file, result) => {
@@ -578,24 +614,31 @@ impl Files {
         }
     }
 
-    pub fn staged_rows(&mut self, ui: &mut egui::Ui) {
+    pub fn staged_tiles(&mut self, ui: &mut egui::Ui) {
         let mut remove = None;
-        for (i, file) in self.staged.iter().enumerate() {
-            ui.horizontal(|ui| {
-                let icon = if image_preview::is_image_name(&file.name) { "Image" } else { "File" };
-                ui.label(RichText::new(icon).small().color(theme::ACCENT_TEXT));
-                ui.add(egui::Label::new(&file.name).truncate());
-                ui.label(RichText::new(size_label(file.size)).small().color(theme::TEXT_DIM));
-                if ui.add(Btn::ghost("Remove").small()).clicked() {
-                    remove = Some(i);
+        if self.staged.iter().any(|f| f.thumbnail.is_some()) {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                for (i, file) in self.staged.iter().enumerate() {
+                    if let Some(texture) = &file.thumbnail {
+                        let detail = match file.source {
+                            DraftSource::Preparing(_) => "Preparing image…".into(),
+                            DraftSource::Ready(_) => size_label(file.size),
+                        };
+                        if image_tile(ui, texture, &file.name, &detail) {
+                            remove = Some(i);
+                        }
+                    }
                 }
             });
         }
+        for (i, file) in self.staged.iter().enumerate() {
+            if file.thumbnail.is_none() && staged_file_row(ui, &file.name, &size_label(file.size)) {
+                remove = Some(i);
+            }
+        }
         if let Some(i) = remove {
             self.staged.remove(i);
-        }
-        if self.encoding {
-            ui.label(RichText::new("Preparing clipboard image…").small().color(theme::TEXT_DIM));
         }
     }
 
@@ -798,7 +841,15 @@ impl Files {
         response.on_hover_text(&a.name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
     }
 
-    pub fn chat_post(&mut self, ui: &mut egui::Ui, file: &ChannelFile, time: &str, net: &Net) {
+    pub fn chat_post(
+        &mut self,
+        ui: &mut egui::Ui,
+        file: &ChannelFile,
+        time: &str,
+        caption: &super::markdown::Body,
+        cache: &mut egui_commonmark::CommonMarkCache,
+        net: &Net,
+    ) {
         if !self.reads(file.channel) {
             return;
         }
@@ -815,7 +866,7 @@ impl Files {
                     ui.label(RichText::new(time).small().color(theme::TEXT_FAINT));
                 });
                 if !a.caption.is_empty() {
-                    ui.label(&a.caption);
+                    caption.show(ui, cache);
                 }
                 self.preview_file(ui, net, file);
                 if self.file_row(ui, file, false) {
@@ -934,7 +985,46 @@ fn stage_file(path: PathBuf) -> Result<Staged, String> {
     if !metadata.is_file() {
         return Err(format!("{name} is not a regular file"));
     }
-    Ok(Staged { name, size: metadata.len(), source: Source::Disk(path) })
+    Ok(Staged { name, size: metadata.len(), source: DraftSource::Ready(Source::Disk(path)), thumbnail: None })
+}
+
+fn image_tile(ui: &mut egui::Ui, texture: &TextureHandle, name: &str, detail: &str) -> bool {
+    let (tile, response) = ui.allocate_exact_size(vec2(68.0, 68.0), egui::Sense::hover());
+    let size = texture.size_vec2();
+    let uv = egui::Rect::from_center_size(egui::pos2(0.5, 0.5), egui::Vec2::splat(size.min_elem()) / size);
+    ui.painter().rect_filled(tile, 6, theme::SURFACE_ACTIVE);
+    egui::Image::new(texture).uv(uv).corner_radius(6).paint_at(ui, tile);
+    response.on_hover_text(format!("{name}\n{detail}"));
+    let hit = egui::Rect::from_min_size(tile.right_top() - vec2(26.0, 0.0), vec2(26.0, 26.0));
+    let close = ui.interact(hit, ui.scope_id().with(("remove-image", texture.id())), egui::Sense::click());
+    let center = hit.center();
+    let color =
+        if close.hovered() || close.has_focus() { theme::SURFACE_ACTIVE } else { egui::Color32::from_black_alpha(195) };
+    ui.painter().circle_filled(center, 9.0, color);
+    icons::paint(
+        ui.painter(),
+        egui::Rect::from_center_size(center, vec2(15.0, 15.0)),
+        Icon::Cross,
+        egui::Color32::WHITE,
+    );
+    close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Remove {name}")));
+    close.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Remove image").clicked()
+}
+
+fn staged_file_row(ui: &mut egui::Ui, name: &str, detail: &str) -> bool {
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let remove = ui.add(Btn::ghost("Remove").small()).clicked();
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.add(egui::Label::new(name).truncate()).on_hover_text(name);
+                ui.label(RichText::new(detail).small().color(theme::TEXT_DIM));
+            });
+            remove
+        })
+        .inner
+    })
+    .inner
 }
 
 fn show_preview(ui: &mut egui::Ui, state: &Preview) {
@@ -942,7 +1032,9 @@ fn show_preview(ui: &mut egui::Ui, state: &Preview) {
         Preview::Ready(texture) => {
             let native = texture.size_vec2();
             let scale = (ui.available_width().min(410.0) / native.x).min(200.0 / native.y).min(1.0);
+            ui.add_space(8.0);
             ui.add(egui::Image::new((texture.id(), native * scale.max(0.01))));
+            ui.add_space(8.0);
         }
         Preview::Loading => {
             ui.label(RichText::new("Loading image…").small().color(theme::TEXT_DIM));

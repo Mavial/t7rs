@@ -613,6 +613,7 @@ struct Canvas {
     px: Vec<[u8; 4]>,
     size: (u32, u32),
     scale: f32,
+    copied_text: Option<String>,
 }
 
 impl Canvas {
@@ -620,7 +621,7 @@ impl Canvas {
         let ctx = egui::Context::default();
         let app = make(&ctx);
         let renderer = EguiSoftwareRender::new(ColorFieldOrder::Rgba).with_caching(false);
-        Self { ctx, app, renderer, px: vec![[0u8; 4]; (w * h) as usize], size: (w, h), scale }
+        Self { ctx, app, renderer, px: vec![[0u8; 4]; (w * h) as usize], size: (w, h), scale, copied_text: None }
     }
 
     fn input(&self, frame: usize) -> egui::RawInput {
@@ -639,6 +640,11 @@ impl Canvas {
     fn draw_observing(&mut self, raw: egui::RawInput, inspect: impl FnOnce(&[egui::epaint::ClippedShape])) {
         let app = &mut self.app;
         let out = self.ctx.run_ui(raw, |ui| app.ui(ui));
+        for command in out.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                self.copied_text = Some(text);
+            }
+        }
         inspect(&out.shapes);
         let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
         let mut target = BufferMutRef::new(&mut self.px, self.size.0 as usize, self.size.1 as usize);
@@ -776,7 +782,9 @@ async fn clipboard_to_chat_and_files() {
                 }
             }
         });
-        let pos = pos.unwrap_or_else(|| panic!("missing visible control: {text}"));
+        click_at(canvas, frame, pos.unwrap_or_else(|| panic!("missing visible control: {text}")));
+    }
+    fn click_at(canvas: &mut Canvas, frame: &mut usize, pos: egui::Pos2) {
         tick(canvas, frame, Some(egui::Event::PointerMoved(pos)));
         for pressed in [true, false] {
             tick(
@@ -805,12 +813,101 @@ async fn clipboard_to_chat_and_files() {
     until(&mut sender, &mut frame, |c| c.app.files.can_post()).await;
     sender.app.focus_input = true;
     tick(&mut sender, &mut frame, None);
+    let enter = |modifiers, pressed| egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers,
+    };
+    tick(&mut sender, &mut frame, Some(egui::Event::Paste("**Example**".into())));
+    for pressed in [true, false] {
+        tick(&mut sender, &mut frame, Some(enter(egui::Modifiers::SHIFT, pressed)));
+    }
+    let mut raw = sender.input(frame);
+    frame += 1;
+    raw.events.extend([egui::Event::Paste("```python".into()), enter(egui::Modifiers::NONE, true)]);
+    sender.draw(raw);
+    tick(&mut sender, &mut frame, Some(enter(egui::Modifiers::NONE, false)));
+    assert_eq!(sender.app.input, "**Example**\n```python\n");
+    let code = "for i in range(10):\n    print(i)";
+    tick(&mut sender, &mut frame, Some(egui::Event::Paste(code.into())));
+    tick(&mut sender, &mut frame, None);
+    if let Some(dir) = std::env::var_os("T7_SNAPSHOT_DIR").map(PathBuf::from) {
+        std::fs::create_dir_all(&dir).unwrap();
+        save_canvas(&sender, &dir, "writing-python");
+    }
+    tick(&mut sender, &mut frame, Some(egui::Event::Paste("\n```".into())));
+    for pressed in [true, false] {
+        tick(&mut sender, &mut frame, Some(enter(egui::Modifiers::NONE, pressed)));
+    }
+    assert_eq!(sender.app.input, "");
+    until(&mut viewer, &mut frame, |c| {
+        c.app.tabs[1].lines.iter().any(|line| matches!(line.kind, LineKind::Msg { .. }))
+    })
+    .await;
+    let mut copy = None;
+    viewer.draw_observing(viewer.input(frame), |shapes| {
+        let code_pos = shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == code => Some(text.pos),
+                _ => None,
+            })
+            .expect("the receiver displays the indented code block");
+        copy = shapes.iter().rev().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(card) if card.fill == theme::SURFACE && card.rect.contains(code_pos) => {
+                Some(card.rect.right_top() + vec2(-24.0, 21.0))
+            }
+            _ => None,
+        });
+    });
+    click_at(&mut viewer, &mut frame, copy.expect("visible copy control on the code block"));
+    assert_eq!(viewer.copied_text.as_deref(), Some("for i in range(10):\n    print(i)\n"));
     let green = Color32::from_rgb(21, 215, 93);
-    let image = ColorImage::filled([640, 240], green);
-    tick(&mut sender, &mut frame, Some(egui::Event::PasteImage(Arc::new(image))));
-    until(&mut sender, &mut frame, |c| c.app.files.has_staged()).await;
-    click(&mut sender, &mut frame, "Send");
-    until(&mut viewer, &mut frame, |c| c.px.iter().filter(|p| p[..3] == [21, 215, 93]).count() > 1000).await;
+    let image = Arc::new(ColorImage::filled([640, 240], green));
+    let has_green = |c: &Canvas| c.px.iter().filter(|p| p[..3] == [21, 215, 93]).count() > 1000;
+    tick(&mut sender, &mut frame, Some(egui::Event::PasteImage(image.clone())));
+    let blue = Arc::new(ColorImage::filled([80, 240], Color32::from_rgb(38, 102, 212)));
+    tick(&mut sender, &mut frame, Some(egui::Event::PasteImage(blue)));
+    until(&mut sender, &mut frame, |c| !c.app.files.preparing_image() && has_green(c)).await;
+    let tile_bounds = |c: &Canvas, rgb: [u8; 3]| {
+        let mut bounds = egui::Rect::NOTHING;
+        let width = c.size.0 as usize;
+        for (index, _) in c.px.iter().enumerate().filter(|(_, p)| p[..3] == rgb) {
+            bounds.extend_with(egui::pos2((index % width) as f32, (index / width) as f32));
+        }
+        assert!(bounds.is_positive());
+        bounds
+    };
+    let first = tile_bounds(&sender, [21, 215, 93]);
+    let second = tile_bounds(&sender, [38, 102, 212]);
+    assert!(second.left() > first.right() && (first.top() - second.top()).abs() < 2.0);
+    let caption = sender.ctx.read_response(egui::Id::unique("chat-composer")).unwrap();
+    assert!(caption.rect.top() - first.bottom() >= 12.0);
+    if let Some(dir) = std::env::var_os("T7_SNAPSHOT_DIR").map(PathBuf::from) {
+        std::fs::create_dir_all(&dir).unwrap();
+        save_canvas(&sender, &dir, "chat-image-draft");
+    }
+    assert!(!has_green(&viewer));
+    click_at(&mut sender, &mut frame, first.right_top() + vec2(-12.0, 12.0));
+    tick(&mut sender, &mut frame, None);
+    assert!(sender.app.files.has_staged() && !has_green(&sender));
+    let remaining = tile_bounds(&sender, [38, 102, 212]);
+    click_at(&mut sender, &mut frame, remaining.right_top() + vec2(-12.0, 12.0));
+    tick(&mut sender, &mut frame, None);
+    assert!(!sender.app.files.has_staged() && !has_green(&sender));
+    sender.app.focus_input = true;
+    tick(&mut sender, &mut frame, None);
+    tick(&mut sender, &mut frame, Some(egui::Event::Paste("**Caption**\n\tsecond line".into())));
+    tick(&mut sender, &mut frame, Some(egui::Event::PasteImage(image)));
+    until(&mut sender, &mut frame, |c| c.app.files.has_staged() && !c.app.files.preparing_image()).await;
+    let send = sender.ctx.read_response(egui::Id::unique("chat-send")).unwrap();
+    click_at(&mut sender, &mut frame, send.rect.center());
+    until(&mut viewer, &mut frame, has_green).await;
+    assert!(viewer.app.tabs[1].lines.iter().any(
+        |line| matches!(&line.kind, LineKind::File(file) if file.attachment.caption == "**Caption**\n\tsecond line")
+    ));
     click(&mut viewer, &mut frame, "Files");
     assert!(viewer.app.files.drawer_open);
     tick(&mut viewer, &mut frame, None);
@@ -854,4 +951,29 @@ async fn clipboard_to_chat_and_files() {
         until(&mut viewer, &mut frame, |c| c.app.files.linked_preview_ready(&uri)).await;
     }
     server.abort();
+}
+
+#[test]
+fn composer_grows_to_fit_wrapped_and_fenced_drafts() {
+    for size in [(760, 480), (1100, 720)] {
+        let mut canvas = Canvas::new(size, connected, 1.0);
+        let mut frame = 0;
+        let mut height = |draft: &str| {
+            canvas.app.input = draft.to_owned();
+            for _ in 0..5 {
+                canvas.draw(canvas.input(frame));
+                frame += 1;
+            }
+            let edit = canvas.ctx.read_response(egui::Id::unique("chat-composer")).unwrap();
+            edit.interact_rect.height()
+        };
+        let empty = height("");
+        let medium = height("```python\nfor i in range(10):\n    print(i)\n    print(i + 1)\n");
+        let wrapped = height(&"a longer line of text ".repeat(16));
+        let tall = height(&format!("```python\n{}", "    print(i)\n".repeat(60)));
+        let taller = height(&format!("```python\n{}", "    print(i)\n".repeat(100)));
+        assert!(medium > empty + 20.0 && wrapped > empty + 10.0, "{size:?}: {empty} {medium} {wrapped}");
+        assert!(tall > medium && tall <= 242.0 && (tall - taller).abs() < 1.0, "{size:?}: {medium} {tall} {taller}");
+        assert!((height("") - empty).abs() < 1.0);
+    }
 }

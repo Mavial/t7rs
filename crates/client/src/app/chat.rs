@@ -10,6 +10,7 @@ use t7_proto::model::ServerView;
 use t7_proto::{C2S, ChannelKind, ClientId, TextTarget};
 
 use super::files::Files;
+use super::markdown::Body;
 use super::sidebar::HEADER_H;
 use super::widgets::{paint_avatar, truncated};
 use super::{App, Conn};
@@ -31,18 +32,17 @@ pub(super) struct Line {
     pub(super) at: NaiveDateTime,
     pub(super) time: String,
     pub(super) kind: LineKind,
-    pub(super) text: String,
-    link: Option<ureq::http::Uri>,
+    body: Body,
 }
 
 impl Line {
     pub(super) fn new(at: NaiveDateTime, kind: LineKind, text: String) -> Self {
-        let link = if matches!(kind, LineKind::Msg { .. }) {
-            text.split_whitespace().find_map(crate::image_preview::link)
-        } else {
-            None
+        let body = match &kind {
+            LineKind::Msg { .. } => Body::parse(text),
+            LineKind::File(file) => Body::parse(file.attachment.caption.clone()),
+            _ => Body::plain(text),
         };
-        Self { at, time: at.format("%H:%M").to_string(), kind, text, link }
+        Self { at, time: at.format("%H:%M").to_string(), kind, body }
     }
 }
 
@@ -81,7 +81,7 @@ pub(super) enum Entry<'a> {
     Day(NaiveDate),
     Said { name: &'a str, lines: &'a [Line] },
     Note(&'a Line),
-    File(&'a ChannelFile, &'a str),
+    File(&'a ChannelFile, &'a str, &'a Body),
 }
 
 pub(super) fn entries(lines: &[Line]) -> impl Iterator<Item = Entry<'_>> {
@@ -97,7 +97,7 @@ pub(super) fn entries(lines: &[Line]) -> impl Iterator<Item = Entry<'_>> {
         let LineKind::Msg { from, name } = &line.kind else {
             i += 1;
             return Some(match &line.kind {
-                LineKind::File(file) => Entry::File(file, &line.time),
+                LineKind::File(file) => Entry::File(file, &line.time, &line.body),
                 _ => Entry::Note(line),
             });
         };
@@ -105,7 +105,7 @@ pub(super) fn entries(lines: &[Line]) -> impl Iterator<Item = Entry<'_>> {
         i += 1;
         while let Some(next) = lines.get(i)
             && matches!(&next.kind, LineKind::Msg { from: f, .. } if f == from)
-            && lines[i - 1].link.is_none()
+            && lines[i - 1].body.link.is_none()
             && next.at.date() == date
             && next.at - lines[i - 1].at < GROUP_GAP
         {
@@ -175,19 +175,42 @@ fn tab_button(ui: &mut egui::Ui, tab: &Tab, active: bool) -> TabButton {
     TabButton { resp: resp.on_hover_cursor(egui::CursorIcon::PointingHand), close_clicked: closed }
 }
 
-fn kbd(ui: &mut egui::Ui, key: &str) {
-    let galley = ui.painter().layout_no_wrap(key.to_owned(), FontId::monospace(11.0), theme::TEXT_FAINT);
-    let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(8.0, 2.0), Sense::hover());
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(4),
-        Stroke::new(1.0, theme::BORDER_STRONG),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, theme::TEXT_FAINT);
+fn send_button(ui: &mut egui::Ui, modifiers: egui::Modifiers) -> egui::Response {
+    let (_, rect) = ui.allocate_space(vec2(32.0, 32.0));
+    let response = ui.interact(rect, egui::Id::unique("chat-send"), Sense::click());
+    let fill = if !response.enabled() {
+        theme::SURFACE_ACTIVE
+    } else if response.is_pointer_button_down_on() {
+        theme::ACCENT_PRESSED
+    } else if response.hovered() || response.has_focus() {
+        theme::ACCENT_HOVER
+    } else {
+        theme::ACCENT
+    };
+    ui.painter().circle_filled(rect.center(), 14.0, fill);
+    let ink = if response.enabled() { theme::ON_ACCENT } else { theme::TEXT_FAINT };
+    icons::paint(ui.painter(), rect.shrink(7.0), Icon::ArrowUp, ink);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, response.enabled(), "Send"));
+    let shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(modifiers, egui::Key::Enter));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Send ({shortcut})"))
 }
 
 impl App {
+    pub(crate) fn prepare_chat_paste(&self, ctx: &egui::Context, events: &mut [egui::Event]) {
+        let id = egui::Id::unique("chat-composer");
+        for event in events {
+            if let egui::Event::Paste(text) = event
+                && ctx.memory(|m| m.has_focus(id))
+                && !egui::TextEdit::load_state(ctx, id).and_then(|state| state.cursor.char_range()).is_some_and(
+                    |range| super::markdown::in_code(&self.input, range.as_sorted_char_range().start.into()),
+                )
+                && let Some(markdown) = super::markdown::rich_paste(text)
+            {
+                *text = markdown;
+            }
+        }
+    }
+
     pub(super) fn open_private(&mut self, id: ClientId) {
         let idx = self.private_tab(id);
         self.active_tab = idx;
@@ -196,17 +219,16 @@ impl App {
     }
 
     fn send_chat(&mut self) {
-        let text = self.input.trim().to_owned();
-        if !matches!(self.conn, Conn::Connected { .. }) {
+        if !matches!(self.conn, Conn::Connected { .. }) || self.input.chars().count() > t7_proto::MAX_TEXT_LEN {
             return;
         }
         if self.tabs[self.active_tab].kind == TabKind::Channel && self.files.has_staged() {
-            if self.files.queue_uploads(&text, &self.net) {
+            if self.files.queue_uploads(&self.input, &self.net) {
                 self.input.clear();
             }
             return;
         }
-        if text.is_empty() {
+        if self.input.trim().is_empty() {
             return;
         }
         let target = match self.tabs[self.active_tab].kind {
@@ -214,8 +236,7 @@ impl App {
             TabKind::Channel => TextTarget::Channel,
             TabKind::Private(id) => TextTarget::Client(id),
         };
-        self.net.send(C2S::SendText { target, text });
-        self.input.clear();
+        self.net.send(C2S::SendText { target, text: std::mem::take(&mut self.input) });
     }
 
     pub(super) fn push(&mut self, tab: usize, kind: LineKind, text: impl Into<String>) {
@@ -393,7 +414,14 @@ impl App {
 
     fn composer(&mut self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.active_tab];
-        let files = tab.kind == TabKind::Channel && self.files.limit.is_some();
+        let upload_limit = self.files.limit.filter(|_| tab.kind == TabKind::Channel);
+        let files = upload_limit.is_some();
+        let draft_cap = (ui.available_height() * 0.38).clamp(68.0, 240.0);
+        let id = egui::Id::unique("chat-composer");
+        let cursor = egui::TextEdit::load_state(ui.ctx(), id)
+            .and_then(|s| s.cursor.char_range())
+            .map_or(usize::MAX, |r| r.primary.index.into());
+        let writing_code = super::markdown::in_fenced_code(&self.input, cursor);
         let hint = match tab.kind {
             TabKind::Server => "Message everyone on the server".to_owned(),
             TabKind::Channel => format!("Message #{}", tab.title),
@@ -416,74 +444,103 @@ impl App {
                 );
                 return;
             }
-            if files {
-                self.files.staged_rows(ui);
-            }
             let field = egui::Frame::new()
                 .fill(theme::SURFACE)
                 .corner_radius(CornerRadius::same(8))
-                .stroke(Stroke::new(1.0, theme::BORDER))
+                .stroke(Stroke::new(1.0, if writing_code { theme::BORDER_STRONG } else { theme::BORDER }))
                 .inner_margin(Margin { left: 12, right: 10, top: 3, bottom: 3 });
             field.show(ui, |ui| {
+                let focused = ui.memory(|m| m.has_focus(id));
+                if files && focused && self.files.can_post() {
+                    let images = ui.input_mut(|i| i.events.extract_if(.., |event| matches!(event, egui::Event::PasteImage(_))).collect::<Vec<_>>());
+                    for event in images {
+                        if let egui::Event::PasteImage(image) = event { self.files.paste(ui.ctx(), image); }
+                    }
+                }
+                if files && self.files.has_staged() {
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("draft-attachments")
+                        .max_height(142.0)
+                        .show(ui, |ui| self.files.staged_tiles(ui));
+                    ui.add_space(12.0);
+                }
                 ui.horizontal(|ui| {
-                    if files {
-                        if ui
+                    if let Some(limit) = upload_limit
+                        && ui
                             .add_enabled(self.files.can_post(), Btn::ghost("+").small())
-                            .on_hover_text(self.files.limit.map_or_else(
-                                || "Attach files or paste an image".into(),
-                                |limit| {
-                                    format!(
-                                        "Attach files or paste an image · {} per file",
-                                        super::files::size_label(limit)
-                                    )
-                                },
+                            .on_hover_text(format!(
+                                "Attach files or paste an image · {} per file",
+                                super::files::size_label(limit)
                             ))
                             .clicked()
-                        {
-                            self.files.pick(ui.ctx());
-                        }
-                        let id = egui::Id::unique("chat-composer");
-                        if self.files.can_post()
-                            && ui.memory(|m| m.has_focus(id))
-                            && let Some(image) = ui.input_mut(|i| {
-                                let at = i.events.iter().position(|ev| matches!(ev, egui::Event::PasteImage(_)))?;
-                                match i.events.remove(at) {
-                                    egui::Event::PasteImage(image) => Some(image),
-                                    _ => None,
-                                }
-                            })
-                        {
-                            self.files.paste(ui.ctx(), image);
-                        }
+                    {
+                        self.files.pick(ui.ctx());
                     }
-                    let edit = egui::TextEdit::singleline(&mut self.input)
-                        .id(egui::Id::unique("chat-composer"))
+                    let send_modifiers = if writing_code { egui::Modifiers::COMMAND } else { egui::Modifiers::NONE };
+                    let send = focused && ui.input(|i| i.events.iter().any(|event| {
+                        matches!(event, egui::Event::Key { key: egui::Key::Enter, pressed: true, repeat: false, modifiers, .. }
+                            if modifiers.matches_exact(send_modifiers))
+                    }));
+                    let width = (ui.available_width() - 32.0 - ui.spacing().item_spacing.x).max(1.0);
+                    let mut layouter = super::markdown::draft_galley;
+                    let height = (layouter(ui, &self.input, width).size().y + 12.0)
+                        .clamp(34.0, draft_cap);
+                    let newline = if writing_code { egui::Modifiers::NONE } else { egui::Modifiers::SHIFT };
+                    let edit = egui::TextEdit::multiline(&mut self.input)
+                        .id(id)
+                        .desired_rows(1)
+                        .return_key(egui::KeyboardShortcut::new(newline, egui::Key::Enter))
+                        .lock_focus(writing_code)
                         .hint_text(RichText::new(hint).color(theme::TEXT_FAINT))
                         .frame(egui::Frame::NONE)
-                        .desired_width(ui.available_width() - 52.0)
+                        .desired_width(width)
                         .min_size(vec2(0.0, 34.0))
-                        .align(Align2::LEFT_CENTER)
-                        .char_limit(t7_proto::MAX_TEXT_LEN)
-                        .font(FontId::proportional(14.0));
-                    let resp = ui.add(edit);
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        self.send_chat();
+                        .margin(Margin::symmetric(0, 6))
+                        .align(Align2::LEFT_TOP)
+                        .font(FontId::proportional(14.0))
+                        .layouter(&mut layouter);
+                    let mut output = egui::ScrollArea::vertical()
+                        .id_salt("chat-draft")
+                        .max_width(width)
+                        .max_height(height)
+                        .min_scrolled_height(height)
+                        .show(ui, |ui| edit.show(ui))
+                        .inner;
+                    let fence_opened_this_frame = !writing_code
+                        && output.response.changed()
+                        && output.cursor_range.is_some_and(|range| {
+                            super::markdown::in_fenced_code(&self.input, range.primary.index.into())
+                        });
+                    if send {
+                        if fence_opened_this_frame && let Some(range) = output.cursor_range {
+                            use egui::TextBuffer;
+                            let mut caret = self.input.delete_selected(&range);
+                            self.input.insert_text_at(&mut caret, "\n", usize::MAX);
+                            output.state.cursor.set_char_range(Some(egui::text::CCursorRange::one(caret)));
+                            output.state.store(ui.ctx(), id);
+                        } else {
+                            self.send_chat();
+                        }
                         self.focus_input = true;
                     }
                     if std::mem::take(&mut self.focus_input) {
-                        resp.request_focus();
+                        output.response.request_focus();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.files.has_staged() && files {
-                            if ui.add(Btn::primary("Send").small()).clicked() {
-                                self.send_chat();
-                                self.focus_input = true;
-                            }
-                        } else {
-                            kbd(ui, "Enter");
+                        let ready = (!self.input.trim().is_empty() || files && self.files.has_staged())
+                            && !(files && self.files.preparing_image())
+                            && self.input.chars().count() <= t7_proto::MAX_TEXT_LEN;
+                        if ui.add_enabled(ready, |ui: &mut egui::Ui| send_button(ui, send_modifiers)).clicked() {
+                            self.send_chat();
+                            self.focus_input = true;
                         }
                     });
                 });
+                let count = self.input.chars().count();
+                if count > t7_proto::MAX_TEXT_LEN {
+                    ui.colored_label(theme::RED, format!("{count} / {} characters", t7_proto::MAX_TEXT_LEN));
+                }
             });
         });
     }
@@ -513,10 +570,12 @@ impl App {
                     match entry {
                         Entry::Day(day) => day_separator(ui, &day_label(day, today)),
                         Entry::Said { name, lines } => {
-                            said(ui, name, lines, &mut self.files);
+                            said(ui, name, lines, &mut self.files, &mut self.markdown_cache);
                         }
                         Entry::Note(line) => note(ui, line),
-                        Entry::File(file, time) => self.files.chat_post(ui, file, time, &self.net),
+                        Entry::File(file, time, caption) => {
+                            self.files.chat_post(ui, file, time, caption, &mut self.markdown_cache, &self.net);
+                        }
                     }
                 }
             });
@@ -552,44 +611,47 @@ fn day_separator(ui: &mut egui::Ui, label: &str) {
     p.hline(text.right() + 10.0..=rect.right(), rect.center().y, stroke);
 }
 
-fn said(ui: &mut egui::Ui, name: &str, lines: &[Line], files: &mut Files) {
+fn said(
+    ui: &mut egui::Ui,
+    name: &str,
+    lines: &[Line],
+    files: &mut Files,
+    cache: &mut egui_commonmark::CommonMarkCache,
+) {
     let width = ui.available_width();
-    let text_w = width - TEXT_X;
     let color = theme::avatar_color(name);
     let p = ui.painter();
     let header = p.layout_no_wrap(name.to_owned(), FontId::proportional(14.0), color);
     let time = p.layout_no_wrap(lines[0].time.clone(), FontId::proportional(11.0), theme::TEXT_FAINT);
-    let texts: Vec<_> =
-        lines.iter().map(|l| p.layout(l.text.clone(), FontId::proportional(14.0), theme::TEXT, text_w)).collect();
-    let height = header.size().y + 2.0 + texts.iter().map(|g| g.size().y + 2.0).sum::<f32>();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, height + 12.0), Sense::hover());
-    if ui.is_rect_visible(rect) {
+    ui.add_space(6.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, header.size().y + 2.0), Sense::hover());
+    {
         let p = ui.painter();
-        let top = rect.top() + 6.0;
+        let top = rect.top();
         paint_avatar(p, egui::pos2(rect.left() + 16.0, top + 16.0), 16.0, name);
         let x = rect.left() + TEXT_X;
         let header_h = header.size().y;
         let time_pos = egui::pos2(x + header.size().x + 8.0, top + header_h - time.size().y - 1.0);
         p.galley(egui::pos2(x, top), header, color);
         p.galley(time_pos, time, theme::TEXT_FAINT);
-        let mut y = top + header_h + 2.0;
-        for text in texts {
-            let h = text.size().y;
-            p.galley(egui::pos2(x, y), text, theme::TEXT);
-            y += h + 2.0;
+    }
+    egui::Frame::new().inner_margin(Margin { left: TEXT_X as i8, ..Margin::ZERO }).show(ui, |ui| {
+        for line in lines {
+            line.body.show(ui, cache);
+            ui.add_space(2.0);
         }
-    }
-    if let Some(url) = lines.last().and_then(|line| line.link.as_ref()) {
-        ui.indent(ui.next_auto_id(), |ui| files.linked_image(ui, url));
-        ui.add_space(5.0);
-    }
+        if let Some(url) = lines.last().and_then(|line| line.body.link.as_ref()) {
+            files.linked_image(ui, url);
+        }
+    });
+    ui.add_space(6.0);
 }
 
 fn note(ui: &mut egui::Ui, line: &Line) {
     let color = if matches!(line.kind, LineKind::Error) { theme::RED } else { theme::TEXT_FAINT };
     let mut job = LayoutJob::default();
     let fmt = TextFormat { font_id: FontId::proportional(12.5), color, ..Default::default() };
-    job.append(&line.text, 0.0, fmt.clone());
+    job.append(&line.body.text, 0.0, fmt.clone());
     job.append(" · ", 0.0, fmt.clone());
     job.append(&line.time, 0.0, fmt);
     job.wrap.max_width = ui.available_width() - TEXT_X;
@@ -627,7 +689,7 @@ mod tests {
                 Entry::Day(_) => ("day", 0),
                 Entry::Said { lines, .. } => ("said", lines.len()),
                 Entry::Note(_) => ("note", 1),
-                Entry::File(_, _) => ("file", 1),
+                Entry::File(..) => ("file", 1),
             })
             .collect()
     }
