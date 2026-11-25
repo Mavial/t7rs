@@ -25,15 +25,12 @@ pub(super) fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str) -> egui::Res
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
 }
 
-/// A control the server holds off, like the mic in a channel you can't speak in:
-/// grey, no fill, and a tooltip saying why.
 pub(super) fn mic_held(ui: &mut egui::Ui, icon: Icon, color: Color32, tip: &str) {
     let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
     icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, color);
     resp.on_hover_cursor(egui::CursorIcon::NotAllowed).on_hover_text(tip);
 }
 
-/// A small icon button that stays lit while the menu it opens shows.
 pub(super) fn menu_button(ui: &mut egui::Ui, icon: Icon) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
@@ -46,7 +43,6 @@ pub(super) fn menu_button(ui: &mut egui::Ui, icon: Icon) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// One line of text cut to `width` with an ellipsis.
 pub(super) fn truncated(
     ui: &egui::Ui,
     text: &str,
@@ -59,8 +55,6 @@ pub(super) fn truncated(
     ui.painter().layout_job(job)
 }
 
-/// A menu entry: an icon, a label, and optional faint text on the right.
-/// `ui.add_enabled(false, ..)` greys it out.
 pub(super) struct Item<'a> {
     icon: Icon,
     icon_color: Color32,
@@ -75,7 +69,6 @@ impl<'a> Item<'a> {
         Self { icon, icon_color: theme::TEXT_FAINT, label, right: None, danger: false, submenu: false }
     }
 
-    /// Faint text at the right edge: a shortcut, or the value it acts on.
     pub(super) fn right(mut self, text: &'a str) -> Self {
         self.right = Some(text);
         self
@@ -86,13 +79,11 @@ impl<'a> Item<'a> {
         self
     }
 
-    /// Red: kicks, bans, deleting.
     pub(super) fn danger(mut self) -> Self {
         self.danger = true;
         self
     }
 
-    /// Ends in a chevron: hovering it opens a submenu.
     pub(super) fn submenu(mut self) -> Self {
         self.submenu = true;
         self
@@ -141,7 +132,6 @@ impl egui::Widget for Item<'_> {
     }
 }
 
-/// A small caps heading inside a menu, like "Moderation".
 pub(super) fn menu_label(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -151,7 +141,6 @@ pub(super) fn menu_label(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-/// The look every menu shares: 28-point rows with no gaps, a minimum width.
 pub(super) fn menu_style(ui: &mut egui::Ui, min_width: f32) {
     ui.set_min_width(min_width);
     ui.spacing_mut().item_spacing.y = 0.0;

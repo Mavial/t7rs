@@ -19,23 +19,16 @@ use super::{App, Conn, manages};
 use crate::icons::{self, Icon};
 use crate::theme::{self, Btn};
 
-/// Height of the sidebar's header, and of the main pane's beside it.
 pub(super) const HEADER_H: f32 = 52.0;
 
 const NO_VOICE: &str = "Voice packets aren't getting through. The server's UDP port (same number as the TCP \
                         port, 9988 by default) is probably blocked by a firewall.";
 
-/// What the banner above your panel shows, worked out each frame from the app state.
 pub(super) enum Banner {
     UpdateReady(String),
-    /// The connection dropped or we were kicked: why, and Reconnect.
-    Lost {
-        headline: String,
-        detail: String,
-    },
+    Lost { headline: String, detail: String },
 }
 
-/// Picked from the server menu, applied after drawing it.
 #[derive(Clone, Copy)]
 enum ServerAction {
     Connect,
@@ -48,7 +41,6 @@ enum ServerAction {
     BackToServers,
 }
 
-/// Picked from your menu.
 #[derive(Clone, Copy)]
 enum YouAction {
     Away,
@@ -63,7 +55,6 @@ impl App {
             .resizable(true)
             .show_separator_line(false)
             .default_size(280.0)
-            // Narrower in a small window, so the chat keeps its room.
             .size_range(220.0..=(window * 0.32).clamp(232.0, 480.0))
             .show(ui, |ui| {
                 self.sidebar_header(ui);
@@ -72,14 +63,12 @@ impl App {
                 let body = egui::Frame::new().inner_margin(Margin { left: 8, right: 8, top: 0, bottom: 6 });
                 body.show(ui, |ui| match self.conn {
                     Conn::Disconnected => self.saved_servers(ui),
-                    // Where the tree will be, so nothing jumps when it arrives.
                     Conn::Connecting(_) => skeleton(ui),
                     Conn::Connected { .. } | Conn::Lost { .. } => self.channel_tree(ui),
                 });
             });
     }
 
-    /// Before connecting, the sidebar lists the servers you've been on.
     fn saved_servers(&mut self, ui: &mut egui::Ui) {
         if self.settings.recent.is_empty() {
             ui.add_space(14.0);
@@ -146,7 +135,6 @@ impl App {
         }
     }
 
-    /// A lost connection comes first: it is why the tree is dimmed.
     pub(super) fn banner(&self) -> Option<Banner> {
         if let Conn::Lost { why, .. } = &self.conn {
             return Some(Banner::Lost { headline: why.headline.clone(), detail: why.detail.clone() });
@@ -164,7 +152,6 @@ impl App {
         }
     }
 
-    /// The server's name, or what we know of it while connecting.
     pub(super) fn server_name(&self) -> String {
         if let Some(view) = self.shown_view() {
             return view.info.name.clone();
@@ -174,16 +161,17 @@ impl App {
         recent.map_or_else(|| address.to_owned(), |r| r.server_name.clone())
     }
 
-    /// The dot and words after the server's name, and what they mean.
-    fn presence(&self) -> Option<(egui::Color32, String, String)> {
+    fn presence(&self) -> Option<Presence> {
         match &self.conn {
             Conn::Disconnected => None,
-            Conn::Lost { .. } => Some((theme::TEXT_FAINT, "Offline".to_owned(), "Not connected".to_owned())),
+            Conn::Lost { .. } => {
+                Some(Presence::new(theme::TEXT_FAINT, "Offline".to_owned(), "Not connected".to_owned()))
+            }
             Conn::Connecting(login) => {
-                Some((theme::AMBER, "Connecting".to_owned(), format!("Connecting to {}", login.address)))
+                Some(Presence::new(theme::AMBER, "Connecting".to_owned(), format!("Connecting to {}", login.address)))
             }
             Conn::Connected { .. } if self.voice.blocked() => {
-                Some((theme::AMBER, "no voice".to_owned(), NO_VOICE.to_owned()))
+                Some(Presence::new(theme::AMBER, "no voice".to_owned(), NO_VOICE.to_owned()))
             }
             Conn::Connected { login, .. } => {
                 let ping = match self.voice.rtt().or(self.ping) {
@@ -191,7 +179,7 @@ impl App {
                     Some(p) => format!("{} ms", p.as_millis()),
                     None => String::new(),
                 };
-                Some((theme::GREEN, ping, format!("Connected to {}", login.address)))
+                Some(Presence::new(theme::GREEN, ping, format!("Connected to {}", login.address)))
             }
         }
     }
@@ -203,8 +191,8 @@ impl App {
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 picked = self.server_button(ui);
-                if let Some((color, text, tip)) = self.presence() {
-                    presence_dot(ui, color, &text).on_hover_text(tip);
+                if let Some(Presence { color, label, tooltip }) = self.presence() {
+                    presence_dot(ui, color, &label).on_hover_text(tooltip);
                 }
                 let name = self.server_name();
                 let galley = truncated(ui, &name, FontId::proportional(14.5), theme::TEXT, ui.available_width());
@@ -229,7 +217,6 @@ impl App {
         }
     }
 
-    /// `+` to connect while offline, else `⋯` with what the top bar used to hold.
     fn server_button(&self, ui: &mut egui::Ui) -> Option<ServerAction> {
         if matches!(self.conn, Conn::Disconnected) {
             let resp = menu_button(ui, Icon::Plus).on_hover_text("Connect to a server (Ctrl+S)");
@@ -327,7 +314,6 @@ impl App {
         });
     }
 
-    /// How you are, in words, colored like the marks in the tree.
     fn status_line(&self) -> (String, egui::Color32) {
         let s = self.settings.status;
         let (text, color) = match &self.conn {
@@ -349,7 +335,6 @@ impl App {
         (text.to_owned(), color)
     }
 
-    /// Your avatar, name and status line: one button that opens your menu.
     fn who(&self, ui: &mut egui::Ui, width: f32) -> egui::Response {
         let (rect, resp) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
@@ -359,7 +344,6 @@ impl App {
         }
         let nick = self.view.as_ref().and_then(ServerView::me).map_or(self.settings.nickname.as_str(), |c| &c.nickname);
         let mut x = rect.left() + 6.0;
-        // A narrow sidebar drops the avatar before the words.
         if width >= 150.0 {
             let center = egui::pos2(x + 16.0, rect.center().y);
             paint_avatar(p, center, 16.0, nick);
@@ -382,7 +366,6 @@ impl App {
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
-    /// Your nickname, away, and settings, so the panel keeps to three buttons.
     fn your_menu(&mut self, who: &egui::Response) {
         let connected = matches!(self.conn, Conn::Connected { .. });
         let away = self.settings.status.away;
@@ -425,7 +408,6 @@ impl App {
     fn voice_buttons(&mut self, ui: &mut egui::Ui) {
         let mut s = self.settings.status;
         let mic_tip = if s.muted { "Unmute microphone (Ctrl+Shift+M)" } else { "Mute microphone (Ctrl+Shift+M)" };
-        // When the server holds the mic, it is grey, not red: you didn't do it.
         let mic = match self.my_speech() {
             Speech::Allowed => toggle(ui, &mut s.muted, Icon::Mic, Icon::MicOff, theme::RED, mic_tip),
             Speech::NotHere => {
@@ -446,7 +428,6 @@ impl App {
     }
 }
 
-/// Grey rows shaped like channels and the people in them.
 fn skeleton(ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 0.0;
     for (i, width) in [0.7, 0.4, 0.55, 0.45, 0.6, 0.35, 0.5].into_iter().enumerate() {
@@ -466,7 +447,18 @@ fn skeleton(ui: &mut egui::Ui) {
     }
 }
 
-/// A status dot and a few words, like the ping after the server's name.
+struct Presence {
+    color: egui::Color32,
+    label: String,
+    tooltip: String,
+}
+
+impl Presence {
+    fn new(color: egui::Color32, label: String, tooltip: String) -> Self {
+        Self { color, label, tooltip }
+    }
+}
+
 fn presence_dot(ui: &mut egui::Ui, color: egui::Color32, text: &str) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.5), theme::TEXT_FAINT);
     let text_w = if text.is_empty() { 0.0 } else { galley.size().x + 6.0 };
@@ -477,12 +469,17 @@ fn presence_dot(ui: &mut egui::Ui, color: egui::Color32, text: &str) -> egui::Re
     resp
 }
 
-/// After a lost connection: try again, or put the old tree away.
+const ADDRESS_SHOWN_IN_MENU: usize = 28;
+
+fn copy_address(address: &str) -> Item<'_> {
+    let copy = Item::new(Icon::Copy, "Copy address");
+    if address.chars().count() <= ADDRESS_SHOWN_IN_MENU { copy.right(address) } else { copy }
+}
+
 fn lost_menu(ui: &mut egui::Ui, address: &str) -> Option<ServerAction> {
     menu_style(ui, 220.0);
     let mut picked = None;
-    let copy = Item::new(Icon::Copy, "Copy address");
-    let copy = if address.chars().count() <= 28 { copy.right(address) } else { copy };
+    let copy = copy_address(address);
     for (item, action) in [
         (Item::new(Icon::ArrowRight, "Reconnect"), ServerAction::Reconnect),
         (copy, ServerAction::CopyAddress),
@@ -496,7 +493,6 @@ fn lost_menu(ui: &mut egui::Ui, address: &str) -> Option<ServerAction> {
     picked
 }
 
-/// Server-wide actions, each shown only to those who may use it.
 fn server_menu(ui: &mut egui::Ui, view: Option<&ServerView>, address: &str) -> Option<ServerAction> {
     menu_style(ui, 240.0);
     let mut picked = None;
@@ -526,9 +522,7 @@ fn server_menu(ui: &mut egui::Ui, view: Option<&ServerView>, address: &str) -> O
         }
         menu_separator(ui);
     }
-    let copy = Item::new(Icon::Copy, "Copy address");
-    // A long address would stretch the menu; it is on the clipboard either way.
-    let copy = if address.chars().count() <= 28 { copy.right(address) } else { copy };
+    let copy = copy_address(address);
     item(ui, copy, ServerAction::CopyAddress);
     let leave = if view.is_some() { "Disconnect" } else { "Cancel" };
     item(ui, Item::new(Icon::Power, leave).danger(), ServerAction::Disconnect);

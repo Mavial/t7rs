@@ -15,9 +15,7 @@ use crate::icons::{self, Icon};
 use crate::theme::{self, Btn};
 
 const MAX_LINES: usize = 1000;
-/// Messages one person sends closer together than this share a name and avatar.
 const GROUP_GAP: TimeDelta = TimeDelta::minutes(5);
-/// Where a message's text starts: after the 32-point avatar and a gap.
 const TEXT_X: f32 = 44.0;
 
 pub(super) enum LineKind {
@@ -27,9 +25,7 @@ pub(super) enum LineKind {
 }
 
 pub(super) struct Line {
-    /// When it arrived, in local time.
     pub(super) at: NaiveDateTime,
-    /// `at` as a clock time, formatted once.
     pub(super) time: String,
     pub(super) kind: LineKind,
     pub(super) text: String,
@@ -72,18 +68,12 @@ pub(super) fn base_tabs() -> Vec<Tab> {
     ]
 }
 
-/// What the chat shows, in order.
 pub(super) enum Entry<'a> {
-    /// The first line of a day.
     Day(NaiveDate),
-    /// Messages one person sent in a row.
     Said { name: &'a str, lines: &'a [Line] },
-    /// A system line or an error.
     Note(&'a Line),
 }
 
-/// Splits a tab's lines into what the chat shows: a separator before each
-/// day, and runs of messages from one person. Worked out each frame.
 pub(super) fn entries(lines: &[Line]) -> impl Iterator<Item = Entry<'_>> {
     let mut i = 0;
     let mut day = None;
@@ -119,8 +109,6 @@ fn day_label(day: NaiveDate, today: NaiveDate) -> String {
     }
 }
 
-/// A chat tab's size: its title, an unread count, and a close button while
-/// an open private one.
 fn tab_width(ui: &egui::Ui, tab: &Tab, active: bool) -> f32 {
     let label = ui.painter().layout_no_wrap(tab.label(), FontId::proportional(12.5), theme::TEXT);
     let pill = (tab.unread > 0).then(|| unread_pill(ui, tab.unread).size().x + 10.0);
@@ -133,8 +121,12 @@ fn unread_pill(ui: &egui::Ui, unread: u32) -> std::sync::Arc<egui::Galley> {
     ui.painter().layout_no_wrap(text, FontId::proportional(10.5), theme::ON_ACCENT)
 }
 
-/// Returns the tab's response and whether its close button was clicked.
-fn tab_button(ui: &mut egui::Ui, tab: &Tab, active: bool) -> (egui::Response, bool) {
+struct TabButton {
+    resp: egui::Response,
+    close_clicked: bool,
+}
+
+fn tab_button(ui: &mut egui::Ui, tab: &Tab, active: bool) -> TabButton {
     let width = tab_width(ui, tab, active);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click());
     let hovered = resp.hovered();
@@ -166,10 +158,9 @@ fn tab_button(ui: &mut egui::Ui, tab: &Tab, active: bool) -> (egui::Response, bo
         icons::paint(ui.painter(), close.shrink(2.5), Icon::Cross, color);
         closed = close_resp.on_hover_text("Close").clicked();
     }
-    (resp.on_hover_cursor(egui::CursorIcon::PointingHand), closed)
+    TabButton { resp: resp.on_hover_cursor(egui::CursorIcon::PointingHand), close_clicked: closed }
 }
 
-/// A key name in a small outlined box, like `Enter`.
 fn kbd(ui: &mut egui::Ui, key: &str) {
     let galley = ui.painter().layout_no_wrap(key.to_owned(), FontId::monospace(11.0), theme::TEXT_FAINT);
     let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(8.0, 2.0), Sense::hover());
@@ -253,8 +244,6 @@ impl App {
         });
     }
 
-    /// Where you are on the left, the chat tabs on the right. The topic is
-    /// cut first when room runs out.
     fn pane_header(&mut self, ui: &mut egui::Ui) {
         let (mut open, mut close) = (None, None);
         let frame = egui::Frame::new().inner_margin(Margin { left: 20, right: 12, top: 0, bottom: 0 });
@@ -271,12 +260,12 @@ impl App {
                 let mut tabs = |ui: &mut egui::Ui| {
                     ui.spacing_mut().item_spacing.x = gap;
                     for (i, tab) in self.tabs.iter().enumerate() {
-                        let (resp, closed) = tab_button(ui, tab, i == self.active_tab);
+                        let TabButton { resp, close_clicked } = tab_button(ui, tab, i == self.active_tab);
                         if resp.clicked() {
                             open = Some(i);
                         }
                         if matches!(tab.kind, TabKind::Private(_)) {
-                            if closed || resp.middle_clicked() {
+                            if close_clicked || resp.middle_clicked() {
                                 close = Some(i);
                             }
                             resp.context_menu(|ui| {
@@ -289,7 +278,6 @@ impl App {
                     }
                 };
                 if tabs_room < tabs_w {
-                    // Too many tabs for the window: they scroll, the window doesn't.
                     let scroll = egui::ScrollArea::horizontal().max_width(tabs_room);
                     scroll.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
                         ui.horizontal(&mut tabs);
@@ -308,8 +296,6 @@ impl App {
         }
     }
 
-    /// Your channel's icon, name and topic; on a private tab, who it is with
-    /// and what they are up to.
     fn paint_title(&self, ui: &egui::Ui, rect: Rect) {
         let Some(view) = self.shown_view() else { return };
         let p = ui.painter();
@@ -340,7 +326,6 @@ impl App {
         }
     }
 
-    /// One line per person sharing their screen in your channel, with Watch.
     fn live_strip(&mut self, ui: &mut egui::Ui) {
         let Some(view) = &self.view else { return };
         let Some(channel) = view.my_channel() else { return };
@@ -453,7 +438,6 @@ impl App {
 
     fn chat_log(&self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.active_tab];
-        // A channel or a private chat with nothing said yet says so.
         let spoken = tab.lines.iter().any(|l| !matches!(l.kind, LineKind::System));
         if !spoken && tab.kind != TabKind::Server {
             let (title, note) = match tab.kind {
@@ -485,7 +469,6 @@ impl App {
     }
 }
 
-/// Where someone is and what they're doing, for a private tab's header.
 fn whereabouts(view: &ServerView, id: ClientId) -> String {
     let Some(c) = view.clients.get(&id) else { return "Offline".to_owned() };
     let channel = view.channels.get(&c.channel).map_or("?", |ch| ch.name.as_str());
@@ -508,7 +491,6 @@ fn day_separator(ui: &mut egui::Ui, label: &str) {
     p.hline(text.right() + 10.0..=rect.right(), rect.center().y, stroke);
 }
 
-/// Messages one person sent in a row, under one avatar, name and time.
 fn said(ui: &mut egui::Ui, name: &str, lines: &[Line]) {
     let width = ui.available_width();
     let text_w = width - TEXT_X;
@@ -539,7 +521,6 @@ fn said(ui: &mut egui::Ui, name: &str, lines: &[Line]) {
     }
 }
 
-/// A system line, quiet, or an error, red: the text, then when.
 fn note(ui: &mut egui::Ui, line: &Line) {
     let color = if matches!(line.kind, LineKind::Error) { theme::RED } else { theme::TEXT_FAINT };
     let mut job = LayoutJob::default();
@@ -576,7 +557,6 @@ mod tests {
         LineKind::Msg { from, name: name.into() }
     }
 
-    /// What `entries` made of the lines, as (kind, how many lines) pairs.
     fn shape(lines: &[Line]) -> Vec<(&'static str, usize)> {
         entries(lines)
             .map(|e| match e {
