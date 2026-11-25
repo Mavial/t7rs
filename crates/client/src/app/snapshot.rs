@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
-use t7_proto::perms::{ChannelPerms, Member, Override, Perm, Permissions, Perms, RoleId, Roles};
+use t7_proto::perms::{ChannelPerms, Member, Override, Perm, Permissions, Perms, RoleId, Roles, Setting};
 use t7_proto::{ChannelInfo, ChannelKind, ClientInfo, ClientStatus, Identity, ServerInfo, Speech};
 
 use egui::{Color32, ColorImage, TextureOptions, vec2};
@@ -21,6 +21,7 @@ use super::chat::{Line, LineKind, TabKind};
 use super::server_settings::{Pick, SettingsTab};
 use super::sharing::Watching;
 use super::shelf::Card;
+use super::voice::SettingsPage;
 use super::*;
 use crate::settings::Recent;
 
@@ -129,6 +130,10 @@ fn line(time: &str, kind: LineKind, text: &str) -> Line {
     Line::new(chrono::Local::now().date_naive().and_time(time), kind, text.into())
 }
 
+fn poke(from: u32, name: &str, message: &str, time: &str) -> PokeAlert {
+    PokeAlert { from, name: name.into(), message: message.into(), time: time.into() }
+}
+
 fn msg(from: u32, name: &str) -> LineKind {
     LineKind::Msg { from, name: name.into() }
 }
@@ -214,6 +219,18 @@ fn disconnected(ctx: &egui::Context) -> App {
     App::new(ctx, settings, None, Arc::new(|| {}))
 }
 
+fn settings_on(ctx: &egui::Context, page: SettingsPage) -> App {
+    let mut app = connected(ctx);
+    app.settings_dialog = Some(SettingsDialog {
+        page,
+        packs: vec![("Custom folder".into(), "custom".into())],
+        inputs: vec!["Microphone (USB)".into()],
+        outputs: vec!["Headphones".into()],
+        binding: false,
+    });
+    app
+}
+
 type Scene = (&'static str, (u32, u32), fn(&egui::Context) -> App);
 
 const SCENES: &[Scene] = &[
@@ -226,16 +243,17 @@ const SCENES: &[Scene] = &[
         app.last_error = Some("Couldn't reach friday.example.com: connection refused".into());
         app
     }),
-    ("05-voice-settings", (1100, 820), |ctx| {
-        let mut app = connected(ctx);
-        app.audio_dialog = Some(AudioDialog {
-            packs: vec![("Custom folder".into(), "custom".into())],
-            inputs: vec!["Microphone (USB)".into()],
-            outputs: vec!["Headphones".into()],
-            binding: false,
-        });
+    ("05-voice-settings", (1100, 720), |ctx| settings_on(ctx, SettingsPage::Voice)),
+    ("40-settings-cleanup", (1100, 720), |ctx| settings_on(ctx, SettingsPage::Cleanup)),
+    ("41-settings-notifications", (1100, 720), |ctx| settings_on(ctx, SettingsPage::Notifications)),
+    ("42-settings-sharing", (1100, 720), |ctx| settings_on(ctx, SettingsPage::Sharing)),
+    ("43-settings-about", (1100, 720), |ctx| settings_on(ctx, SettingsPage::About)),
+    ("44-settings-push-to-talk", (1100, 720), |ctx| {
+        let mut app = settings_on(ctx, SettingsPage::Voice);
+        app.settings.audio.mode = audio::TxMode::PushToTalk;
         app
     }),
+    ("45-settings-small", (760, 480), |ctx| settings_on(ctx, SettingsPage::Voice)),
     ("06-edit-channel", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         app.open_edit_channel(2);
@@ -261,16 +279,36 @@ const SCENES: &[Scene] = &[
         app.open_server_settings();
         let settings = app.server_settings.as_mut().unwrap();
         settings.tab = SettingsTab::Bans;
-        settings.bans = Some(vec![BanInfo {
-            id: 1,
-            nickname: "Troll".into(),
-            identity: Identity([9; 32]),
-            ip: None,
-            reason: "Spamming the lobby".into(),
-            banned_by: "Santi".into(),
-            created_unix: 1_763_000_000,
-            expires_unix: Some(1_763_600_000),
-        }]);
+        settings.bans = Some(vec![
+            BanInfo {
+                id: 1,
+                nickname: "Troll".into(),
+                identity: Identity([9; 32]),
+                ip: None,
+                reason: "Spamming the lobby".into(),
+                banned_by: "Santi".into(),
+                created_unix: 1_763_000_000,
+                expires_unix: Some(1_763_600_000),
+            },
+            BanInfo {
+                id: 2,
+                nickname: "griefer42".into(),
+                identity: Identity([11; 32]),
+                ip: Some("203.0.113.7".parse().unwrap()),
+                reason: String::new(),
+                banned_by: "Marta".into(),
+                created_unix: 1_762_050_000,
+                expires_unix: None,
+            },
+        ]);
+        app
+    }),
+    ("46-no-bans", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.open_server_settings();
+        let settings = app.server_settings.as_mut().unwrap();
+        settings.tab = SettingsTab::Bans;
+        settings.bans = Some(Vec::new());
         app
     }),
     ("11-poke", (1100, 720), |ctx| {
@@ -280,16 +318,51 @@ const SCENES: &[Scene] = &[
     }),
     ("12-poked", (1100, 720), |ctx| {
         let mut app = connected(ctx);
-        app.pokes.push_back(PokeAlert {
-            from: "Marta".into(),
-            message: "we're starting!".into(),
-            time: "20:21".into(),
-        });
+        app.pokes.push_back(poke(4, "Ola", "come help in Ranked, we're one short", "20:21"));
+        app
+    }),
+    ("47-poked-several", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.pokes.extend([
+            poke(5, "Priya", "", "20:12"),
+            poke(3, "Kenji", "", "20:17"),
+            poke(4, "Ola", "come help in Ranked, we're one short", "20:19"),
+            poke(2, "Marta", "we're starting!", "20:21"),
+        ]);
         app
     }),
     ("13-delete-channel", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         app.open_delete_channel(3);
+        app
+    }),
+    ("48-delete-empty-channel", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.open_delete_channel(6);
+        app
+    }),
+    ("49-kick-from-server", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.open_kick(3, true);
+        app
+    }),
+    ("50-permissions-changed", (1100, 760), |ctx| {
+        let mut app = connected(ctx);
+        app.open_edit_channel(8);
+        let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
+        form.tab = FormTab::Permissions;
+        let mut everyone = Override::inheriting(RoleId::EVERYONE);
+        everyone.set(Perm::Speak, Setting::Deny);
+        everyone.set(Perm::MoveMembers, Setting::Allow);
+        form.overrides = vec![everyone];
+        app
+    }),
+    ("51-create-channel-filled", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.open_create_channel(Some(2));
+        let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
+        form.name = "Squad".into();
+        form.limited = true;
         app
     }),
     ("14-cert-change", (1100, 720), |ctx| {
@@ -352,6 +425,17 @@ const SCENES: &[Scene] = &[
         form.name = "Squads".into();
         app
     }),
+    ("52-create-lobby-no-longer-offered", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.open_create_channel(Some(2));
+        let Some(ChannelDialog::Form(form)) = &mut app.channel_dialog else { unreachable!() };
+        form.kind = ChannelKind::Lobby;
+        let view = app.view.as_mut().unwrap();
+        let member = ChannelPerms { perms: Perms::of(&[Perm::View, Perm::Join, Perm::Speak]), rename: false };
+        let channels = view.channels.keys().map(|&c| (c, member)).collect();
+        view.apply(&S2C::Permissions(Permissions { server: Perms::of(&[Perm::View]), channels }));
+        app
+    }),
     ("26-cant-speak", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         for id in [1, 5] {
@@ -359,15 +443,9 @@ const SCENES: &[Scene] = &[
         }
         app
     }),
-    ("27-voice-settings-cant-speak", (1100, 820), |ctx| {
-        let mut app = connected(ctx);
+    ("27-voice-settings-cant-speak", (1100, 720), |ctx| {
+        let mut app = settings_on(ctx, SettingsPage::Voice);
         app.apply(&S2C::ClientSpeech { id: 1, speech: Speech::NotHere });
-        app.audio_dialog = Some(AudioDialog {
-            packs: Vec::new(),
-            inputs: vec!["Microphone (USB)".into()],
-            outputs: vec!["Headphones".into()],
-            binding: false,
-        });
         app
     }),
     ("28-server-muted", (1100, 720), |ctx| {
@@ -428,26 +506,26 @@ const SCENES: &[Scene] = &[
         app.conn = Conn::Connecting(Login { address: "friday.example.com".into(), password: String::new() });
         app
     }),
-    ("40-shelf-one", (1100, 720), |ctx| {
+    ("53-shelf-one", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         let still = Some(fake_still(ctx, 2, [0x14, 0x1c, 0x2a]));
         app.shelf.cards = vec![Card { sharer: 2, still, asked: Some(Instant::now()) }];
         app
     }),
-    ("41-shelf-three", (1100, 720), three_sharing),
-    ("42-shelf-watching-two", (1100, 720), |ctx| {
+    ("54-shelf-three", (1100, 720), three_sharing),
+    ("55-shelf-watching-two", (1100, 720), |ctx| {
         let mut app = three_sharing(ctx);
         app.watching = watching(&[2, 3]);
         app
     }),
-    ("43-shelf-folded", (1100, 720), |ctx| {
+    ("56-shelf-folded", (1100, 720), |ctx| {
         let mut app = three_sharing(ctx);
         app.watching = watching(&[3]);
         app.shelf.folded.insert(2);
         app
     }),
-    ("44-shelf-small", (760, 480), three_sharing),
-    ("45-shelf-one-watching", (1100, 720), |ctx| {
+    ("57-shelf-small", (760, 480), three_sharing),
+    ("58-shelf-one-watching", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         app.shelf.cards = vec![Card { sharer: 2, still: None, asked: Some(Instant::now()) }];
         app.watching = watching(&[2]);
@@ -598,17 +676,20 @@ fn render(
     writer.write_image_data(&bytes).expect("png data");
 }
 
+fn picked_by_t7_snapshot(name: &str, when_unset: &str) -> bool {
+    name.contains(&std::env::var("T7_SNAPSHOT").unwrap_or_else(|_| when_unset.to_owned()))
+}
+
 #[test]
 #[ignore = "writes PNGs for visual review"]
 fn snapshots() {
     let dir = std::env::var_os("T7_SNAPSHOT_DIR")
         .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots"), PathBuf::from);
     std::fs::create_dir_all(&dir).expect("snapshot dir");
-    let only = std::env::var("T7_SNAPSHOT").ok();
     let scenes = SCENES.iter().map(|&(name, size, make)| (name, size, make, &[][..]));
     let menus = MENUS.iter().map(|m| (m.name, m.size, m.make, m.steps));
     for (name, size, make, steps) in scenes.chain(menus) {
-        if only.as_deref().is_none_or(|o| name.contains(o)) {
+        if picked_by_t7_snapshot(name, "") {
             render(name, size, make, steps, 1.0, &dir);
         }
     }
@@ -619,8 +700,8 @@ fn snapshots() {
 fn frame_time() {
     const FRAMES: usize = 260;
     const KEPT: usize = 200;
-    let scene = std::env::var("T7_FRAME_SCENE").unwrap_or_else(|_| "02-connected".into());
-    let &(name, size, make) = SCENES.iter().find(|s| s.0 == scene).expect("T7_FRAME_SCENE names a scene");
+    let &(name, size, make) =
+        SCENES.iter().find(|(name, ..)| picked_by_t7_snapshot(name, "02-connected")).expect("a scene");
     let mut canvas = Canvas::new(size, make, 1.0);
     let mut times: Vec<f64> = (0..FRAMES)
         .map(|frame| {

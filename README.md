@@ -61,15 +61,15 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Someone's volume | Right-click them: 0% (muted for you) to 200%. Remembered by nickname |
 | Share your screen | The screen button next to your name: pick a screen or window, and a quality (720p 30, 1080p 30 or 1080p 60). Click it again to stop. Windows only for now |
 | Watch screens | **Watch** under someone's still in the shelf over the chat, the red **LIVE** badge next to someone in your channel, or right-click them → Watch screen. Point at a still for a fresh one; **Hide** folds the shelf to one line in that channel. Up to 4 screens share one Screens window, side by side. Click one to make it large with the others in a strip below, and **Show all** to go back. Hover a screen for its name and × to stop watching it. Double-click or `F11` for full screen, `Esc` to leave it. Windows only for now |
-| Voice settings | Click your name bottom-left → Settings…, or `Ctrl+,`: microphone, speakers, voice activation level with a live meter, push-to-talk key, sound cleanup (noise suppression, echo cancellation, automatic volume), notification sounds and sound pack, volumes |
-| Poke | Right-click a user → Poke…, with an optional message. They get a popup, a sound and a flashing taskbar entry |
+| Settings | Click your name bottom-left → Settings…, or `Ctrl+,`. **Voice**: microphone, speakers, voice activation sensitivity with a live meter, push-to-talk key, volumes. **Sound cleanup**: noise suppression, echo cancellation, automatic volume. **Notifications**: sounds, sound pack and their own volume. **Screen sharing**: quality. **About**: version and updates |
+| Poke | Right-click a user → Poke…, with an optional message. They get a card at the top right of the window, a sound and a flashing taskbar entry. More pokes stack in the same card, which has **Reply** and **Join** and stays until dismissed |
 
 A green ring around an avatar means that person is talking. On Windows the
 push-to-talk key works while another app, like a game, has focus.
 
 Notification sounds play for connecting, people connecting to or leaving your
 channel, switching channels, pokes, private messages and muting. The built-in
-sounds are short chimes synthesized on the fly. Under Voice settings →
+sounds are short chimes synthesized on the fly. Under Settings →
 Notifications you can pick a sound pack instead:
 
 - **Custom folder:** WAV files named `connected.wav`, `poke.wav`, … (hover the
