@@ -1,7 +1,6 @@
 //! The client UI: the app's state, and what the window shell calls each frame.
 //! Each part of the window lives in a submodule.
 
-mod bars;
 mod channel_dialog;
 mod chat;
 mod connect;
@@ -9,6 +8,7 @@ mod events;
 mod moderation;
 mod server_settings;
 mod sharing;
+mod sidebar;
 #[cfg(test)]
 mod snapshot;
 mod tree;
@@ -27,21 +27,30 @@ use crate::sounds::{Pack, Resolved, Sound};
 use crate::{audio, sounds, theme};
 use channel_dialog::ChannelDialog;
 use chat::{Tab, base_tabs};
-use connect::{CertChange, ConnectForm, DEFAULT_SERVER};
+use connect::{CertChange, ConnectForm};
 use moderation::{Moderation, PokeAlert, PokeForm};
 use server_settings::ServerSettings;
 use voice::{AudioDialog, Voice};
 
+/// Where and how we log in: kept to retry after trusting a changed
+/// certificate, and to reconnect.
+#[derive(Clone)]
+struct Login {
+    address: String,
+    password: String,
+}
+
 enum Conn {
     Disconnected,
-    /// `password` is kept to retry after trusting a changed certificate.
-    Connecting {
-        address: String,
-        password: String,
-    },
-    Connected {
-        server: ServerKey,
-    },
+    Connecting(Login),
+    Connected { server: ServerKey, login: Login },
+    Lost { server: ServerKey, login: Login, why: Lost, last: Box<ServerView> },
+}
+
+#[derive(Clone)]
+struct Lost {
+    headline: String,
+    detail: String,
 }
 
 /// Connect-on-startup request from the command line.
@@ -74,12 +83,12 @@ pub struct App {
     moderation: Option<Moderation>,
     server_settings: Option<ServerSettings>,
     /// Who kicked us off the server and why, for when the connection closes.
-    kicked: Option<String>,
+    kicked: Option<Lost>,
     cert_change: Option<CertChange>,
     /// Ask the window manager to flash the taskbar entry.
     attention: bool,
     updater: crate::update::Updater,
-    /// Set by the update icon: the shell closes the window after this frame.
+    /// Set by the Restart button: the shell closes the window after this frame.
     quit: bool,
     sharing: Option<sharing::Sharing>,
     watching: Option<sharing::Watching>,
@@ -137,9 +146,6 @@ impl App {
         if let Some(l) = launch {
             let nick = l.nickname.unwrap_or_else(|| app.settings.nickname.clone());
             app.connect(l.address, nick, String::new());
-        } else if app.settings.recent.is_empty() && DEFAULT_SERVER.is_some() {
-            // First run of a build with a baked-in server: just ask for a nickname.
-            app.open_connect_form();
         }
         app
     }
@@ -160,6 +166,20 @@ impl App {
 
     fn my_speech(&self) -> Speech {
         self.view.as_ref().and_then(ServerView::me).map_or(Speech::Allowed, |me| me.speech)
+    }
+
+    fn shown_view(&self) -> Option<&ServerView> {
+        match &self.conn {
+            Conn::Lost { last, .. } => Some(last),
+            _ => self.view.as_ref(),
+        }
+    }
+
+    fn reconnect(&mut self) {
+        let Conn::Lost { login, .. } = &self.conn else { return };
+        let Login { address, password } = login.clone();
+        let nickname = self.settings.nickname.clone();
+        self.connect(address, nickname, password);
     }
 
     fn sound(&self, sound: Sound) {
@@ -203,13 +223,17 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let (connect, mute, deafen) = ctx.input_mut(|i| {
+        let [connect, mute, deafen, away, settings] = ctx.input_mut(|i| {
             use egui::{Key, KeyboardShortcut, Modifiers};
-            (
-                i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S)),
-                i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::M)),
-                i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::D)),
-            )
+            let shift = Modifiers::COMMAND | Modifiers::SHIFT;
+            [
+                (Modifiers::COMMAND, Key::S),
+                (shift, Key::M),
+                (shift, Key::D),
+                (shift, Key::A),
+                (Modifiers::COMMAND, Key::Comma),
+            ]
+            .map(|(modifiers, key)| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
         });
         if connect && self.form.is_none() {
             self.open_connect_form();
@@ -221,6 +245,13 @@ impl App {
         if deafen {
             let s = self.settings.status;
             self.set_status(ClientStatus { deafened: !s.deafened, ..s });
+        }
+        if away {
+            let s = self.settings.status;
+            self.set_status(ClientStatus { away: !s.away, ..s });
+        }
+        if settings && self.audio_dialog.is_none() {
+            self.open_voice_settings();
         }
     }
 }
@@ -245,12 +276,8 @@ impl App {
         let ctx = ui.ctx().clone();
         self.drive_audio(&ctx);
         self.shortcuts(&ctx);
-        self.top_bar(ui);
-        self.self_bar(ui);
-        if self.view.is_some() {
-            self.channel_tree(ui);
-        }
-        self.chat(ui);
+        self.sidebar(ui);
+        self.main_pane(ui);
         self.connect_dialog(&ctx);
         self.audio_dialog(&ctx);
         self.poke_dialog(&ctx);

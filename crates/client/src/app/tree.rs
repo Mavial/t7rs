@@ -3,12 +3,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use egui::containers::menu::SubMenu;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Rect, RichText, Sense, Stroke, vec2};
 use t7_proto::model::ServerView;
 use t7_proto::perms::{Perm, Rank, RoleChange, RoleId, Roles, Scope};
 use t7_proto::{C2S, ChannelId, ChannelInfo, ChannelKind, ClientId, ClientInfo, Identity, MAX_CHANNEL_DEPTH, Speech};
 
-use super::widgets::{Unit, paint_avatar, slider};
+use super::widgets::{Item, Unit, menu_label, menu_separator, menu_style, paint_avatar, slider};
 use super::{App, Conn, manages, sharing};
 use crate::channel_drop::{self, DropTarget, Outcome, Zone};
 use crate::icons::{self, Icon};
@@ -16,9 +17,12 @@ use crate::theme::{self, Btn};
 
 /// Where a row's icon is centered and its name starts, from the row's left
 /// edge plus its indent, and the gap kept on the right.
-const ICON_X: f32 = 13.0;
-const TEXT_X: f32 = 28.0;
+const ICON_X: f32 = 15.0;
+const TEXT_X: f32 = 30.0;
 const RIGHT_PAD: f32 = 8.0;
+const INDENT: f32 = 16.0;
+const CHANNEL_H: f32 = 30.0;
+const MEMBER_H: f32 = 28.0;
 
 /// Something picked in the channel tree, applied after drawing it.
 enum TreeAction {
@@ -26,18 +30,16 @@ enum TreeAction {
     OpenPrivate(ClientId),
     Poke(ClientId),
     SetVolume { id: ClientId, nickname: String, volume: f32 },
-    Create(Option<ChannelId>),
+    Create(ChannelId),
     Edit(ChannelId),
     Shift(ChannelId, i32),
     Move(ChannelId, DropTarget),
     MakeDefault(ChannelId),
     Delete(ChannelId),
-    ClaimOwnership,
     SetModerator { channel: ChannelId, identity: Identity, moderator: bool },
     Kick { target: ClientId, from_server: bool },
     Ban(ClientId),
     ServerMute { target: ClientId, muted: bool },
-    ServerSettings,
     SetRole { identity: Identity, role: RoleId, held: bool },
     MoveMember { target: ClientId, channel: ChannelId },
     Fold(String),
@@ -96,8 +98,11 @@ struct ChannelRow<'a> {
     /// A folded category: the row stands for every channel below it.
     folded: bool,
     clients: Vec<&'a ClientInfo>,
-    manages: bool,
     may_rearrange: bool,
+    may_edit: bool,
+    may_create: bool,
+    may_make_default: bool,
+    may_delete: bool,
     is_mine: bool,
     full: bool,
     hidden: bool,
@@ -119,11 +124,15 @@ struct MemberRow<'a> {
 
 impl App {
     pub(super) fn channel_tree(&mut self, ui: &mut egui::Ui) {
-        let Some(view) = &self.view else { return };
+        let Some(view) = self.shown_view() else { return };
         let folded = match &self.conn {
-            Conn::Connected { server } => self.settings.folded.get(server),
-            _ => None,
+            Conn::Connected { server, .. } | Conn::Lost { server, .. } => self.settings.folded.get(server),
+            Conn::Disconnected | Conn::Connecting(_) => None,
         };
+        let lost = matches!(self.conn, Conn::Lost { .. });
+        if lost {
+            ui.disable();
+        }
         let tree = Tree {
             view,
             folded,
@@ -135,15 +144,7 @@ impl App {
             watched: self.watching.as_ref().map(|w| w.sharer),
             picked: None,
         };
-        let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(8, 10));
-        let picked = egui::Panel::left("tree")
-            .frame(frame)
-            .resizable(true)
-            .default_size(290.0)
-            .size_range(220.0..=520.0)
-            .show(ui, |ui| tree.show(ui))
-            .inner;
-        if let Some(action) = picked {
+        if let Some(action) = tree.show(ui).filter(|_| !lost) {
             self.apply_tree_action(action);
         }
     }
@@ -154,7 +155,7 @@ impl App {
             TreeAction::OpenPrivate(id) => self.open_private(id),
             TreeAction::Poke(id) => self.open_poke(id),
             TreeAction::SetVolume { id, nickname, volume } => self.set_user_volume(id, &nickname, volume),
-            TreeAction::Create(parent) => self.open_create_channel(parent),
+            TreeAction::Create(parent) => self.open_create_channel(Some(parent)),
             TreeAction::Edit(ch) => self.open_edit_channel(ch),
             TreeAction::Shift(ch, delta) => self.shift_channel(ch, delta),
             TreeAction::Move(ch, to) => {
@@ -162,14 +163,12 @@ impl App {
             }
             TreeAction::MakeDefault(ch) => self.net.send(C2S::SetDefaultChannel { id: ch }),
             TreeAction::Delete(ch) => self.open_delete_channel(ch),
-            TreeAction::ClaimOwnership => self.open_claim_ownership(),
             TreeAction::SetModerator { channel, identity, moderator } => {
                 self.net.send(C2S::SetModerator { channel, identity, moderator });
             }
             TreeAction::Kick { target, from_server } => self.open_kick(target, from_server),
             TreeAction::Ban(target) => self.open_ban(target),
             TreeAction::ServerMute { target, muted } => self.net.send(C2S::ServerMute { target, muted }),
-            TreeAction::ServerSettings => self.open_server_settings(),
             TreeAction::SetRole { identity, role, held } => {
                 self.net.send(C2S::ChangeRoles(RoleChange::Assign { identity, role, held }));
             }
@@ -181,7 +180,7 @@ impl App {
     }
 
     fn toggle_folded(&mut self, name: String) {
-        let Conn::Connected { server } = &self.conn else { return };
+        let Conn::Connected { server, .. } = &self.conn else { return };
         let folded = self.settings.folded.entry(server.clone()).or_default();
         if !folded.remove(&name) {
             folded.insert(name);
@@ -205,11 +204,9 @@ impl App {
 
 impl<'a> Tree<'a> {
     fn show(mut self, ui: &mut egui::Ui) -> Option<TreeAction> {
-        self.header(ui);
-        ui.add_space(2.0);
         let view = self.view;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().item_spacing.y = 0.0;
             let mut in_folded_category = false;
             for (index, &(depth, id)) in view.tree().iter().enumerate() {
                 let ch = &view.channels[&id];
@@ -220,7 +217,7 @@ impl<'a> Tree<'a> {
                     continue;
                 }
                 if category && index > 0 {
-                    ui.add_space(6.0);
+                    ui.add_space(10.0);
                 }
                 let row = self.channel_row(ch, depth, in_folded_category);
                 self.channel(ui, &row);
@@ -230,45 +227,6 @@ impl<'a> Tree<'a> {
             }
         });
         self.picked
-    }
-
-    /// The CHANNELS heading and its menu of server-wide actions.
-    fn header(&mut self, ui: &mut egui::Ui) {
-        let view = self.view;
-        ui.horizontal(|ui| {
-            // Lined up with the channel icons below.
-            ui.add_space(6.0);
-            ui.label(RichText::new("CHANNELS").size(11.0).color(theme::TEXT_FAINT).strong());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), Sense::click());
-                let color = if resp.hovered() { theme::TEXT } else { theme::TEXT_FAINT };
-                if resp.hovered() {
-                    ui.painter().rect_filled(rect, CornerRadius::same(5), theme::SURFACE_HOVER);
-                }
-                icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), Icon::Dots, color);
-                egui::Popup::menu(&resp).show(|ui| {
-                    let label = if manages(view, Scope::Server) {
-                        Some("Create channel…")
-                    } else {
-                        view.may(Perm::CreateTemporary).then_some("Create temporary channel…")
-                    };
-                    if let Some(label) = label
-                        && ui.button(label).clicked()
-                    {
-                        self.picked = Some(TreeAction::Create(None));
-                    }
-                    if (view.may(Perm::ManageRoles) || view.may(Perm::Ban)) && ui.button("Server settings…").clicked()
-                    {
-                        self.picked = Some(TreeAction::ServerSettings);
-                    }
-                    if view.is_owner() {
-                        ui.add_enabled(false, egui::Button::new("You own this server"));
-                    } else if ui.button("Claim ownership…").clicked() {
-                        self.picked = Some(TreeAction::ClaimOwnership);
-                    }
-                });
-            });
-        });
     }
 
     fn channel_row(&self, ch: &'a ChannelInfo, depth: usize, folded: bool) -> ChannelRow<'a> {
@@ -282,8 +240,14 @@ impl<'a> Tree<'a> {
             ch,
             depth,
             folded,
-            manages: manages_it,
             may_rearrange: manages_it && may_renumber_children(view, ch.parent),
+            may_edit: view.may_rename(ch.id) || view.may_in(ch.id, Perm::ManagePermissions),
+            may_create: depth + 1 < MAX_CHANNEL_DEPTH && (view.may_in(ch.id, Perm::CreateTemporary) || manages_it),
+            may_make_default: view.may(Perm::ManageChannels)
+                && !ch.default
+                && !ch.temporary
+                && ch.kind == ChannelKind::Voice,
+            may_delete: manages_it && !ch.default,
             is_mine: view.my_channel().is_some_and(stands_for),
             full: ch.max_clients.is_some_and(|m| clients.len() as u32 >= m),
             hidden: manages_it && view.hidden(ch.id),
@@ -296,7 +260,8 @@ impl<'a> Tree<'a> {
         let ch = row.ch;
         let category = ch.kind == ChannelKind::Category;
         let sense = if row.may_rearrange { Sense::click_and_drag() } else { Sense::click() };
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), sense);
+        let height = if category { MEMBER_H } else { CHANNEL_H };
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), sense);
         let channel_drop = self.channel_drop(&resp, rect, ch.id);
         let member_drop = self.member_drop(&resp, ch);
         let dragging_me = matches!(self.dragging, Dragging::Me);
@@ -307,8 +272,25 @@ impl<'a> Tree<'a> {
             Some((zone @ (Zone::Before | Zone::After), Outcome::Move(_))) => Some(zone),
             _ => None,
         };
-        row.paint_background(ui.painter(), rect, resp.hovered(), drop_into, insert_at);
-        row.paint_label(ui.painter(), rect);
+        let more_id = resp.id.with("more");
+        let more_open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"));
+        let hot = (resp.contains_pointer() || more_open || resp.context_menu_opened())
+            && matches!(self.dragging, Dragging::Nothing)
+            && ui.is_enabled();
+        row.paint_background(ui.painter(), rect, hot, drop_into, insert_at);
+        let more = hot && row.has_menu();
+        row.paint_label(ui.painter(), rect, hot, !more);
+        if more {
+            let center = egui::pos2(rect.right() - RIGHT_PAD - 7.0, rect.center().y);
+            let more_rect = Rect::from_center_size(center, vec2(22.0, 22.0));
+            let more_resp = ui.interact(more_rect, more_id, Sense::click());
+            if more_open || more_resp.hovered() {
+                ui.painter().rect_filled(more_rect, CornerRadius::same(5), theme::SURFACE_ACTIVE);
+            }
+            let dots = Rect::from_center_size(center, vec2(16.0, 16.0));
+            icons::paint(ui.painter(), dots, Icon::Dots, if more_open { theme::TEXT } else { theme::TEXT_DIM });
+            egui::Popup::menu(&more_resp).show(|ui| self.channel_menu(ui, row));
+        }
 
         // Releasing takes the payload whatever its type, so ask only for the one being dragged.
         if category {
@@ -368,50 +350,56 @@ impl<'a> Tree<'a> {
         may.then_some(member)
     }
 
+    fn entry(&mut self, ui: &mut egui::Ui, item: Item, action: TreeAction) {
+        if ui.add(item).clicked() {
+            self.picked = Some(action);
+            ui.close();
+        }
+    }
+
+    fn entry_keeping_menu_open(&mut self, ui: &mut egui::Ui, item: Item, action: TreeAction) {
+        if ui.add(item).clicked() {
+            self.picked = Some(action);
+        }
+    }
+
     fn channel_menu(&mut self, ui: &mut egui::Ui, row: &ChannelRow) {
-        let (view, ch) = (self.view, row.ch);
+        menu_style(ui, 220.0);
+        let ch = row.ch;
         let category = ch.kind == ChannelKind::Category;
         if !category {
             let join = if ch.kind == ChannelKind::Lobby { "Open a room" } else { "Join channel" };
-            if ui.add_enabled(!row.is_mine && !row.full, egui::Button::new(join)).clicked() {
+            if ui.add_enabled(!row.is_mine && !row.full, Item::new(Icon::ArrowRight, join)).clicked() {
                 self.picked = Some(TreeAction::Join(ch.id));
                 ui.close();
             }
-            ui.separator();
         }
-        let may_create = view.may_in(ch.id, Perm::CreateTemporary) || row.manages;
-        let create = if category { "Create channel…" } else { "Create sub-channel…" };
-        if row.depth + 1 < MAX_CHANNEL_DEPTH && may_create && ui.button(create).clicked() {
-            self.picked = Some(TreeAction::Create(Some(ch.id)));
-            ui.close();
+        let manage = row.may_manage();
+        if manage && !category {
+            menu_separator(ui);
         }
-        let edit = if category { "Edit category…" } else { "Edit channel…" };
-        let may_edit = view.may_rename(ch.id) || view.may_in(ch.id, Perm::ManagePermissions);
-        if may_edit && ui.button(edit).clicked() {
-            self.picked = Some(TreeAction::Edit(ch.id));
-            ui.close();
+        if row.may_edit {
+            let label = if category { "Edit category…" } else { "Edit channel…" };
+            self.entry(ui, Item::new(Icon::Pencil, label), TreeAction::Edit(ch.id));
+        }
+        if row.may_create {
+            let label = if category { "Create channel…" } else { "Create sub-channel…" };
+            self.entry(ui, Item::new(Icon::Plus, label), TreeAction::Create(ch.id));
         }
         if row.may_rearrange {
-            if ui.button("Move up").clicked() {
-                self.picked = Some(TreeAction::Shift(ch.id, -1));
-            }
-            if ui.button("Move down").clicked() {
-                self.picked = Some(TreeAction::Shift(ch.id, 1));
+            for (icon, label, delta) in [(Icon::ArrowUp, "Move up", -1), (Icon::ArrowDown, "Move down", 1)] {
+                self.entry_keeping_menu_open(ui, Item::new(icon, label), TreeAction::Shift(ch.id, delta));
             }
         }
-        if view.may(Perm::ManageChannels)
-            && !ch.default
-            && !ch.temporary
-            && ch.kind == ChannelKind::Voice
-            && ui.button("Make default channel").clicked()
-        {
-            self.picked = Some(TreeAction::MakeDefault(ch.id));
-            ui.close();
+        if row.may_make_default {
+            self.entry(ui, Item::new(Icon::Speaker, "Make default channel"), TreeAction::MakeDefault(ch.id));
         }
-        let delete = if category { "Delete category…" } else { "Delete channel…" };
-        if row.manages && !ch.default && ui.button(delete).clicked() {
-            self.picked = Some(TreeAction::Delete(ch.id));
-            ui.close();
+        if row.may_delete {
+            if manage || !category {
+                menu_separator(ui);
+            }
+            let label = if category { "Delete category…" } else { "Delete channel…" };
+            self.entry(ui, Item::new(Icon::Trash, label).danger(), TreeAction::Delete(ch.id));
         }
     }
 
@@ -420,9 +408,19 @@ impl<'a> Tree<'a> {
         let is_me = c.id == view.my_id;
         let movable = is_me || view.may_in(row.ch.id, Perm::MoveMembers);
         let sense = if movable { Sense::click_and_drag() } else { Sense::click() };
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), sense);
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, CornerRadius::same(6), theme::SURFACE_HOVER.gamma_multiply(0.7));
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), MEMBER_H), sense);
+        let dragged = match self.dragging {
+            Dragging::Me => is_me,
+            Dragging::Member(id) => id == c.id,
+            Dragging::Nothing | Dragging::Channel(_) => false,
+        };
+        let hot = (resp.hovered() || resp.context_menu_opened()) && !dragged && ui.is_enabled();
+        if hot {
+            ui.painter().rect_filled(rect, CornerRadius::same(6), theme::SURFACE_HOVER);
+        }
+        let mut painter = ui.painter().clone();
+        if dragged {
+            painter.multiply_opacity(0.4);
         }
         let badge = if c.role.is_some() {
             Some((Icon::Shield, theme::ACCENT_TEXT))
@@ -440,7 +438,7 @@ impl<'a> Tree<'a> {
             volume: self.volumes.get(&c.nickname).copied().unwrap_or(1.0),
             watchable: c.sharing && !is_me && view.my_channel() == Some(c.channel),
         };
-        if let Some(live) = member.paint(ui.painter(), rect, row.indent()) {
+        if let Some(live) = member.paint(&painter, rect, row.indent()) {
             let id = ui.scope_id().with(("live", c.id));
             if sharing::live_badge_clicked(ui, live, id, &member.live_tip(), member.watchable) {
                 self.picked = Some(TreeAction::Watch(c.id));
@@ -472,24 +470,17 @@ impl<'a> Tree<'a> {
     }
 
     fn member_menu(&mut self, ui: &mut egui::Ui, ch: &ChannelInfo, member: &MemberRow, movable: bool) {
+        menu_style(ui, 250.0);
         let (view, c) = (self.view, member.c);
+        self.volume_control(ui, c, member.volume);
+        menu_separator(ui);
         if member.watchable && self.watched == Some(c.id) {
-            if ui.button("Stop watching").clicked() {
-                self.picked = Some(TreeAction::StopWatching);
-                ui.close();
-            }
-        } else if member.watchable && ui.button("Watch screen").clicked() {
-            self.picked = Some(TreeAction::Watch(c.id));
-            ui.close();
+            self.entry(ui, Item::new(Icon::ScreenStop, "Stop watching"), TreeAction::StopWatching);
+        } else if member.watchable {
+            self.entry(ui, Item::new(Icon::Screen, "Watch screen"), TreeAction::Watch(c.id));
         }
-        if ui.button("Send private message").clicked() {
-            self.picked = Some(TreeAction::OpenPrivate(c.id));
-            ui.close();
-        }
-        if ui.button("Poke…").clicked() {
-            self.picked = Some(TreeAction::Poke(c.id));
-            ui.close();
-        }
+        self.entry(ui, Item::new(Icon::Chat, "Send private message"), TreeAction::OpenPrivate(c.id));
+        self.entry(ui, Item::new(Icon::Bell, "Poke…"), TreeAction::Poke(c.id));
         let kicks = [
             (false, "Kick from channel…", !ch.default && view.may_in(ch.id, Perm::Kick)),
             (true, "Kick from server…", view.may(Perm::Kick)),
@@ -498,60 +489,54 @@ impl<'a> Tree<'a> {
         let mutes = view.may_in(ch.id, Perm::MuteMembers);
         let set_moderator = view.may_in(ch.id, Perm::ManagePermissions);
         let roles = view.roles.as_ref().filter(|_| view.may(Perm::ManageRoles));
-        if movable || kicks.iter().any(|k| k.2) || ban || mutes || set_moderator || roles.is_some() {
-            ui.separator();
+        if !(movable || kicks.iter().any(|k| k.2) || ban || mutes || set_moderator || roles.is_some()) {
+            return;
         }
+        menu_separator(ui);
+        menu_label(ui, "Moderation");
         if movable {
             self.move_to_menu(ui, ch.id, c.id);
         }
         if let Some(roles) = roles {
             self.roles_menu(ui, roles, c);
         }
-        for (from_server, label, allowed) in kicks {
-            if allowed && ui.button(label).clicked() {
-                self.picked = Some(TreeAction::Kick { target: c.id, from_server });
-                ui.close();
-            }
-        }
-        if ban && ui.button("Ban…").clicked() {
-            self.picked = Some(TreeAction::Ban(c.id));
-            ui.close();
-        }
         if mutes {
             let muted = c.speech == Speech::ServerMuted;
             let label = if muted { "Unmute on server" } else { "Mute on server" };
-            if ui.button(label).clicked() {
-                self.picked = Some(TreeAction::ServerMute { target: c.id, muted: !muted });
-                ui.close();
-            }
+            self.entry(ui, Item::new(Icon::MicLocked, label), TreeAction::ServerMute { target: c.id, muted: !muted });
         }
         if set_moderator {
             let moderator = ch.moderators.contains(&c.identity);
             let label =
                 if moderator { "Remove as moderator".to_owned() } else { format!("Make moderator of {}", ch.name) };
-            if ui.button(label).clicked() {
-                let identity = c.identity;
-                self.picked = Some(TreeAction::SetModerator { channel: ch.id, identity, moderator: !moderator });
-                ui.close();
+            let action = TreeAction::SetModerator { channel: ch.id, identity: c.identity, moderator: !moderator };
+            self.entry(ui, Item::new(Icon::Star, &label), action);
+        }
+        for (from_server, label, allowed) in kicks {
+            if allowed {
+                self.entry(ui, Item::new(Icon::Kick, label).danger(), TreeAction::Kick { target: c.id, from_server });
             }
         }
-        ui.separator();
-        self.volume_control(ui, c, member.volume);
+        if ban {
+            self.entry(ui, Item::new(Icon::Ban, "Ban…").danger(), TreeAction::Ban(c.id));
+        }
     }
 
     fn move_to_menu(&mut self, ui: &mut egui::Ui, from: ChannelId, target: ClientId) {
         let view = self.view;
-        ui.menu_button("Move to", |ui| {
+        let resp = ui.add(Item::new(Icon::ArrowRight, "Move to").submenu());
+        SubMenu::new().show(ui, &resp, |ui| {
+            menu_style(ui, 200.0);
             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                 for &(depth, to) in view.tree() {
                     let Some(dest) = view.channels.get(&to) else { continue };
                     if dest.kind == ChannelKind::Category {
-                        ui.label(RichText::new(dest.name.to_uppercase()).size(11.5));
+                        menu_label(ui, &dest.name);
                         continue;
                     }
                     let label = format!("{}{}", "    ".repeat(depth), dest.name);
                     let may = to != from && view.may_in(to, Perm::MoveMembers);
-                    if ui.add_enabled(may, egui::Button::new(label)).clicked() {
+                    if ui.add_enabled(may, Item::new(Icon::Speaker, &label)).clicked() {
                         self.picked = Some(TreeAction::MoveMember { target, channel: to });
                         ui.close();
                     }
@@ -562,7 +547,9 @@ impl<'a> Tree<'a> {
 
     fn roles_menu(&mut self, ui: &mut egui::Ui, roles: &Roles, c: &ClientInfo) {
         let view = self.view;
-        ui.menu_button("Roles", |ui| {
+        let resp = ui.add(Item::new(Icon::Shield, "Roles").submenu());
+        SubMenu::new().show(ui, &resp, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
             let mine = view.me().map_or(Rank::EVERYONE, |me| roles.rank(me.identity));
             let held = roles.members.get(&c.identity).map_or(&[][..], |m| &m.roles);
             for role in &roles.ranked {
@@ -578,16 +565,20 @@ impl<'a> Tree<'a> {
 
     /// How loud someone is for you alone.
     fn volume_control(&mut self, ui: &mut egui::Ui, c: &ClientInfo, volume: f32) {
-        ui.label(RichText::new("Volume").size(12.0).color(theme::TEXT_DIM));
         let mut v = volume;
-        ui.horizontal(|ui| {
-            let size = vec2(200.0, theme::CONTROL_H);
-            ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
-                slider(ui, &mut v, 0.0..=2.0, Unit::Percent);
+        let frame = egui::Frame::new().inner_margin(Margin { left: 8, right: 8, top: 6, bottom: 4 });
+        frame.show(ui, |ui| {
+            ui.label(RichText::new("Volume for you").size(12.0).color(theme::TEXT_DIM));
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let size = vec2(200.0, theme::CONTROL_H);
+                ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+                    slider(ui, &mut v, 0.0..=2.0, Unit::Percent);
+                });
+                if ui.add_enabled(v != 1.0, Btn::secondary("Reset").small()).clicked() {
+                    v = 1.0;
+                }
             });
-            if ui.add_enabled(v != 1.0, Btn::secondary("Reset").small()).clicked() {
-                v = 1.0;
-            }
         });
         if v != volume {
             self.picked = Some(TreeAction::SetVolume { id: c.id, nickname: c.nickname.clone(), volume: v });
@@ -597,26 +588,30 @@ impl<'a> Tree<'a> {
 
 impl ChannelRow<'_> {
     fn indent(&self) -> f32 {
-        self.depth as f32 * 18.0
+        self.depth as f32 * INDENT
     }
 
-    /// The row's fill, the bar marking your channel, and where a dragged channel would land.
-    fn paint_background(&self, p: &egui::Painter, rect: Rect, hovered: bool, drop_into: bool, insert_at: Option<Zone>) {
-        let bg = if drop_into {
+    fn may_manage(&self) -> bool {
+        self.may_edit || self.may_create || self.may_rearrange || self.may_make_default
+    }
+
+    fn has_menu(&self) -> bool {
+        self.ch.kind != ChannelKind::Category || self.may_manage() || self.may_delete
+    }
+
+    /// The row's fill, tinted for your channel, and where a dragged channel would land.
+    fn paint_background(&self, p: &egui::Painter, rect: Rect, hot: bool, drop_into: bool, insert_at: Option<Zone>) {
+        let category = self.ch.kind == ChannelKind::Category;
+        let bg = if drop_into || (self.is_mine && !category) {
             theme::ACCENT_BG
-        } else if self.is_mine {
-            theme::SURFACE
-        } else if hovered {
-            theme::SURFACE_HOVER.gamma_multiply(0.7)
+        } else if hot {
+            theme::SURFACE_HOVER
         } else {
             Color32::TRANSPARENT
         };
         p.rect_filled(rect, CornerRadius::same(6), bg);
         if drop_into {
             p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
-        } else if self.is_mine {
-            let bar = Rect::from_center_size(egui::pos2(rect.left() + 1.5, rect.center().y), vec2(3.0, 14.0));
-            p.rect_filled(bar, CornerRadius::same(2), theme::ACCENT);
         }
         if let Some(zone) = insert_at {
             // Indented to the level the channel lands on.
@@ -628,24 +623,27 @@ impl ChannelRow<'_> {
     }
 
     /// The icon, the name with its hidden, locked and temporary marks, and the head count.
-    fn paint_label(&self, p: &egui::Painter, rect: Rect) {
+    fn paint_label(&self, p: &egui::Painter, rect: Rect, hot: bool, show_count: bool) {
         let ch = self.ch;
         let indent = self.indent();
-        let icon_color = if self.is_mine { theme::ACCENT_TEXT } else { theme::TEXT_FAINT };
+        let category = ch.kind == ChannelKind::Category;
+        let icon_color = if self.is_mine && !category { theme::ACCENT_TEXT } else { theme::TEXT_FAINT };
         let (icon, icon_size) = match (ch.kind, self.folded) {
-            (ChannelKind::Voice, _) => (Icon::Speaker, 15.0),
-            (ChannelKind::Lobby, _) => (Icon::SpeakerPlus, 15.0),
-            (ChannelKind::Category, false) => (Icon::ChevronDown, 13.0),
-            (ChannelKind::Category, true) => (Icon::ChevronRight, 13.0),
+            (ChannelKind::Voice, _) => (Icon::Speaker, 14.0),
+            (ChannelKind::Lobby, _) => (Icon::SpeakerPlus, 14.0),
+            (ChannelKind::Category, false) => (Icon::ChevronDown, 12.0),
+            (ChannelKind::Category, true) => (Icon::ChevronRight, 12.0),
         };
         let icon_center = egui::pos2(rect.left() + indent + ICON_X, rect.center().y);
         icons::paint(p, Rect::from_center_size(icon_center, vec2(icon_size, icon_size)), icon, icon_color);
-        let name_color = if self.is_mine { theme::TEXT } else { theme::TEXT_DIM };
-        let name_pos = egui::pos2(rect.left() + indent + TEXT_X, rect.center().y);
-        let name_rect = if ch.kind == ChannelKind::Category {
-            p.text(name_pos, Align2::LEFT_CENTER, ch.name.to_uppercase(), FontId::proportional(12.0), name_color)
+        let name_rect = if category {
+            let name_pos = egui::pos2(rect.left() + indent + TEXT_X - 6.0, rect.center().y);
+            let color = if hot { theme::TEXT_DIM } else { theme::TEXT_FAINT };
+            p.text(name_pos, Align2::LEFT_CENTER, ch.name.to_uppercase(), FontId::proportional(11.0), color)
         } else {
-            p.text(name_pos, Align2::LEFT_CENTER, &ch.name, FontId::proportional(13.5), name_color)
+            let name_pos = egui::pos2(rect.left() + indent + TEXT_X, rect.center().y);
+            let color = if self.is_mine || hot { theme::TEXT } else { theme::TEXT_DIM };
+            p.text(name_pos, Align2::LEFT_CENTER, &ch.name, FontId::proportional(13.5), color)
         };
         let mut after = name_rect.right() + 6.0;
         if self.hidden {
@@ -669,7 +667,7 @@ impl ChannelRow<'_> {
             None if people > 0 => people.to_string(),
             None => String::new(),
         };
-        if !count.is_empty() {
+        if show_count && !count.is_empty() {
             let color = if self.full { theme::AMBER } else { theme::TEXT_FAINT };
             let pos = rect.right_center() - vec2(RIGHT_PAD, 0.0);
             p.text(pos, Align2::RIGHT_CENTER, count, FontId::proportional(11.5), color);
@@ -712,14 +710,14 @@ impl MemberRow<'_> {
     fn paint(&self, p: &egui::Painter, rect: Rect, indent: f32) -> Option<Rect> {
         let c = self.c;
         // The avatar starts where the channel's name does.
-        let ax = rect.left() + indent + TEXT_X + 9.0;
+        let ax = rect.left() + indent + TEXT_X + 10.0;
         let center = egui::pos2(ax, rect.center().y);
-        paint_avatar(p, center, 9.0, &c.nickname);
+        paint_avatar(p, center, 10.0, &c.nickname);
         if self.talking {
-            p.circle_stroke(center, 11.5, Stroke::new(2.0, theme::GREEN));
+            p.circle_stroke(center, 13.0, Stroke::new(2.0, theme::GREEN));
         }
         let color = if c.status.away { theme::TEXT_FAINT } else { theme::TEXT };
-        let name_pos = egui::pos2(ax + 17.0, rect.center().y);
+        let name_pos = egui::pos2(ax + 18.0, rect.center().y);
         let name_rect = p.text(name_pos, Align2::LEFT_CENTER, &c.nickname, FontId::proportional(13.5), color);
         let mut name_end = name_rect.right();
         let room_badge = self.owns_room.then_some((Icon::Crown, theme::AMBER));

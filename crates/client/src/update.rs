@@ -5,7 +5,7 @@
 //! this platform, the build is downloaded next to the running executable and
 //! accepted only if its SHA-256 matches and its ed25519 signature verifies
 //! against the key built into T7. The swap happens on exit (or when the
-//! update icon is clicked): the running executable is renamed aside, which
+//! Restart button is clicked): the running executable is renamed aside, which
 //! Windows allows, and the new one takes its name.
 //!
 //! Only builds made by the release pipeline (`T7_RELEASE` set at compile time)
@@ -70,6 +70,11 @@ impl Updater {
             }
         });
         Self { status, wake: spawned.ok().map(|_| wake) }
+    }
+
+    #[cfg(test)]
+    pub fn showing(status: Status) -> Self {
+        Self { status: Arc::new(Mutex::new(status)), wake: None }
     }
 
     pub fn status(&self) -> Status {

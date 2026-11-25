@@ -8,7 +8,7 @@ use t7_proto::{
 
 use super::chat::{LineKind, TabKind, base_tabs};
 use super::connect::{CertChange, MAX_RECENT};
-use super::{App, Conn};
+use super::{App, Conn, Login, Lost};
 use crate::net::{Ended, NetEvent, ServerKey};
 use crate::settings::Recent;
 use crate::sounds::Sound;
@@ -22,7 +22,7 @@ impl App {
                 NetEvent::VoicePing(s, rtt) if s == self.session => self.voice.pong(rtt),
                 NetEvent::Secured(s, fingerprint) if s == self.session => {
                     // Trust on first use: the first certificate seen at an address is pinned.
-                    if let Conn::Connecting { address, .. } = &self.conn {
+                    if let Conn::Connecting(Login { address, .. }) = &self.conn {
                         self.settings.server_certs.entry(ServerKey::of(address)).or_insert(fingerprint);
                     }
                 }
@@ -37,7 +37,7 @@ impl App {
             Ended::ByUser => None,
             Ended::Failed(reason) => Some(reason),
             Ended::CertChanged { pinned, presented } => {
-                if let Conn::Connecting { address, password, .. } = &self.conn {
+                if let Conn::Connecting(Login { address, password }) = &self.conn {
                     let (address, password) = (address.clone(), password.clone());
                     self.cert_change = Some(CertChange { address, password, pinned, presented });
                 }
@@ -45,28 +45,37 @@ impl App {
             }
         };
         let kicked = self.kicked.take();
-        let reason = kicked.clone().or(reason);
-        let was_connected = matches!(self.conn, Conn::Connected { .. });
-        self.conn = Conn::Disconnected;
-        self.view = None;
+        let was = std::mem::replace(&mut self.conn, Conn::Disconnected);
+        let last = self.view.take();
         self.ping = None;
         self.voice.disconnected();
+        let was_connected = matches!(was, Conn::Connected { .. });
         match (&reason, was_connected) {
-            (Some(r), true) => self.push(0, LineKind::Error, format!("Disconnected: {r}")),
-            (None, true) => self.push(0, LineKind::System, "Disconnected"),
+            (Some(r), true) if kicked.is_none() => self.push(0, LineKind::Error, format!("Disconnected: {r}")),
+            (_, true) => self.push(0, LineKind::System, "Disconnected"),
             _ => {}
         }
         if was_connected {
-            self.sound(if reason.is_some() { Sound::ConnectionLost } else { Sound::Disconnected });
+            let lost = reason.is_some() || kicked.is_some();
+            self.sound(if lost { Sound::ConnectionLost } else { Sound::Disconnected });
         }
         // A server newer than us: fetch the update right away.
         if reason.as_deref().is_some_and(|r| r.contains("please update your T7")) {
             self.updater.check_now();
         }
-        if !was_connected || kicked.is_some() {
-            self.last_error = reason;
+        let why = kicked.or_else(|| reason.clone().map(|detail| Lost { headline: "Disconnected".into(), detail }));
+        match (was, why, last) {
+            (Conn::Connected { server, login }, Some(why), Some(last)) => {
+                self.conn = Conn::Lost { server, login, why, last: Box::new(last) };
+            }
+            (Conn::Connecting(login), _, _) => {
+                if reason.is_some() && self.cert_change.is_none() {
+                    self.reopen_connect_form(login);
+                }
+                self.last_error = reason;
+            }
+            _ => self.active_tab = 0,
         }
-        self.active_tab = 0;
     }
 
     fn on_message(&mut self, msg: S2C) {
@@ -181,12 +190,12 @@ impl App {
         clients: Vec<ClientInfo>,
         permissions: Permissions,
     ) {
-        let address = match &self.conn {
-            Conn::Connecting { address, .. } => address.clone(),
-            _ => String::new(),
+        let login = match &self.conn {
+            Conn::Connecting(login) => login.clone(),
+            _ => Login { address: String::new(), password: String::new() },
         };
-        let server_key = ServerKey::of(&address);
-        let recent = Recent { address, server_name: server.name.clone() };
+        let server_key = ServerKey::of(&login.address);
+        let recent = Recent { address: login.address.clone(), server_name: server.name.clone() };
         self.settings.recent.retain(|r| r.address != recent.address);
         self.settings.recent.insert(0, recent);
         self.settings.recent.truncate(MAX_RECENT);
@@ -197,7 +206,7 @@ impl App {
             self.apply_user_volume(c.id, &c.nickname);
         }
         self.view = Some(ServerView::new(your_id, server, channels, clients, permissions));
-        self.conn = Conn::Connected { server: server_key };
+        self.conn = Conn::Connected { server: server_key, login };
         self.voice.connected();
         self.tabs = base_tabs();
         self.active_tab = 1;

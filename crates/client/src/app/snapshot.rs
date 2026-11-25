@@ -58,6 +58,7 @@ fn view() -> ServerView {
     lobby.default = true;
     lobby.topic = "Hang out here".into();
     let mut games = channel(2, None, "Games", 1);
+    games.topic = "Ranked tonight at 9".into();
     games.moderators.push(Identity([3; 32]));
     let mut ranked = channel(3, Some(2), "Ranked", 0);
     ranked.max_clients = Some(5);
@@ -121,7 +122,8 @@ fn view() -> ServerView {
 }
 
 fn line(time: &str, kind: LineKind, text: &str) -> Line {
-    Line { time: time.into(), kind, text: text.into() }
+    let time = chrono::NaiveTime::parse_from_str(time, "%H:%M").expect("a clock time");
+    Line::new(chrono::Local::now().date_naive().and_time(time), kind, text.into())
 }
 
 fn msg(from: u32, name: &str) -> LineKind {
@@ -140,7 +142,8 @@ fn connected(ctx: &egui::Context) -> App {
     settings.user_volumes.insert("Marta".into(), 0.6);
     let mut app = App::new(ctx, settings, None, Arc::new(|| {}));
     app.view = Some(view());
-    app.conn = Conn::Connected { server: ServerKey::of("friday.example.com:9988") };
+    let login = Login { address: "friday.example.com".into(), password: String::new() };
+    app.conn = Conn::Connected { server: ServerKey::of("friday.example.com:9988"), login };
     app.ping = Some(Duration::from_millis(23));
     app.tabs[1].title = "Games".into();
     app.active_tab = 1;
@@ -151,6 +154,7 @@ fn connected(ctx: &egui::Context) -> App {
         line("20:14", msg(2, "Marta"), "hey! ready for ranked?"),
         line("20:15", msg(1, "Santi"), "two minutes, grabbing a drink"),
         line("20:15", msg(3, "Kenji"), "my mic is acting up again, I'll type for now"),
+        line("20:15", msg(3, "Kenji"), "can someone check if Ola is still around?"),
         line("20:16", LineKind::System, "Ola joined Ranked"),
         line("20:17", LineKind::Error, "Couldn't open the microphone: device in use"),
         line(
@@ -341,25 +345,70 @@ const SCENES: &[Scene] = &[
         app.open_edit_channel(3);
         app
     }),
+    ("36-private-chat", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.active_tab = 2;
+        app.tabs[2].unread = 0;
+        app.tabs[2].lines = vec![
+            line("20:12", msg(2, "Marta"), "can you bring the spare headset tomorrow?"),
+            line("20:13", msg(1, "Santi"), "yep"),
+            line("20:19", msg(2, "Marta"), "thanks!"),
+        ];
+        app
+    }),
+    ("37-empty-channel", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.apply(&S2C::ClientMoved { id: 1, channel: 6 });
+        app.tabs[1].title = "Music".into();
+        app.tabs[1].lines = vec![line("20:20", LineKind::System, "You joined Music")];
+        app
+    }),
+    ("38-kicked", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        let Conn::Connected { server, login } = std::mem::replace(&mut app.conn, Conn::Disconnected) else {
+            unreachable!()
+        };
+        let why = Lost { headline: "Kicked from the server".into(), detail: "by Marta: \"take a break\"".into() };
+        app.conn = Conn::Lost { server, login, why, last: Box::new(app.view.take().unwrap()) };
+        app
+    }),
+    ("39-first-run", (1100, 720), |ctx| {
+        let settings = Settings { nickname: "Santi".into(), ..Default::default() };
+        App::new(ctx, settings, None, Arc::new(|| {}))
+    }),
+    ("33-update-ready", (1100, 720), |ctx| {
+        let mut app = connected(ctx);
+        app.updater = crate::update::Updater::showing(crate::update::Status::Ready("0.7.0".into()));
+        app
+    }),
     ("16-connecting", (1100, 720), |ctx| {
         let mut app = disconnected(ctx);
-        app.conn = Conn::Connecting { address: "friday.example.com".into(), password: String::new() };
+        app.conn = Conn::Connecting(Login { address: "friday.example.com".into(), password: String::new() });
         app
     }),
 ];
 
 #[derive(Clone, Copy)]
-enum RightButton {
-    Press,
-    Release,
-}
-
-#[derive(Clone, Copy)]
 struct Step {
     x: f32,
     y: f32,
-    right_button: Option<RightButton>,
+    button: Option<(egui::PointerButton, bool)>,
 }
+
+const fn hover(x: f32, y: f32) -> Step {
+    Step { x, y, button: None }
+}
+
+const fn press(x: f32, y: f32, button: egui::PointerButton) -> Step {
+    Step { x, y, button: Some((button, true)) }
+}
+
+const fn release(x: f32, y: f32, button: egui::PointerButton) -> Step {
+    Step { x, y, button: Some((button, false)) }
+}
+
+const LEFT: egui::PointerButton = egui::PointerButton::Primary;
+const RIGHT: egui::PointerButton = egui::PointerButton::Secondary;
 
 struct Menu {
     name: &'static str,
@@ -373,21 +422,38 @@ const MENUS: &[Menu] = &[
         name: "19-user-roles",
         size: (1100, 720),
         make: connected,
-        steps: &[
-            Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Press) },
-            Step { x: 80.0, y: 226.0, right_button: Some(RightButton::Release) },
-            Step { x: 150.0, y: 330.0, right_button: None },
-        ],
+        steps: &[press(80.0, 181.0, RIGHT), release(80.0, 181.0, RIGHT), hover(150.0, 424.0)],
     },
     Menu {
         name: "29-user-move-to",
         size: (1100, 720),
         make: connected,
-        steps: &[
-            Step { x: 80.0, y: 340.0, right_button: Some(RightButton::Press) },
-            Step { x: 80.0, y: 340.0, right_button: Some(RightButton::Release) },
-            Step { x: 150.0, y: 240.0, right_button: None },
-        ],
+        steps: &[press(80.0, 295.0, RIGHT), release(80.0, 295.0, RIGHT), hover(150.0, 482.0)],
+    },
+    Menu {
+        name: "30-server-menu",
+        size: (1100, 720),
+        make: connected,
+        steps: &[press(256.0, 26.0, LEFT), release(256.0, 26.0, LEFT), hover(200.0, 120.0)],
+    },
+    Menu {
+        name: "31-your-menu",
+        size: (1100, 720),
+        make: connected,
+        steps: &[press(60.0, 692.0, LEFT), release(60.0, 692.0, LEFT), hover(100.0, 640.0)],
+    },
+    Menu {
+        name: "32-channel-menu",
+        size: (1100, 720),
+        make: connected,
+        steps: &[press(80.0, 238.0, RIGHT), release(80.0, 238.0, RIGHT), hover(150.0, 260.0)],
+    },
+    Menu { name: "34-hover-channel", size: (1100, 720), make: connected, steps: &[hover(120.0, 529.0)] },
+    Menu {
+        name: "35-drag-member",
+        size: (1100, 720),
+        make: connected,
+        steps: &[press(90.0, 296.0, LEFT), hover(90.0, 250.0), hover(90.0, 150.0), hover(90.0, 67.0)],
     },
 ];
 
@@ -395,40 +461,67 @@ const FRAMES_BEFORE_STEPS: usize = 2;
 
 const FRAMES_PER_SECOND: f64 = 4.0;
 
+struct Canvas {
+    ctx: egui::Context,
+    app: App,
+    renderer: EguiSoftwareRender,
+    px: Vec<[u8; 4]>,
+    size: (u32, u32),
+    scale: f32,
+}
+
+impl Canvas {
+    fn new((w, h): (u32, u32), make: fn(&egui::Context) -> App, scale: f32) -> Self {
+        let ctx = egui::Context::default();
+        let app = make(&ctx);
+        let renderer = EguiSoftwareRender::new(ColorFieldOrder::Rgba).with_caching(false);
+        Self { ctx, app, renderer, px: vec![[0u8; 4]; (w * h) as usize], size: (w, h), scale }
+    }
+
+    fn input(&self, frame: usize) -> egui::RawInput {
+        let (w, h, scale) = (self.size.0 as f32, self.size.1 as f32, self.scale);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w / scale, h / scale));
+        let time = Some(frame as f64 / FRAMES_PER_SECOND);
+        let mut raw = egui::RawInput { screen_rect: Some(screen), time, ..Default::default() };
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(scale);
+        raw
+    }
+
+    fn draw(&mut self, raw: egui::RawInput) {
+        let app = &mut self.app;
+        let out = self.ctx.run_ui(raw, |ui| app.ui(ui));
+        let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
+        let mut target = BufferMutRef::new(&mut self.px, self.size.0 as usize, self.size.1 as usize);
+        let mut delta = out.textures_delta;
+        self.renderer.render(&mut target, &prims, &delta, out.pixels_per_point);
+        delta.clear();
+    }
+}
+
 fn render(
     name: &str,
-    (w, h): (u32, u32),
+    size: (u32, u32),
     make: fn(&egui::Context) -> App,
     steps: &[Step],
     scale: f32,
     dir: &std::path::Path,
 ) {
-    let ctx = egui::Context::default();
-    let mut app = make(&ctx);
-    let mut renderer = EguiSoftwareRender::new(ColorFieldOrder::Rgba).with_caching(false);
-    let mut px = vec![[0u8; 4]; (w * h) as usize];
-    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(w as f32 / scale, h as f32 / scale));
+    let mut canvas = Canvas::new(size, make, scale);
     // Enough frames for layout to settle and fades to finish.
     for frame in 0..6 + steps.len() {
-        let time = Some(frame as f64 / FRAMES_PER_SECOND);
-        let mut raw = egui::RawInput { screen_rect: Some(screen), time, ..Default::default() };
+        let mut raw = canvas.input(frame);
         if let Some(step) = frame.checked_sub(FRAMES_BEFORE_STEPS).and_then(|step| steps.get(step)) {
             let pos = egui::pos2(step.x, step.y);
             raw.events.push(egui::Event::PointerMoved(pos));
-            if let Some(right_button) = step.right_button {
-                let pressed = matches!(right_button, RightButton::Press);
-                let (button, modifiers) = (egui::PointerButton::Secondary, egui::Modifiers::default());
+            if let Some((button, pressed)) = step.button {
+                let modifiers = egui::Modifiers::default();
                 raw.events.push(egui::Event::PointerButton { pos, button, pressed, modifiers });
             }
         }
-        raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(scale);
-        let out = ctx.run_ui(raw, |ui| app.ui(ui));
-        let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
-        let mut target = BufferMutRef::new(&mut px, w as usize, h as usize);
-        let mut delta = out.textures_delta;
-        renderer.render(&mut target, &prims, &delta, out.pixels_per_point);
-        delta.clear();
+        canvas.draw(raw);
     }
+    let (w, h) = size;
+    let px = canvas.px;
     let file = std::fs::File::create(dir.join(format!("{name}.png"))).expect("create png");
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
     enc.set_color(png::ColorType::Rgba);
@@ -452,4 +545,32 @@ fn snapshots() {
             render(name, size, make, steps, 1.0, &dir);
         }
     }
+}
+
+#[test]
+#[ignore = "measures redraw time; run it in release"]
+fn frame_time() {
+    const FRAMES: usize = 260;
+    const KEPT: usize = 200;
+    let size = (1100, 720);
+    let mut canvas = Canvas::new(size, connected, 1.0);
+    let mut times: Vec<f64> = (0..FRAMES)
+        .map(|frame| {
+            let raw = canvas.input(frame);
+            let started = std::time::Instant::now();
+            canvas.draw(raw);
+            started.elapsed().as_secs_f64() * 1000.0
+        })
+        .skip(FRAMES - KEPT)
+        .collect();
+    times.sort_by(f64::total_cmp);
+    let at = |q: f64| times[((KEPT - 1) as f64 * q).round() as usize];
+    println!(
+        "frame_time {}x{}, last {KEPT} of {FRAMES} frames: median {:.3} ms, p10 {:.3} ms, p90 {:.3} ms",
+        size.0,
+        size.1,
+        at(0.5),
+        at(0.1),
+        at(0.9)
+    );
 }

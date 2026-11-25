@@ -5,7 +5,7 @@ use t7_proto::{C2S, ClientId, MAX_REASON_LEN};
 
 use super::chat::LineKind;
 use super::widgets::{dialog_footer, dialog_header, section, text_input};
-use super::{App, default_channel_name};
+use super::{App, Lost, default_channel_name};
 use crate::sounds::Sound;
 use crate::theme;
 use crate::theme::Btn;
@@ -61,7 +61,9 @@ impl App {
         if id == my_id {
             let line = format!("{actor} kicked you from {place}{why}");
             if from_server {
-                self.kicked = Some(line.clone());
+                let quoted = if reason.is_empty() { String::new() } else { format!(": \"{reason}\"") };
+                let detail = format!("by {actor}{quoted}");
+                self.kicked = Some(Lost { headline: "Kicked from the server".into(), detail });
             }
             self.push(usize::from(!from_server), LineKind::Error, line);
             return;
