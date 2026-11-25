@@ -44,26 +44,13 @@ struct Login {
 enum Conn {
     Disconnected,
     Connecting(Login),
-    Connected {
-        server: ServerKey,
-        login: Login,
-    },
-    /// The connection dropped, or a moderator kicked us. The last tree stays
-    /// on screen, dimmed, so you see where you were, until you reconnect.
-    Lost {
-        server: ServerKey,
-        login: Login,
-        why: Lost,
-        last: Box<ServerView>,
-    },
+    Connected { server: ServerKey, login: Login },
+    Lost { server: ServerKey, login: Login, why: Lost, last: Box<ServerView> },
 }
 
-/// Why a connection that was up ended, for the banner over your panel.
 #[derive(Clone)]
 struct Lost {
-    /// "Kicked from the server" or "Disconnected".
     headline: String,
-    /// Who and why, or what failed.
     detail: String,
 }
 
@@ -102,7 +89,7 @@ pub struct App {
     /// Ask the window manager to flash the taskbar entry.
     attention: bool,
     updater: crate::update::Updater,
-    /// Set by the update icon: the shell closes the window after this frame.
+    /// Set by the Restart button: the shell closes the window after this frame.
     quit: bool,
     sharing: Option<sharing::Sharing>,
     /// In the order started.
@@ -185,7 +172,6 @@ impl App {
         self.view.as_ref().and_then(ServerView::me).map_or(Speech::Allowed, |me| me.speech)
     }
 
-    /// The server as it is now, or as it was when the connection was lost.
     fn shown_view(&self) -> Option<&ServerView> {
         match &self.conn {
             Conn::Lost { last, .. } => Some(last),
@@ -207,7 +193,6 @@ impl App {
         self.connect(address, nickname, password);
     }
 
-    /// Puts away the tree of a lost connection, for the list of servers.
     fn forget_lost(&mut self) {
         if matches!(self.conn, Conn::Lost { .. }) {
             self.conn = Conn::Disconnected;

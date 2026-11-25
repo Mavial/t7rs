@@ -124,7 +124,6 @@ fn view() -> ServerView {
     view
 }
 
-/// A chat line from today at `time`, like "20:14".
 fn line(time: &str, kind: LineKind, text: &str) -> Line {
     let time = chrono::NaiveTime::parse_from_str(time, "%H:%M").expect("a clock time");
     Line::new(chrono::Local::now().date_naive().and_time(time), kind, text.into())
@@ -456,7 +455,6 @@ const SCENES: &[Scene] = &[
     }),
 ];
 
-/// The pointer moves to (x, y), then presses or releases a button there, if any.
 #[derive(Clone, Copy)]
 struct Step {
     x: f32,
@@ -530,7 +528,6 @@ const FRAMES_BEFORE_STEPS: usize = 2;
 
 const FRAMES_PER_SECOND: f64 = 4.0;
 
-/// An app drawn frame by frame into a pixel buffer, the way the window shell does.
 struct Canvas {
     ctx: egui::Context,
     app: App,
@@ -557,7 +554,6 @@ impl Canvas {
         raw
     }
 
-    /// Lays out, tessellates and rasterizes one frame.
     fn draw(&mut self, raw: egui::RawInput) {
         let app = &mut self.app;
         let out = self.ctx.run_ui(raw, |ui| app.ui(ui));
@@ -618,10 +614,6 @@ fn snapshots() {
     }
 }
 
-/// How long a full redraw of the connected window takes: layout, tessellation
-/// and rasterizing, as the shell does on every repaint.
-/// `cargo test --release -p t7-client frame_time -- --ignored --nocapture`,
-/// with `T7_FRAME_SCENE` naming another scene to time.
 #[test]
 #[ignore = "measures redraw time; run it in release"]
 fn frame_time() {

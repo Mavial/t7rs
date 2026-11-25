@@ -20,7 +20,6 @@ use crate::theme::{self, Btn};
 const ICON_X: f32 = 15.0;
 const TEXT_X: f32 = 30.0;
 const RIGHT_PAD: f32 = 8.0;
-/// Each level of the tree is indented this much.
 const INDENT: f32 = 16.0;
 const CHANNEL_H: f32 = 30.0;
 const MEMBER_H: f32 = 28.0;
@@ -100,7 +99,6 @@ struct ChannelRow<'a> {
     folded: bool,
     clients: Vec<&'a ClientInfo>,
     may_rearrange: bool,
-    /// What its menu offers besides joining.
     may_edit: bool,
     may_create: bool,
     may_make_default: bool,
@@ -126,11 +124,9 @@ struct MemberRow<'a> {
 }
 
 impl App {
-    /// The tree fills the rest of `ui`, scrolling when it is taller.
     pub(super) fn channel_tree(&mut self, ui: &mut egui::Ui) {
         let Some(view) = self.shown_view() else { return };
         let folded = self.server_key().and_then(|server| self.settings.folded.get(server));
-        // A lost connection's tree stays, dimmed and still, until reconnecting.
         let lost = matches!(self.conn, Conn::Lost { .. });
         if lost {
             ui.disable();
@@ -274,7 +270,6 @@ impl<'a> Tree<'a> {
             Some((zone @ (Zone::Before | Zone::After), Outcome::Move(_))) => Some(zone),
             _ => None,
         };
-        // Hovering swaps the head count for a ⋯ that opens the same menu as a right-click.
         let more_id = resp.id.with("more");
         let more_open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"));
         let hot = (resp.contains_pointer() || more_open || resp.context_menu_opened())
@@ -353,7 +348,6 @@ impl<'a> Tree<'a> {
         may.then_some(member)
     }
 
-    /// Adds a menu entry that picks `action` and closes the menu.
     fn entry(&mut self, ui: &mut egui::Ui, item: Item, action: TreeAction) {
         if ui.add(item).clicked() {
             self.picked = Some(action);
@@ -361,7 +355,12 @@ impl<'a> Tree<'a> {
         }
     }
 
-    /// Actions on one channel, most used first, deleting last and in red.
+    fn entry_keeping_menu_open(&mut self, ui: &mut egui::Ui, item: Item, action: TreeAction) {
+        if ui.add(item).clicked() {
+            self.picked = Some(action);
+        }
+    }
+
     fn channel_menu(&mut self, ui: &mut egui::Ui, row: &ChannelRow) {
         menu_style(ui, 220.0);
         let ch = row.ch;
@@ -385,12 +384,9 @@ impl<'a> Tree<'a> {
             let label = if category { "Create channel…" } else { "Create sub-channel…" };
             self.entry(ui, Item::new(Icon::Plus, label), TreeAction::Create(ch.id));
         }
-        // These leave the menu open, to move a channel several places.
         if row.may_rearrange {
             for (icon, label, delta) in [(Icon::ArrowUp, "Move up", -1), (Icon::ArrowDown, "Move down", 1)] {
-                if ui.add(Item::new(icon, label)).clicked() {
-                    self.picked = Some(TreeAction::Shift(ch.id, delta));
-                }
+                self.entry_keeping_menu_open(ui, Item::new(icon, label), TreeAction::Shift(ch.id, delta));
             }
         }
         if row.may_make_default {
@@ -411,7 +407,6 @@ impl<'a> Tree<'a> {
         let movable = is_me || view.may_in(row.ch.id, Perm::MoveMembers);
         let sense = if movable { Sense::click_and_drag() } else { Sense::click() };
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), MEMBER_H), sense);
-        // The person being dragged fades out of their row.
         let dragged = match self.dragging {
             Dragging::Me => is_me,
             Dragging::Member(id) => id == c.id,
@@ -473,7 +468,6 @@ impl<'a> Tree<'a> {
         }
     }
 
-    /// What everyone may do first, then moderation under its own heading.
     fn member_menu(&mut self, ui: &mut egui::Ui, ch: &ChannelInfo, member: &MemberRow, movable: bool) {
         menu_style(ui, 250.0);
         let (view, c) = (self.view, member.c);
@@ -596,7 +590,6 @@ impl ChannelRow<'_> {
         self.depth as f32 * INDENT
     }
 
-    /// Whether its menu has anything in it: a channel always offers Join.
     fn has_menu(&self) -> bool {
         self.ch.kind != ChannelKind::Category
             || self.may_edit
