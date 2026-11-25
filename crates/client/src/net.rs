@@ -153,7 +153,6 @@ impl Net {
         })
     }
 
-    /// Starts watching `sharer`'s screen: their frames go to `sink`.
     pub fn watch(&self, sharer: ClientId, sink: ScreenSink) {
         self.viewer.lock().unwrap().watched.insert(sharer, Watched::new(sink, Instant::now()));
         self.send(C2S::Watch { sharer, on: true });
@@ -165,7 +164,6 @@ impl Net {
     }
 }
 
-/// The screens watched, by sharer.
 #[derive(Default)]
 struct Viewer {
     watched: BTreeMap<ClientId, Watched>,
@@ -197,12 +195,10 @@ impl Viewer {
         }
     }
 
-    /// When the next keyframe ask is due, for any screen.
     fn keyframe_due(&self) -> Option<Instant> {
         self.watched.values().filter_map(Watched::keyframe_due).min()
     }
 
-    /// The sharers to ask for a keyframe now.
     fn ask(&mut self, now: Instant) -> Vec<ClientId> {
         let due = self.watched.iter_mut().filter(|(_, w)| w.keyframe_due().is_some_and(|at| at <= now));
         due.map(|(&sharer, w)| {

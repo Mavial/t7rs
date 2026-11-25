@@ -9,9 +9,7 @@
 //!
 //! Joins the default channel. `listen` prints, per speaker, how many frames
 //! arrived and how loud they decode, so a real client's capture → encode →
-//! send path can be checked without ears. `share` shares the primary screen,
-//! or the first window whose title contains WINDOW under that name, at 1080p
-//! 30, so a real client can watch several screens on one machine.
+//! send path can be checked without ears.
 
 #[path = "../src/screen/mod.rs"]
 #[allow(dead_code, reason = "the bot only shares, so it never decodes")]
@@ -119,7 +117,7 @@ async fn main() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         return;
     }
-    // Keep the control connection drained, passing on keyframe requests.
+    // Keep the control connection drained.
     let (keyframe, mut keyframes) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Ok(msg) = read_frame::<_, S2C>(&mut r, &mut buf).await {
@@ -177,7 +175,6 @@ async fn main() {
                 _ = ping.tick() => {
                     crypto.seal(ToServer::Ping { nonce: 3 }, &mut out);
                     udp.send(&out).await.unwrap();
-                    // Without control traffic the server times the bot out.
                     write_frame(&mut w, &C2S::Ping { nonce: 0 }).await.unwrap();
                 }
             }

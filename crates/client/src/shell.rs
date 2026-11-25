@@ -215,7 +215,6 @@ impl ApplicationHandler<Wake> for Shell {
                 Some(watch::Action::Stop(sharer)) => self.app.stop_watching(sharer),
                 None => return,
             }
-            // The tree shows who is watched.
             return self.schedule(Duration::ZERO);
         }
         let Some(g) = self.gfx.as_mut().filter(|g| g.window.id() == id) else { return };

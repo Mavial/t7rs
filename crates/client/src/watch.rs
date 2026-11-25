@@ -1,8 +1,3 @@
-//! The Screens window: every screen being watched, in one OS window of its
-//! own. Each screen decodes on its own thread; the window draws a tile only
-//! when that screen has a new picture, so the main window never repaints for
-//! video and a still screen costs nothing.
-
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -32,11 +27,8 @@ const QUEUE: usize = 4;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
-/// How long names and buttons stay up after the mouse stops.
 const CONTROLS: Duration = Duration::from_secs(2);
 
-/// Around and between tiles, and the height of the strip below a focused
-/// screen, in points.
 const PAD: f32 = 8.0;
 const STRIP: f32 = 92.0;
 
@@ -57,7 +49,6 @@ impl Frames {
         slots.newest.replace(picture).or_else(|| slots.spare.take())
     }
 
-    /// Moves a newer picture, if one came, into `shown`.
     fn take_newest(&self, shown: &mut Option<Picture>) -> bool {
         let mut slots = self.0.lock().unwrap();
         let Some(newest) = slots.newest.take() else { return false };
@@ -105,25 +96,20 @@ fn decode(units: &Receiver<AccessUnit>, mut decoder: Decoder, frames: &Frames, f
     }
 }
 
-/// A screen to show, as the app hands it over.
 pub struct Stream {
     pub sharer: ClientId,
     pub name: String,
     pub frames: Arc<Frames>,
 }
 
-/// What the user did in the Screens window that the app acts on.
 pub enum Action {
-    /// Closed the window: stop watching every screen.
     Close,
     Stop(ClientId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
-    /// Side by side: 2 in a row, 3 or 4 in a 2×2.
     Grid,
-    /// One large, the others in a strip below.
     Focus(ClientId),
 }
 
@@ -134,7 +120,6 @@ enum Button {
     Stop,
 }
 
-/// What the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
     Nothing,
@@ -146,9 +131,7 @@ struct Tile {
     stream: Stream,
     shown: Option<Picture>,
     scaler: Scaler,
-    /// Where it is drawn, in pixels. `None` while another fills the screen.
     area: Option<Area>,
-    /// Draw it on the next paint: a new picture, or its controls changed.
     redraw: bool,
 }
 
@@ -157,15 +140,11 @@ pub struct Window {
     surface: softbuffer::Surface<Rc<winit::window::Window>, Rc<winit::window::Window>>,
     tiles: Vec<Tile>,
     layout: Layout,
-    /// In pixels, while over the window.
     pointer: Option<Pos2>,
-    /// Names and buttons show until then.
     controls_until: Option<Instant>,
     pressed: Option<Instant>,
     cursor: CursorIcon,
-    /// Paints names and buttons; made the first time they show.
     overlay: Option<Overlay>,
-    /// Lay out and draw everything on the next paint.
     stale: bool,
     title: String,
 }
@@ -203,7 +182,6 @@ impl Window {
         self.winit.id()
     }
 
-    /// Shows these screens, in this order. A new one brings the window to the front.
     pub fn show(&mut self, streams: Vec<Stream>) {
         let same = |t: &Tile, s: &Stream| t.stream.sharer == s.sharer && Arc::ptr_eq(&t.stream.frames, &s.frames);
         let unchanged = streams.len() == self.tiles.len() && self.tiles.iter().zip(&streams).all(|(t, s)| same(t, s));
@@ -245,17 +223,14 @@ impl Window {
         }
     }
 
-    /// A screen has a new picture.
     pub fn wake(&self) {
         self.winit.request_redraw();
     }
 
-    /// When [`Window::tick`] has something to do.
     pub fn wake_at(&self) -> Option<Instant> {
         self.controls_until
     }
 
-    /// Hides names and buttons once the mouse has rested long enough.
     pub fn tick(&mut self, now: Instant) {
         if self.controls_until.is_some_and(|at| at <= now) {
             self.controls_until = None;
@@ -454,7 +429,6 @@ impl Window {
         }
         self.tiles.iter_mut().for_each(|t| t.redraw = false);
 
-        // With nothing new, the system asked for a repaint: the buffer still holds the last pictures.
         let presented = if stale || damage.is_empty() { buffer.present() } else { buffer.present_with_damage(&damage) };
         if let Err(e) = presented {
             tracing::error!("cannot present the screens window: {e}");
@@ -473,19 +447,16 @@ impl Window {
     }
 }
 
-/// What decides how the tiles are dressed, read before drawing them.
 #[derive(Clone, Copy)]
 struct Look {
     layout: Layout,
     count: usize,
-    /// Names and buttons show.
     controls: bool,
     fullscreen: bool,
     target: Target,
     ppp: f32,
 }
 
-/// A tile's buttons, right to left, while controls show.
 fn buttons(layout: Layout, count: usize, sharer: ClientId) -> &'static [Button] {
     match layout {
         _ if count == 1 => &[Button::Stop, Button::Fullscreen],
@@ -495,7 +466,6 @@ fn buttons(layout: Layout, count: usize, sharer: ClientId) -> &'static [Button] 
     }
 }
 
-/// Paints a tile's name and its buttons; in a grid, buttons only on the tile under the pointer.
 fn dress(p: &egui::Painter, tile: &Tile, look: Look) {
     let Some(area) = tile.area else { return };
     let rect = rect_of(area, look.ppp);
@@ -550,9 +520,6 @@ fn dress(p: &egui::Painter, tile: &Tile, look: Look) {
 
 const CONTROL_BG: Color32 = Color32::from_rgba_premultiplied(15, 15, 15, 235);
 
-/// Where each of `count` tiles goes in a `size` window, in pixels. One fills
-/// the window; more sit in a grid, or around the focused one. A focused tile
-/// fills the window on its own without the strip, as in full screen.
 fn arrange(size: (usize, usize), ppp: f32, count: usize, focus: Option<usize>, strip: bool) -> Vec<Option<Area>> {
     let (width, height) = size;
     if count <= 1 {
@@ -612,7 +579,6 @@ fn damage_rect(area: Area) -> softbuffer::Rect {
     }
 }
 
-/// The `i`th button from the right, in points.
 fn button_rect(tile: Rect, i: usize) -> Rect {
     let right = tile.right() - 16.0 - i as f32 * 36.0;
     Rect::from_min_max(pos2(right - 30.0, tile.top() + 16.0), pos2(right, tile.top() + 46.0))
@@ -639,7 +605,6 @@ fn name_tag(p: &egui::Painter, tile: Rect, name: &str, small: bool) {
     p.galley(text_at, galley, theme::TEXT);
 }
 
-/// Four corners pointing out, or in to leave full screen.
 fn paint_fullscreen(p: &egui::Painter, rect: Rect, inward: bool, color: Color32) {
     let stroke = Stroke::new(1.6, color);
     let arm = rect.width() * 0.35;
@@ -670,8 +635,6 @@ fn paint_grid(p: &egui::Painter, rect: Rect, color: Color32) {
     }
 }
 
-/// Paints names and buttons over the pictures with a small egui context of
-/// its own, which never touches the main window's.
 struct Overlay {
     ctx: egui::Context,
     renderer: EguiSoftwareRender,
