@@ -178,25 +178,11 @@ impl App {
         }
     }
 
-    fn server_key(&self) -> Option<&ServerKey> {
-        match &self.conn {
-            Conn::Connected { server, .. } | Conn::Lost { server, .. } => Some(server),
-            Conn::Disconnected | Conn::Connecting(_) => None,
-        }
-    }
-
     fn reconnect(&mut self) {
         let Conn::Lost { login, .. } = &self.conn else { return };
         let Login { address, password } = login.clone();
         let nickname = self.settings.nickname.clone();
         self.connect(address, nickname, password);
-    }
-
-    fn forget_lost(&mut self) {
-        if matches!(self.conn, Conn::Lost { .. }) {
-            self.conn = Conn::Disconnected;
-            self.active_tab = 0;
-        }
     }
 
     fn sound(&self, sound: Sound) {

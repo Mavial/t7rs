@@ -126,7 +126,10 @@ struct MemberRow<'a> {
 impl App {
     pub(super) fn channel_tree(&mut self, ui: &mut egui::Ui) {
         let Some(view) = self.shown_view() else { return };
-        let folded = self.server_key().and_then(|server| self.settings.folded.get(server));
+        let folded = match &self.conn {
+            Conn::Connected { server, .. } | Conn::Lost { server, .. } => self.settings.folded.get(server),
+            Conn::Disconnected | Conn::Connecting(_) => None,
+        };
         let lost = matches!(self.conn, Conn::Lost { .. });
         if lost {
             ui.disable();
@@ -372,7 +375,7 @@ impl<'a> Tree<'a> {
                 ui.close();
             }
         }
-        let manage = row.may_edit || row.may_create || row.may_rearrange || row.may_make_default;
+        let manage = row.may_manage();
         if manage && !category {
             menu_separator(ui);
         }
@@ -590,13 +593,12 @@ impl ChannelRow<'_> {
         self.depth as f32 * INDENT
     }
 
+    fn may_manage(&self) -> bool {
+        self.may_edit || self.may_create || self.may_rearrange || self.may_make_default
+    }
+
     fn has_menu(&self) -> bool {
-        self.ch.kind != ChannelKind::Category
-            || self.may_edit
-            || self.may_create
-            || self.may_rearrange
-            || self.may_make_default
-            || self.may_delete
+        self.ch.kind != ChannelKind::Category || self.may_manage() || self.may_delete
     }
 
     /// The row's fill, tinted for your channel, and where a dragged channel would land.
