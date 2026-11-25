@@ -277,10 +277,14 @@ crates/
   bytes of a frame per datagram and 512 datagrams per frame. The sharer
   spreads a frame's datagrams over 16 ms. The server forwards them without
   decoding to those in the sharer's channel who chose to watch, and drops a
-  sharer's video past 12 Mbit/s or while they may not speak. A viewer that
-  starts watching, or loses a frame, asks the sharer for a keyframe through
-  the server every 250 ms until one arrives, since a still screen sends
-  nothing until asked. The server passes on at most one request per sharer
+  sharer's video past 12 Mbit/s or while they may not speak; once one part of
+  a frame is over the limit, the rest of that frame goes too. A frame still
+  missing parts 100 ms after its latest one is lost. A viewer that starts
+  watching, or loses a frame, asks the sharer for a keyframe through the
+  server every 250 ms until one arrives, since a still screen sends nothing
+  until asked. A frame that reaches the sharer's network thread over 100 ms
+  after it was encoded is dropped, along with the frames after it, and the
+  sharer encodes a keyframe at once. The server passes on at most one request per sharer
   every 250 ms. A viewer watches up to 4 screens at once. Changing channels
   ends your share and everything you watch. Each watched screen decodes on a
   thread of its own. All of them draw in one Screens window, which redraws only

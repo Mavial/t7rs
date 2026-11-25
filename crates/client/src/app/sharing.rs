@@ -116,7 +116,20 @@ impl App {
         let stats = sharing.share.take_stats();
         let latency = stats.latency_total.checked_div(stats.encoded).unwrap_or_default();
         let (captured, encoded, bytes, max) = (stats.captured, stats.encoded, stats.bytes, stats.latency_max);
-        tracing::info!(captured, encoded, bytes, ?latency, ?max, "stopped sharing the screen");
+        let sent = self.net.take_video_sent();
+        let (parts, failed, dropped, skipped) = (sent.parts, sent.failed, sent.dropped, sent.skipped);
+        tracing::info!(
+            captured,
+            encoded,
+            bytes,
+            ?latency,
+            ?max,
+            parts,
+            failed,
+            dropped,
+            skipped,
+            "stopped sharing the screen"
+        );
     }
 
     pub(super) fn send_keyframe(&self) {

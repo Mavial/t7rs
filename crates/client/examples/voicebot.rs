@@ -164,7 +164,8 @@ async fn main() {
                 Some(au) = units.recv() => {
                     sent += 1;
                     bytes += au.data.len();
-                    pacer.push(au, Instant::now());
+                    let now = Instant::now();
+                    pacer.push(au, now, now);
                 }
                 () = tokio::time::sleep_until(due.unwrap_or(deadline).into()), if due.is_some() => {
                     pacer.send_due(Instant::now(), |VideoPart { frame, part, parts, key, payload }| {

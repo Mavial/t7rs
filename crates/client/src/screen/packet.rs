@@ -7,6 +7,14 @@ use super::AccessUnit;
 
 pub const FRAME_PACE: Duration = Duration::from_millis(16);
 const MAX_BURST: usize = 32;
+/// A frame this old when it reaches the pacer was held up on the way: sending
+/// it would only put the picture further behind.
+pub const STALE_AFTER: Duration = Duration::from_millis(100);
+/// How long after its latest part a frame still missing parts is lost: a
+/// screen that goes still sends no newer frame to show it was. Counted from
+/// the latest part, not the first, so a keyframe still trickling in over a
+/// slow link isn't given up on.
+pub const INCOMPLETE_AFTER: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoPart<'a> {
@@ -31,10 +39,22 @@ pub fn packetize(au: &AccessUnit) -> impl Iterator<Item = VideoPart<'_>> {
 
 /// Spreads each access unit's parts evenly over [`FRAME_PACE`] from when it
 /// arrives, so a keyframe doesn't leave in one burst. A newer access unit
-/// makes the rest of the older ones due at once.
+/// makes the rest of the older ones due at once, and a keyframe drops the
+/// older ones not started yet.
 #[derive(Default)]
 pub struct Pacer {
     queue: VecDeque<Sending>,
+    skipping: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pushed {
+    Queued,
+    /// Not sent: too large to number, or older than [`STALE_AFTER`]. The
+    /// frames after it are skipped until a keyframe: ask the encoder for one.
+    Dropped,
+    /// Skipped while waiting for that keyframe.
+    Skipped,
 }
 
 struct Sending {
@@ -45,16 +65,25 @@ struct Sending {
 }
 
 impl Pacer {
-    /// Queues `au`. `false`, and nothing queued, if it is over [`MAX_ACCESS_UNIT`] bytes.
-    pub fn push(&mut self, au: AccessUnit, now: Instant) -> bool {
-        if au.data.len() > MAX_ACCESS_UNIT {
-            return false;
+    /// Queues `au`, encoded at `made`. Keyframes are never too old: they are
+    /// what the frames after them need.
+    pub fn push(&mut self, au: AccessUnit, made: Instant, now: Instant) -> Pushed {
+        let stale = !au.key && now.saturating_duration_since(made) > STALE_AFTER;
+        if au.data.len() > MAX_ACCESS_UNIT || (stale && !self.skipping) {
+            self.skipping = true;
+            return Pushed::Dropped;
+        }
+        if au.key {
+            self.skipping = false;
+            self.queue.retain(|s| s.sent > 0);
+        } else if self.skipping {
+            return Pushed::Skipped;
         }
         let parts = au.data.len().div_ceil(MAX_VIDEO_PAYLOAD);
         if parts > 0 {
             self.queue.push_back(Sending { au, parts, sent: 0, since: now });
         }
-        true
+        Pushed::Queued
     }
 
     pub fn next_at(&self) -> Option<Instant> {
@@ -114,13 +143,14 @@ pub struct Assembler {
 
 struct Pending {
     frame: u32,
+    latest: Instant,
     key: bool,
     parts: Vec<Option<Vec<u8>>>,
     missing: usize,
 }
 
 impl Assembler {
-    pub fn push(&mut self, part: VideoPart<'_>) -> Option<Assembled> {
+    pub fn push(&mut self, part: VideoPart<'_>, now: Instant) -> Option<Assembled> {
         if self.newest.is_some_and(|n| part.frame <= n) {
             return None;
         }
@@ -138,6 +168,7 @@ impl Assembler {
         let lost = lost.then_some(Assembled::NeedKeyframe);
         let p = self.pending.get_or_insert_with(|| Pending {
             frame: part.frame,
+            latest: now,
             key: part.key,
             parts: vec![None; usize::from(part.parts)],
             missing: usize::from(part.parts),
@@ -147,12 +178,30 @@ impl Assembler {
         }
         let Some(slot @ None) = p.parts.get_mut(usize::from(part.part)) else { return lost };
         *slot = Some(part.payload.to_vec());
+        p.latest = now;
         p.missing -= 1;
         if p.missing > 0 {
             return lost;
         }
         let p = self.pending.take().expect("just completed");
         Some(self.finish(p))
+    }
+
+    /// When the frame still missing parts is given up on.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|p| p.latest + INCOMPLETE_AFTER)
+    }
+
+    /// Gives up on the frame still missing parts if its deadline has passed,
+    /// so the screen waits for a keyframe. Says whether it did.
+    pub fn expire(&mut self, now: Instant) -> bool {
+        if self.deadline().is_none_or(|at| at > now) {
+            return false;
+        }
+        let p = self.pending.take().expect("has a deadline");
+        self.newest = Some(p.frame);
+        self.decodable = None;
+        true
     }
 
     pub fn wait_for_keyframe(&mut self) {
@@ -187,7 +236,7 @@ mod tests {
 
     fn deliver(asm: &mut Assembler, au: &AccessUnit, parts: &[usize]) -> Vec<Assembled> {
         let all: Vec<VideoPart<'_>> = packetize(au).collect();
-        parts.iter().filter_map(|&i| asm.push(all[i])).collect()
+        parts.iter().filter_map(|&i| asm.push(all[i], Instant::now())).collect()
     }
 
     fn whole(asm: &mut Assembler, au: &AccessUnit) -> Vec<Assembled> {
@@ -256,11 +305,63 @@ mod tests {
         let mut asm = Assembler::default();
         let unit = au(0, true, 2 * MAX_VIDEO_PAYLOAD);
         let first = packetize(&unit).next().unwrap();
-        assert_eq!(asm.push(first), None);
-        assert_eq!(asm.push(VideoPart { part: 1, parts: 5, ..first }), None, "another part count");
-        assert_eq!(asm.push(VideoPart { part: 1, key: false, ..first }), None, "not a keyframe after all");
-        assert_eq!(asm.push(VideoPart { part: 9, parts: 2, ..first }), None, "past the last part");
+        assert_eq!(asm.push(first, Instant::now()), None);
+        assert_eq!(asm.push(VideoPart { part: 1, parts: 5, ..first }, Instant::now()), None, "another part count");
+        assert_eq!(
+            asm.push(VideoPart { part: 1, key: false, ..first }, Instant::now()),
+            None,
+            "not a keyframe after all"
+        );
+        assert_eq!(asm.push(VideoPart { part: 9, parts: 2, ..first }, Instant::now()), None, "past the last part");
         assert_eq!(deliver(&mut asm, &unit, &[1]), [Assembled::Frame(unit)]);
+    }
+
+    #[test]
+    fn a_frame_missing_parts_is_given_up_on_after_its_deadline() {
+        let t0 = Instant::now();
+        let mut asm = Assembler::default();
+        let (key, next) = (au(0, true, 10), au(1, false, 3 * MAX_VIDEO_PAYLOAD));
+        assert_eq!(whole(&mut asm, &key), [Assembled::Frame(key)]);
+        let parts: Vec<VideoPart<'_>> = packetize(&next).collect();
+        assert_eq!(asm.push(parts[0], t0), None);
+        let t1 = t0 + INCOMPLETE_AFTER * 3 / 4;
+        assert_eq!(asm.push(parts[2], t1), None);
+        assert_eq!(asm.deadline(), Some(t1 + INCOMPLETE_AFTER), "from its latest part: it may still be coming in");
+        assert!(!asm.expire(t0 + INCOMPLETE_AFTER));
+        assert!(!asm.waiting_for_keyframe());
+        assert!(asm.expire(t1 + INCOMPLETE_AFTER), "the screen went still: no newer frame says it was lost");
+        assert!(asm.waiting_for_keyframe());
+        assert_eq!(asm.deadline(), None);
+        assert_eq!(asm.push(parts[1], t1 + INCOMPLETE_AFTER), None, "too late");
+    }
+
+    #[test]
+    fn a_stale_frame_is_dropped_with_the_ones_after_it_until_a_keyframe() {
+        let t0 = Instant::now();
+        let late = t0 + STALE_AFTER + Duration::from_millis(1);
+        let mut pacer = Pacer::default();
+        assert_eq!(pacer.push(au(0, false, 10), t0, late), Pushed::Dropped, "held up on the way");
+        assert_eq!(pacer.push(au(1, false, 10), late, late), Pushed::Skipped, "can't be decoded without it");
+        assert_eq!(pacer.push(au(2, false, 10), t0, late), Pushed::Skipped);
+        assert_eq!(pacer.next_at(), None);
+        assert_eq!(pacer.push(au(3, true, 10), t0, late), Pushed::Queued, "a keyframe is never too old");
+        assert_eq!(pacer.push(au(4, false, 10), late, late), Pushed::Queued);
+        let mut out = Vec::new();
+        pacer.send_due(late, |p| out.push(p.frame));
+        assert_eq!(out, [3, 4]);
+    }
+
+    #[test]
+    fn a_keyframe_drops_older_frames_not_started_yet() {
+        let t0 = Instant::now();
+        let mut pacer = Pacer::default();
+        pacer.push(au(0, false, 4 * MAX_VIDEO_PAYLOAD), t0, t0);
+        assert_eq!(sends(&mut pacer, t0, &[0]), [1]);
+        pacer.push(au(1, false, 10), t0, t0);
+        pacer.push(au(2, true, 10), t0, t0);
+        let mut out = Vec::new();
+        pacer.send_due(t0, |p| out.push((p.frame, p.part)));
+        assert_eq!(out, [(0, 1), (0, 2), (0, 3), (2, 0)], "the frame being sent finishes; the one after it goes");
     }
 
     fn sends(pacer: &mut Pacer, t0: Instant, at: &[u64]) -> Vec<usize> {
@@ -277,11 +378,11 @@ mod tests {
     fn a_frame_leaves_spread_over_the_frame_interval() {
         let t0 = Instant::now();
         let mut pacer = Pacer::default();
-        assert!(pacer.push(au(0, false, 16 * MAX_VIDEO_PAYLOAD), t0));
+        assert_eq!(pacer.push(au(0, false, 16 * MAX_VIDEO_PAYLOAD), t0, t0), Pushed::Queued);
         assert_eq!(pacer.next_at(), Some(t0));
         assert_eq!(sends(&mut pacer, t0, &[0, 0, 7, 15]), [1, 0, 7, 8]);
         assert_eq!(pacer.next_at(), None, "all 16 sent by 15 ms");
-        assert!(!pacer.push(au(1, true, MAX_ACCESS_UNIT + 1), t0), "too large to number");
+        assert_eq!(pacer.push(au(1, true, MAX_ACCESS_UNIT + 1), t0, t0), Pushed::Dropped, "too large to number");
         assert_eq!(pacer.next_at(), None);
     }
 
@@ -290,9 +391,10 @@ mod tests {
         let t0 = Instant::now();
         let mut pacer = Pacer::default();
         let (older, newer) = (au(0, true, 16 * MAX_VIDEO_PAYLOAD), au(1, false, 16 * MAX_VIDEO_PAYLOAD));
-        pacer.push(older.clone(), t0);
+        pacer.push(older.clone(), t0, t0);
         assert_eq!(sends(&mut pacer, t0, &[0]), [1]);
-        pacer.push(newer.clone(), t0 + Duration::from_millis(1));
+        let t1 = t0 + Duration::from_millis(1);
+        pacer.push(newer.clone(), t1, t1);
         assert_eq!(pacer.next_at(), Some(t0), "the older is due at once");
         let mut out = Vec::new();
         pacer.send_due(t0 + Duration::from_millis(1), |p| out.push((p.frame, p.part)));
@@ -305,13 +407,13 @@ mod tests {
         let t0 = Instant::now();
         let mut pacer = Pacer::default();
         let unit = au(0, true, MAX_ACCESS_UNIT);
-        pacer.push(unit.clone(), t0);
+        pacer.push(unit.clone(), t0, t0);
         let late = t0 + FRAME_PACE;
         let mut asm = Assembler::default();
         let mut out = Vec::new();
         let mut bursts = 0;
         while pacer.next_at().is_some_and(|at| at <= late) {
-            pacer.send_due(late, |p| out.extend(asm.push(p)));
+            pacer.send_due(late, |p| out.extend(asm.push(p, late)));
             bursts += 1;
         }
         assert_eq!(bursts, MAX_ACCESS_UNIT.div_ceil(MAX_VIDEO_PAYLOAD).div_ceil(MAX_BURST));

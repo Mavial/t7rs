@@ -71,6 +71,10 @@ struct Client {
     voice_bucket: TokenBucket,
     watching: BTreeSet<ClientId>,
     video_bucket: TokenBucket,
+    /// The frame being dropped for going over the video rate limit.
+    video_dropping: Option<u32>,
+    /// Frames dropped for that during this share.
+    video_over_limit: u32,
     keyframe_asked: Option<Instant>,
     previews: BTreeMap<ClientId, Preview>,
     preview_bucket: TokenBucket,
@@ -82,6 +86,15 @@ struct Client {
 impl Client {
     fn subject(&self) -> Subject {
         Subject { client: self.info.id, identity: self.info.identity }
+    }
+
+    /// Logs what the share lost to the rate limit, now that it has ended.
+    fn share_ended(&mut self) {
+        let frames = std::mem::take(&mut self.video_over_limit);
+        if frames > 0 {
+            tracing::info!(id = self.info.id, frames, "screen share went over the video rate limit");
+        }
+        self.video_dropping = None;
     }
 
     fn takes_preview(&mut self, sharer: ClientId, frame: u32, key: bool) -> bool {
@@ -261,10 +274,15 @@ impl Server {
                 forward(&self.udp, &mut self.datagram, audio, listeners);
             }
             ToServer::Video { frame, part, parts, key, payload } => {
-                if !sender.info.sharing
-                    || sender.info.speech != Speech::Allowed
-                    || !sender.video_bucket.take_n(payload.len() as f32)
-                {
+                if !sender.info.sharing || sender.info.speech != Speech::Allowed {
+                    return;
+                }
+                // Once one part is over the limit, the rest of its frame is of no use to viewers.
+                if sender.video_dropping == Some(frame) || !sender.video_bucket.take_n(payload.len() as f32) {
+                    if sender.video_dropping != Some(frame) {
+                        sender.video_dropping = Some(frame);
+                        sender.video_over_limit += 1;
+                    }
                     return;
                 }
                 let channel = sender.info.channel;
@@ -371,6 +389,8 @@ impl Server {
                 voice_bucket: TokenBucket::voice(),
                 watching: BTreeSet::new(),
                 video_bucket: TokenBucket::video(),
+                video_dropping: None,
+                video_over_limit: 0,
                 keyframe_asked: None,
                 previews: BTreeMap::new(),
                 preview_bucket: TokenBucket::preview(),
@@ -535,6 +555,7 @@ impl Server {
         }
         client.info.sharing = sharing;
         if !sharing {
+            client.share_ended();
             for c in self.clients.values_mut() {
                 c.watching.remove(&id);
                 c.previews.remove(&id);
@@ -1247,7 +1268,8 @@ impl Server {
     }
 
     fn remove(&mut self, id: ClientId, reason: LeaveReason) {
-        if let Some(client) = self.clients.remove(&id) {
+        if let Some(mut client) = self.clients.remove(&id) {
+            client.share_ended();
             tracing::info!(addr = %client.addr, id, nickname = %client.info.nickname, ?reason, "client left");
             // Dropping `client.outbox` ends its writer task, which closes the socket.
             self.broadcast(&S2C::ClientLeft { id, reason }, |c| c.last_sent_locations.contains_key(&id));
