@@ -235,7 +235,7 @@ impl Window {
         if self.controls_until.is_some_and(|at| at <= now) {
             self.controls_until = None;
             self.redraw_all();
-            self.winit.set_cursor_visible(self.winit.fullscreen().is_none());
+            self.winit.set_cursor_visible(!self.fullscreen());
             self.set_cursor();
         }
     }
@@ -369,11 +369,11 @@ impl Window {
         let Some(pointer_px) = self.pointer_px else { return Target::Nothing };
         let ppp = self.ppp();
         let pointer = pointer_px / ppp;
-        let Some(tile) = self.tiles.iter().find(|t| t.area.is_some_and(|a| rect_of(a, ppp).contains(pointer))) else {
-            return Target::Nothing;
-        };
-        let sharer = tile.stream.sharer;
-        let area = rect_of(tile.area.expect("found by its area"), ppp);
+        let hovered = self.tiles.iter().find_map(|t| {
+            let area = rect_of(t.area?, ppp);
+            area.contains(pointer).then_some((t.stream.sharer, area))
+        });
+        let Some((sharer, area)) = hovered else { return Target::Nothing };
         let buttons = if self.controls_until.is_some() { buttons(self.layout, self.tiles.len(), sharer) } else { &[] };
         let hit = buttons.iter().enumerate().find(|&(i, _)| button_rect_from_right(area, i).contains(pointer));
         hit.map_or(Target::Tile(sharer), |(_, &button)| Target::Button(sharer, button))
@@ -417,15 +417,15 @@ impl Window {
             let Some(area) = tile.area else { continue };
             match &tile.shown {
                 Some(picture) => tile.scaler.draw(picture, &mut buffer, width, area),
-                None => (area.y..area.y + area.height).for_each(|y| buffer[y * width + area.x..][..area.width].fill(0)),
+                None => area.clear(&mut buffer, width),
             }
             damage.push(damage_rect(area));
         }
-        let dressed = |t: &&Tile| t.redraw && t.area.is_some() && (look.controls || t.shown.is_none());
-        if self.tiles.iter().any(|t| dressed(&t)) {
+        let dressed = |t: &Tile| t.redraw && t.area.is_some() && (look.controls || t.shown.is_none());
+        if self.tiles.iter().any(dressed) {
             let overlay = self.overlay.get_or_insert_with(Overlay::new);
             overlay.paint(&mut buffer, (width, height), look.ppp, |p| {
-                self.tiles.iter().filter(dressed).for_each(|tile| dress(p, tile, look));
+                self.tiles.iter().filter(|t| dressed(t)).for_each(|tile| dress(p, tile, look));
             });
         }
         self.tiles.iter_mut().for_each(|t| t.redraw = false);
