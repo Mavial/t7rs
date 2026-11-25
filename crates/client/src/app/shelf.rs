@@ -103,7 +103,7 @@ impl App {
             card.asked = Some(Instant::now());
         }
         let size = still_size(ctx.pixels_per_point());
-        let sink = preview::sink(sharer, size, self.shelf.still_tx.clone(), ctx.clone());
+        let sink = preview::spawn_decode(sharer, size, self.shelf.still_tx.clone(), ctx.clone());
         self.net.preview(sharer, sink);
     }
 
@@ -294,9 +294,11 @@ fn lone_card(ui: &mut egui::Ui, c: &Shown) -> (Option<Action>, Option<ClientId>)
     (action, pointed.then_some(c.sharer))
 }
 
+const SPARE: usize = 1;
+
 pub(super) fn still_size(pixels_per_point: f32) -> [usize; 2] {
     let size = (STILL * pixels_per_point).round();
-    [size.x as usize + 1, size.y as usize + 1]
+    [size.x as usize + SPARE, size.y as usize + SPARE]
 }
 
 fn paint_still(p: &egui::Painter, rect: Rect, still: Option<&TextureHandle>) {
@@ -307,8 +309,9 @@ fn paint_still(p: &egui::Painter, rect: Rect, still: Option<&TextureHandle>) {
         // mesh: hence the spare row and column, and the empty triangle.
         let ppp = p.pixels_per_point();
         let [w, h] = still.size().map(|n| n as f32);
-        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2((w - 1.0) / w, (h - 1.0) / h));
-        let drawn = Rect::from_min_size(rect.min.round_to_pixels(ppp), vec2(w - 1.0, h - 1.0) / ppp);
+        let spare = SPARE as f32;
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2((w - spare) / w, (h - spare) / h));
+        let drawn = Rect::from_min_size(rect.min.round_to_pixels(ppp), vec2(w - spare, h - spare) / ppp);
         let mut quad = Mesh::with_texture(still.id());
         quad.add_rect_with_uv(drawn, uv, Color32::WHITE);
         quad.add_triangle(0, 0, 0);

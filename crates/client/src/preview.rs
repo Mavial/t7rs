@@ -10,7 +10,7 @@ use crate::screen::{AccessUnit, Decoder, Picture};
 
 pub type Still = (ClientId, ColorImage);
 
-pub fn sink(sharer: ClientId, size: [usize; 2], stills: Sender<Still>, ctx: egui::Context) -> PreviewSink {
+pub fn spawn_decode(sharer: ClientId, size: [usize; 2], stills: Sender<Still>, ctx: egui::Context) -> PreviewSink {
     Box::new(move |au| {
         let decode = move || {
             let started = Instant::now();
