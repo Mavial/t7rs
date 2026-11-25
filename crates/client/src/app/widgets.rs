@@ -304,7 +304,7 @@ fn dialog_note(ui: &mut egui::Ui, note: &str) {
 /// The right-aligned button row that ends a dialog: add the main action first.
 pub(super) fn dialog_footer(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(18.0);
-    ui.with_layout(Layout::right_to_left(Align::Center), add);
+    ui.with_layout(Layout::right_to_left(Align::Min), add);
 }
 
 pub(super) fn field_label(ui: &mut egui::Ui, text: &str) {
