@@ -1,7 +1,3 @@
-//! Stills of shared screens, for the shelf over the chat. A still is one
-//! keyframe, decoded once on a thread of its own and scaled down to the size
-//! it is drawn at; the decoder ends with the thread.
-
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
@@ -12,11 +8,8 @@ use crate::net::PreviewSink;
 use crate::screen::scale::{Area, Scaler};
 use crate::screen::{AccessUnit, Decoder, Picture};
 
-/// A still of someone's screen, as it comes back from its thread.
 pub type Still = (ClientId, ColorImage);
 
-/// Decodes the keyframe it gets into a `size`-pixel still of `sharer`'s
-/// screen, sends it to `stills`, and wakes the UI.
 pub fn sink(sharer: ClientId, size: [usize; 2], stills: Sender<Still>, ctx: egui::Context) -> PreviewSink {
     Box::new(move |au| {
         let decode = move || {
@@ -43,7 +36,6 @@ fn still(au: &AccessUnit, size: [usize; 2]) -> Result<ColorImage, String> {
     Ok(thumbnail(&picture, size))
 }
 
-/// `picture` scaled to fit `size`, centered, with black bars where its shape differs.
 fn thumbnail(picture: &Picture, size: [usize; 2]) -> ColorImage {
     let [width, height] = size;
     let mut pixels = vec![0; width * height];

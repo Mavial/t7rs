@@ -89,7 +89,6 @@ pub type VideoSink = Arc<dyn Fn(AccessUnit) + Send + Sync>;
 /// asks for, as it does after a lost frame.
 pub type ScreenSink = Box<dyn FnMut(AccessUnit) -> bool + Send>;
 
-/// Takes the one keyframe a still was asked for, on the network thread.
 pub type PreviewSink = Box<dyn FnOnce(AccessUnit) + Send>;
 
 pub struct Net {
@@ -167,8 +166,6 @@ impl Net {
         self.send(C2S::Watch { sharer, on: false });
     }
 
-    /// Asks for a still of `sharer`'s screen: the keyframe the server sends
-    /// for it goes to `sink`. Asking again before it comes replaces the ask.
     pub fn preview(&self, sharer: ClientId, sink: PreviewSink) {
         self.viewer.lock().unwrap().previews.insert(sharer, Asked { sink, assembler: Assembler::default() });
         self.send(C2S::Preview { sharer });
@@ -182,7 +179,6 @@ struct Viewer {
     previews: BTreeMap<ClientId, Asked>,
 }
 
-/// A still asked for, until its keyframe is whole.
 struct Asked {
     sink: PreviewSink,
     assembler: Assembler,
@@ -597,7 +593,6 @@ mod tests {
         (Viewer { watched: BTreeMap::from([(1, Watched::new(sink, at))]), ..Viewer::default() }, got)
     }
 
-    /// Asks for a still of `sharer`; the frames its sink gets go to the list.
     fn ask_preview(viewer: &mut Viewer, sharer: ClientId) -> Arc<Mutex<Vec<u32>>> {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink_got = got.clone();

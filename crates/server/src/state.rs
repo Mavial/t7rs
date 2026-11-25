@@ -73,7 +73,6 @@ struct Client {
     watching: BTreeSet<ClientId>,
     video_bucket: TokenBucket,
     keyframe_asked: Option<Instant>,
-    /// Sharers in their channel they asked for a still of.
     previews: BTreeMap<ClientId, Preview>,
     preview_bucket: TokenBucket,
     last_sent_permissions: Permissions,
@@ -86,8 +85,6 @@ impl Client {
         Subject { client: self.info.id, identity: self.info.identity }
     }
 
-    /// Whether this part of `sharer`'s video goes to them for a still: every
-    /// part of the first keyframe after they asked, and nothing after it.
     fn takes_preview(&mut self, sharer: ClientId, frame: u32, key: bool) -> bool {
         let Some(preview) = self.previews.get_mut(&sharer) else { return false };
         match *preview {
@@ -103,12 +100,9 @@ impl Client {
     }
 }
 
-/// Where a still someone asked of a sharer is.
 #[derive(Clone, Copy)]
 enum Preview {
-    /// Waiting for the sharer's next keyframe.
     Asked,
-    /// Forwarding the parts of this keyframe until the next frame starts.
     Sending(u32),
 }
 
@@ -577,7 +571,6 @@ impl Server {
         }
     }
 
-    /// Whether `sharer` is someone else sharing their screen in `viewer`'s channel.
     fn shares_with(&self, sharer: ClientId, viewer: ClientId) -> bool {
         let channel = self.clients[&viewer].info.channel;
         sharer != viewer && self.clients.get(&sharer).is_some_and(|c| c.info.sharing && c.info.channel == channel)

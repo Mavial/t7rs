@@ -1,8 +1,3 @@
-//! The shelf over the chat while people in your channel share their screens:
-//! a still of each, with Watch. Stills come when you join the channel, when
-//! someone starts sharing, and when you point at one, never on a timer, so
-//! an idle window stays idle.
-
 use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -22,29 +17,22 @@ use crate::icons::{self, Icon};
 use crate::preview::{self, Still};
 use crate::theme::{self, Btn};
 
-/// Pointing at a card again asks for a new still at most this often.
 const ASK_AGAIN: Duration = Duration::from_secs(2);
-/// A still, 16:9, in points. It is decoded at its size in pixels and drawn
-/// square-cornered, so the CPU renderer copies it rather than filtering it.
 const STILL: egui::Vec2 = vec2(176.0, 99.0);
 const CARD_PAD: f32 = 6.0;
 const CARD_W: f32 = STILL.x + 2.0 * CARD_PAD;
 
 pub(super) struct Shelf {
-    /// One per screen shared in your channel, in the order they started.
     pub(super) cards: Vec<Card>,
     still_tx: Sender<Still>,
     still_rx: Receiver<Still>,
-    /// Channels where you folded the shelf to one line, until you reconnect.
     pub(super) folded: BTreeSet<ChannelId>,
-    /// The card under the pointer last frame.
     pointed: Option<ClientId>,
 }
 
 pub(super) struct Card {
     pub(super) sharer: ClientId,
     pub(super) still: Option<TextureHandle>,
-    /// When a still was last asked for; `None` until the shelf first shows.
     pub(super) asked: Option<Instant>,
 }
 
@@ -54,7 +42,6 @@ impl Shelf {
         Self { cards: Vec::new(), still_tx, still_rx, folded: BTreeSet::new(), pointed: None }
     }
 
-    /// One card per sharer: new ones at the end, gone ones dropped.
     fn follow(&mut self, sharers: &[ClientId]) {
         self.cards.retain(|c| sharers.contains(&c.sharer));
         for &sharer in sharers {
@@ -69,7 +56,6 @@ impl Shelf {
     }
 }
 
-/// What a card shows this frame.
 struct Shown<'a> {
     sharer: ClientId,
     name: &'a str,
@@ -85,8 +71,6 @@ enum Action {
 }
 
 impl App {
-    /// Keeps a card per screen shared in your channel, takes the stills that
-    /// came, and asks for the ones not asked for yet while the shelf shows.
     pub(super) fn sync_shelf(&mut self, ctx: &egui::Context) {
         let sharers = self.sharers_here();
         self.shelf.follow(&sharers);
@@ -98,7 +82,6 @@ impl App {
         self.ask_unasked(ctx);
     }
 
-    /// Those sharing their screens in your channel, but you.
     fn sharers_here(&self) -> Vec<ClientId> {
         let Some(view) = &self.view else { return Vec::new() };
         let Some(channel) = view.my_channel() else { return Vec::new() };
@@ -191,7 +174,6 @@ impl App {
     }
 }
 
-/// What the shelf's one line says: who shares, or how many of them you watch.
 fn summary(shown: &[Shown], channel: &str, folded: bool) -> String {
     let watched = shown.iter().filter(|c| c.watched).count();
     match (shown, watched) {
@@ -203,7 +185,6 @@ fn summary(shown: &[Shown], channel: &str, folded: bool) -> String {
     }
 }
 
-/// LIVE, what the shelf says, and Hide or Show on the right. True when that was clicked.
 fn one_line(ui: &mut egui::Ui, line: &str, icon: Icon, fold: &str) -> bool {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
     let p = ui.painter();
@@ -218,7 +199,6 @@ fn one_line(ui: &mut egui::Ui, line: &str, icon: Icon, fold: &str) -> bool {
     resp.clicked()
 }
 
-/// A ghost button with a chevron, for folding the shelf.
 fn fold_button(ui: &mut egui::Ui, icon: Icon, text: &str) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(12.5), theme::TEXT_DIM);
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 32.0, 24.0), Sense::click());
@@ -232,7 +212,6 @@ fn fold_button(ui: &mut egui::Ui, icon: Icon, text: &str) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Two or more sharers: a card each, scrolling sideways when they don't fit.
 fn cards(ui: &mut egui::Ui, shown: &[Shown]) -> (Option<Action>, Option<ClientId>) {
     let (mut action, mut pointed) = (None, None);
     egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| {
@@ -278,7 +257,6 @@ fn card(ui: &mut egui::Ui, c: &Shown) -> (Option<Action>, bool) {
     (button.clicked().then_some(picked), resp.contains_pointer())
 }
 
-/// One sharer: their still, who it is, and Watch, without a header.
 fn lone_card(ui: &mut egui::Ui, c: &Shown) -> (Option<Action>, Option<ClientId>) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), STILL.y), Sense::hover());
     let still = Rect::from_min_size(rect.min, STILL);
@@ -316,14 +294,11 @@ fn lone_card(ui: &mut egui::Ui, c: &Shown) -> (Option<Action>, Option<ClientId>)
     (action, pointed.then_some(c.sharer))
 }
 
-/// The pixels a still is decoded to: [`STILL`] at `pixels_per_point`, and a
-/// row and column to spare (see [`paint_still`]).
 pub(super) fn still_size(pixels_per_point: f32) -> [usize; 2] {
     let size = (STILL * pixels_per_point).round();
     [size.x as usize + 1, size.y as usize + 1]
 }
 
-/// A still, pixel for pixel, or a faint screen while it comes.
 fn paint_still(p: &egui::Painter, rect: Rect, still: Option<&TextureHandle>) {
     if let Some(still) = still {
         // The CPU renderer copies a textured quad pixel for pixel, rather than
