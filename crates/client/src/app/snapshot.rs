@@ -173,9 +173,11 @@ fn connected(ctx: &egui::Context) -> App {
 
 /// A made-up still of a desktop: a title bar and two panes, on `tint`.
 fn fake_still(ctx: &egui::Context, sharer: u32, tint: [u8; 3]) -> egui::TextureHandle {
-    let [w, h] = crate::preview::SIZE;
+    let [w, h] = shelf::still_size(1.0);
     let shade = move |k: u8| Color32::from_rgb(tint[0] + k, tint[1] + k, tint[2] + k);
+    // Laid out on a 320x180 grid, whatever the still's size.
     let pixel = move |x: usize, y: usize| {
+        let (x, y) = (x * 320 / w, y * 180 / h);
         let (left, right) = ((12..90).contains(&x), (100..308).contains(&x));
         let body = (30..168).contains(&y);
         let text = right && body && (y - 30) % 14 < 5 && x < 130 + (y * 37) % 170;

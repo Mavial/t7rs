@@ -7,9 +7,10 @@ use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use egui::emath::GuiRounding;
 use egui::epaint::RectShape;
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Margin, Rect, Sense, Shape, Stroke, StrokeKind, TextureHandle,
+    Align2, Color32, CornerRadius, FontId, Margin, Mesh, Rect, Sense, Shape, Stroke, StrokeKind, TextureHandle,
     TextureOptions, pos2, vec2,
 };
 use t7_proto::model::ServerView;
@@ -23,12 +24,11 @@ use crate::theme::{self, Btn};
 
 /// Pointing at a card again asks for a new still at most this often.
 const ASK_AGAIN: Duration = Duration::from_secs(2);
-const CARD_W: f32 = 196.0;
+/// A still, 16:9, in points. It is decoded at its size in pixels and drawn
+/// square-cornered, so the CPU renderer copies it rather than filtering it.
+const STILL: egui::Vec2 = vec2(176.0, 99.0);
 const CARD_PAD: f32 = 6.0;
-/// A card's still, 16:9.
-const STILL: egui::Vec2 = vec2(CARD_W - 2.0 * CARD_PAD, (CARD_W - 2.0 * CARD_PAD) * 9.0 / 16.0);
-/// The still beside the one person sharing.
-const LONE_STILL: egui::Vec2 = vec2(160.0, 90.0);
+const CARD_W: f32 = STILL.x + 2.0 * CARD_PAD;
 
 pub(super) struct Shelf {
     /// One per screen shared in your channel, in the order they started.
@@ -119,7 +119,8 @@ impl App {
         if let Some(card) = self.shelf.card(sharer) {
             card.asked = Some(Instant::now());
         }
-        let sink = preview::sink(sharer, self.shelf.still_tx.clone(), ctx.clone());
+        let size = still_size(ctx.pixels_per_point());
+        let sink = preview::sink(sharer, size, self.shelf.still_tx.clone(), ctx.clone());
         self.net.preview(sharer, sink);
     }
 
@@ -279,8 +280,8 @@ fn card(ui: &mut egui::Ui, c: &Shown) -> (Option<Action>, bool) {
 
 /// One sharer: their still, who it is, and Watch, without a header.
 fn lone_card(ui: &mut egui::Ui, c: &Shown) -> (Option<Action>, Option<ClientId>) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), LONE_STILL.y), Sense::hover());
-    let still = Rect::from_min_size(rect.min, LONE_STILL);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), STILL.y), Sense::hover());
+    let still = Rect::from_min_size(rect.min, STILL);
     let pointed = ui.interact(still, ui.scope_id().with(("still", c.sharer)), Sense::hover()).contains_pointer();
     let p = ui.painter();
     paint_still(p, still, c.still);
@@ -315,14 +316,30 @@ fn lone_card(ui: &mut egui::Ui, c: &Shown) -> (Option<Action>, Option<ClientId>)
     (action, pointed.then_some(c.sharer))
 }
 
-/// A still, or a faint screen while it comes.
+/// The pixels a still is decoded to: [`STILL`] at `pixels_per_point`, and a
+/// row and column to spare (see [`paint_still`]).
+pub(super) fn still_size(pixels_per_point: f32) -> [usize; 2] {
+    let size = (STILL * pixels_per_point).round();
+    [size.x as usize + 1, size.y as usize + 1]
+}
+
+/// A still, pixel for pixel, or a faint screen while it comes.
 fn paint_still(p: &egui::Painter, rect: Rect, still: Option<&TextureHandle>) {
-    let radius = CornerRadius::same(5);
     if let Some(still) = still {
-        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        p.add(RectShape::filled(rect, radius, Color32::WHITE).with_texture(still.id(), uv));
+        // The CPU renderer copies a textured quad pixel for pixel, rather than
+        // filtering every pixel, only when the quad stops short of the
+        // texture's last row and column and more triangles follow it in its
+        // mesh: hence the spare row and column, and the empty triangle.
+        let ppp = p.pixels_per_point();
+        let [w, h] = still.size().map(|n| n as f32);
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2((w - 1.0) / w, (h - 1.0) / h));
+        let drawn = Rect::from_min_size(rect.min.round_to_pixels(ppp), vec2(w - 1.0, h - 1.0) / ppp);
+        let mut quad = Mesh::with_texture(still.id());
+        quad.add_rect_with_uv(drawn, uv, Color32::WHITE);
+        quad.add_triangle(0, 0, 0);
+        p.add(quad);
     } else {
-        p.rect(rect, radius, theme::PANEL, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+        p.rect(rect, 0.0, theme::PANEL, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
         let icon = Rect::from_center_size(rect.center(), vec2(22.0, 22.0));
         icons::paint(p, icon, Icon::Screen, theme::BORDER_STRONG);
     }
