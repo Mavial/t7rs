@@ -121,7 +121,12 @@ fn unread_pill(ui: &egui::Ui, unread: u32) -> std::sync::Arc<egui::Galley> {
     ui.painter().layout_no_wrap(text, FontId::proportional(10.5), theme::ON_ACCENT)
 }
 
-fn tab_button(ui: &mut egui::Ui, tab: &Tab, active: bool) -> (egui::Response, bool) {
+struct TabButton {
+    resp: egui::Response,
+    close_clicked: bool,
+}
+
+fn tab_button(ui: &mut egui::Ui, tab: &Tab, active: bool) -> TabButton {
     let width = tab_width(ui, tab, active);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click());
     let hovered = resp.hovered();
@@ -153,7 +158,7 @@ fn tab_button(ui: &mut egui::Ui, tab: &Tab, active: bool) -> (egui::Response, bo
         icons::paint(ui.painter(), close.shrink(2.5), Icon::Cross, color);
         closed = close_resp.on_hover_text("Close").clicked();
     }
-    (resp.on_hover_cursor(egui::CursorIcon::PointingHand), closed)
+    TabButton { resp: resp.on_hover_cursor(egui::CursorIcon::PointingHand), close_clicked: closed }
 }
 
 fn kbd(ui: &mut egui::Ui, key: &str) {
@@ -255,12 +260,12 @@ impl App {
                 let mut tabs = |ui: &mut egui::Ui| {
                     ui.spacing_mut().item_spacing.x = gap;
                     for (i, tab) in self.tabs.iter().enumerate() {
-                        let (resp, closed) = tab_button(ui, tab, i == self.active_tab);
+                        let TabButton { resp, close_clicked } = tab_button(ui, tab, i == self.active_tab);
                         if resp.clicked() {
                             open = Some(i);
                         }
                         if matches!(tab.kind, TabKind::Private(_)) {
-                            if closed || resp.middle_clicked() {
+                            if close_clicked || resp.middle_clicked() {
                                 close = Some(i);
                             }
                             resp.context_menu(|ui| {

@@ -161,15 +161,17 @@ impl App {
         recent.map_or_else(|| address.to_owned(), |r| r.server_name.clone())
     }
 
-    fn presence(&self) -> Option<(egui::Color32, String, String)> {
+    fn presence(&self) -> Option<Presence> {
         match &self.conn {
             Conn::Disconnected => None,
-            Conn::Lost { .. } => Some((theme::TEXT_FAINT, "Offline".to_owned(), "Not connected".to_owned())),
+            Conn::Lost { .. } => {
+                Some(Presence::new(theme::TEXT_FAINT, "Offline".to_owned(), "Not connected".to_owned()))
+            }
             Conn::Connecting(login) => {
-                Some((theme::AMBER, "Connecting".to_owned(), format!("Connecting to {}", login.address)))
+                Some(Presence::new(theme::AMBER, "Connecting".to_owned(), format!("Connecting to {}", login.address)))
             }
             Conn::Connected { .. } if self.voice.blocked() => {
-                Some((theme::AMBER, "no voice".to_owned(), NO_VOICE.to_owned()))
+                Some(Presence::new(theme::AMBER, "no voice".to_owned(), NO_VOICE.to_owned()))
             }
             Conn::Connected { login, .. } => {
                 let ping = match self.voice.rtt().or(self.ping) {
@@ -177,7 +179,7 @@ impl App {
                     Some(p) => format!("{} ms", p.as_millis()),
                     None => String::new(),
                 };
-                Some((theme::GREEN, ping, format!("Connected to {}", login.address)))
+                Some(Presence::new(theme::GREEN, ping, format!("Connected to {}", login.address)))
             }
         }
     }
@@ -189,8 +191,8 @@ impl App {
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 picked = self.server_button(ui);
-                if let Some((color, text, tip)) = self.presence() {
-                    presence_dot(ui, color, &text).on_hover_text(tip);
+                if let Some(Presence { color, label, tooltip }) = self.presence() {
+                    presence_dot(ui, color, &label).on_hover_text(tooltip);
                 }
                 let name = self.server_name();
                 let galley = truncated(ui, &name, FontId::proportional(14.5), theme::TEXT, ui.available_width());
@@ -445,6 +447,18 @@ fn skeleton(ui: &mut egui::Ui) {
     }
 }
 
+struct Presence {
+    color: egui::Color32,
+    label: String,
+    tooltip: String,
+}
+
+impl Presence {
+    fn new(color: egui::Color32, label: String, tooltip: String) -> Self {
+        Self { color, label, tooltip }
+    }
+}
+
 fn presence_dot(ui: &mut egui::Ui, color: egui::Color32, text: &str) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.5), theme::TEXT_FAINT);
     let text_w = if text.is_empty() { 0.0 } else { galley.size().x + 6.0 };
@@ -455,11 +469,17 @@ fn presence_dot(ui: &mut egui::Ui, color: egui::Color32, text: &str) -> egui::Re
     resp
 }
 
+const ADDRESS_SHOWN_IN_MENU: usize = 28;
+
+fn copy_address(address: &str) -> Item<'_> {
+    let copy = Item::new(Icon::Copy, "Copy address");
+    if address.chars().count() <= ADDRESS_SHOWN_IN_MENU { copy.right(address) } else { copy }
+}
+
 fn lost_menu(ui: &mut egui::Ui, address: &str) -> Option<ServerAction> {
     menu_style(ui, 220.0);
     let mut picked = None;
-    let copy = Item::new(Icon::Copy, "Copy address");
-    let copy = if address.chars().count() <= 28 { copy.right(address) } else { copy };
+    let copy = copy_address(address);
     for (item, action) in [
         (Item::new(Icon::ArrowRight, "Reconnect"), ServerAction::Reconnect),
         (copy, ServerAction::CopyAddress),
@@ -502,8 +522,7 @@ fn server_menu(ui: &mut egui::Ui, view: Option<&ServerView>, address: &str) -> O
         }
         menu_separator(ui);
     }
-    let copy = Item::new(Icon::Copy, "Copy address");
-    let copy = if address.chars().count() <= 28 { copy.right(address) } else { copy };
+    let copy = copy_address(address);
     item(ui, copy, ServerAction::CopyAddress);
     let leave = if view.is_some() { "Disconnect" } else { "Cancel" };
     item(ui, Item::new(Icon::Power, leave).danger(), ServerAction::Disconnect);

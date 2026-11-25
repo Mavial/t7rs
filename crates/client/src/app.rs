@@ -88,7 +88,7 @@ pub struct App {
     /// Ask the window manager to flash the taskbar entry.
     attention: bool,
     updater: crate::update::Updater,
-    /// Set by the update icon: the shell closes the window after this frame.
+    /// Set by the Restart button: the shell closes the window after this frame.
     quit: bool,
     sharing: Option<sharing::Sharing>,
     watching: Option<sharing::Watching>,
