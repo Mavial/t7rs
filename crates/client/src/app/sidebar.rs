@@ -4,16 +4,15 @@
 
 use std::time::Duration;
 
-use egui::{
-    Align2, CornerRadius, FontId, Layout, Margin, PopupCloseBehavior, RectAlign, RichText, Sense, Stroke, vec2,
-};
+use egui::{Align2, CornerRadius, FontId, Layout, Margin, PopupCloseBehavior, RectAlign, RichText, Sense, vec2};
 use t7_proto::model::ServerView;
 use t7_proto::perms::{Perm, Scope};
 use t7_proto::{MAX_NICKNAME_LEN, Speech};
 
 use super::chat::LineKind;
 use super::widgets::{
-    Item, menu_button, menu_separator, menu_style, mic_held, paint_avatar, text_input, toggle, truncated,
+    Item, menu_button, menu_separator, menu_style, mic_held, paint_avatar, paint_speaking_ring, text_input, toggle,
+    truncated,
 };
 use super::{App, Conn, Lost, manages};
 use crate::icons::{self, Icon};
@@ -347,7 +346,7 @@ impl App {
             let center = egui::pos2(x + 16.0, rect.center().y);
             paint_avatar(p, center, 16.0, nick);
             if self.voice.shared.transmitting() {
-                p.circle_stroke(center, 18.5, Stroke::new(2.0, theme::GREEN));
+                paint_speaking_ring(p, center, 16.0);
             }
             x += 32.0 + 9.0;
         }

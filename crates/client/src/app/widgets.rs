@@ -16,6 +16,14 @@ pub(super) fn paint_avatar(p: &egui::Painter, center: egui::Pos2, radius: f32, n
     p.text(center, Align2::CENTER_CENTER, initial, FontId::proportional(radius * 1.1), Color32::WHITE);
 }
 
+/// The green ring around a talking avatar. It hugs the avatar with a hairline
+/// gap, so it stays inside the row and clear of the name and the rows around it.
+pub(super) fn paint_speaking_ring(p: &egui::Painter, center: egui::Pos2, avatar_radius: f32) {
+    const GAP: f32 = 1.0;
+    const WIDTH: f32 = 1.5;
+    p.circle_stroke(center, avatar_radius + GAP + WIDTH / 2.0, egui::Stroke::new(WIDTH, theme::GREEN));
+}
+
 pub(super) fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     let (fill, color) =

@@ -9,7 +9,7 @@ use t7_proto::model::ServerView;
 use t7_proto::perms::{Perm, Rank, RoleChange, RoleId, Roles, Scope};
 use t7_proto::{C2S, ChannelId, ChannelInfo, ChannelKind, ClientId, ClientInfo, Identity, MAX_CHANNEL_DEPTH, Speech};
 
-use super::widgets::{Item, Unit, menu_label, menu_separator, menu_style, paint_avatar, slider};
+use super::widgets::{Item, Unit, menu_label, menu_separator, menu_style, paint_avatar, paint_speaking_ring, slider};
 use super::{App, Conn, manages, sharing};
 use crate::channel_drop::{self, DropTarget, Outcome, Zone};
 use crate::icons::{self, Icon};
@@ -716,7 +716,7 @@ impl MemberRow<'_> {
         let center = egui::pos2(ax, rect.center().y);
         paint_avatar(p, center, 10.0, &c.nickname);
         if self.talking {
-            p.circle_stroke(center, 13.0, Stroke::new(2.0, theme::GREEN));
+            paint_speaking_ring(p, center, 10.0);
         }
         let color = if c.status.away { theme::TEXT_FAINT } else { theme::TEXT };
         let name_pos = egui::pos2(ax + 18.0, rect.center().y);
