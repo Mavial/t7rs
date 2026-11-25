@@ -5,7 +5,7 @@ use super::Picture;
 const WEIGHT_BITS: u32 = 8;
 const WEIGHT_ONE: u32 = 1 << WEIGHT_BITS;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Area {
     pub x: usize,
     pub y: usize,
@@ -16,6 +16,12 @@ pub struct Area {
 impl Area {
     pub fn whole(width: usize, height: usize) -> Area {
         Area { x: 0, y: 0, width, height }
+    }
+
+    pub fn clear(self, out: &mut [u32], stride: usize) {
+        for y in self.y..self.y + self.height {
+            out[y * stride + self.x..][..self.width].fill(0);
+        }
     }
 }
 
@@ -37,7 +43,7 @@ impl Scaler {
         };
         let row_at = |i: usize| (area.y + i) * stride + area.x;
         if pw == 0 || ph == 0 || picture.pixels.len() < pw * ph {
-            return (0..area.height).for_each(|i| out[row_at(i)..][..area.width].fill(0));
+            return area.clear(out, stride);
         }
         let (x0, y0, w, h) = fit((pw, ph), (area_w, area_h));
         if self.sizes != (pw, ph, w, h) {

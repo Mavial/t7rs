@@ -166,7 +166,7 @@ async fn main() {
                     bytes += au.data.len();
                     pacer.push(au, Instant::now());
                 }
-                () = async { tokio::time::sleep_until(due.unwrap_or(deadline).into()).await }, if due.is_some() => {
+                () = tokio::time::sleep_until(due.unwrap_or(deadline).into()), if due.is_some() => {
                     pacer.send_due(Instant::now(), |VideoPart { frame, part, parts, key, payload }| {
                         crypto.seal(ToServer::Video { frame, part, parts, key, payload }, &mut out);
                         let _ = udp.try_send(&out);
