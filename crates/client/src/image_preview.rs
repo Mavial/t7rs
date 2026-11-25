@@ -24,7 +24,11 @@ pub fn is_image_name(name: &str) -> bool {
 
 pub fn link(word: &str) -> Option<Uri> {
     let trimmed = word.trim_start_matches(['<', '(', '[']).trim_end_matches(['>', ')', ']', '.', ',', '!', '?']);
-    let url: Uri = trimmed.parse().ok()?;
+    web_url(trimmed)
+}
+
+pub fn web_url(text: &str) -> Option<Uri> {
+    let url: Uri = text.parse().ok()?;
     if !url.scheme_str().is_some_and(|scheme| matches!(scheme, "http" | "https"))
         || url.authority().is_none_or(|a| a.as_str().contains('@'))
     {
@@ -120,11 +124,20 @@ pub fn decode(bytes: &[u8]) -> Result<egui::ColorImage, String> {
     Ok(egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()))
 }
 
-pub fn clipboard_png(image: &egui::ColorImage) -> Result<Vec<u8>, String> {
+pub fn clipboard_thumbnail(image: &egui::ColorImage) -> Result<egui::ColorImage, String> {
     let [width, height] = image.size;
     if width == 0 || height == 0 || width.max(height) > MAX_DIMENSION as usize {
         return Err("Clipboard images can be up to 4096 × 4096 pixels".into());
     }
+    let scale = (144.0 / width as f32).min(80.0 / height as f32).min(1.0);
+    let w = ((width as f32 * scale).round() as usize).max(1);
+    let h = ((height as f32 * scale).round() as usize).max(1);
+    let pixels = (0..h).flat_map(|y| (0..w).map(move |x| image[(x * width / w, y * height / h)])).collect();
+    Ok(egui::ColorImage::new([w, h], pixels))
+}
+
+pub fn clipboard_png(image: &egui::ColorImage) -> Result<Vec<u8>, String> {
+    let [width, height] = image.size;
     let rgba: Vec<_> = image.pixels.iter().flat_map(egui::Color32::to_srgba_unmultiplied).collect();
     let mut bytes = Vec::new();
     PngEncoder::new(&mut bytes)

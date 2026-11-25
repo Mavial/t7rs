@@ -16,8 +16,8 @@ pub const TEXT_DIM: Color32 = Color32::from_rgb(0xa0, 0xa0, 0xa0);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x70, 0x70, 0x70);
 
 pub const ACCENT: Color32 = Color32::from_rgb(0x25, 0x80, 0xc3);
-const ACCENT_HOVER: Color32 = Color32::from_rgb(0x30, 0x8f, 0xd4);
-const ACCENT_PRESSED: Color32 = Color32::from_rgb(0x1e, 0x6f, 0xab);
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x30, 0x8f, 0xd4);
+pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0x1e, 0x6f, 0xab);
 /// Text and icons drawn on an `ACCENT` fill.
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
 pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0x6a, 0xb4, 0xea);

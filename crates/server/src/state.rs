@@ -724,10 +724,12 @@ impl Server {
                 if size > limit {
                     return Err(format!("The file exceeds this server's {limit}-byte per-file limit"));
                 }
-                let caption = caption.trim().to_owned();
-                if caption.chars().count() > MAX_TEXT_LEN || caption.chars().any(char::is_control) {
+                if caption.chars().count() > MAX_TEXT_LEN
+                    || caption.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
+                {
                     return Err("The attachment message is too long or contains control characters".into());
                 }
+                let caption = if caption.trim().is_empty() { String::new() } else { caption };
                 let channel_key = self.channels.file_key(channel).expect("checked").to_owned();
                 let key = Cursor { posted_ms: 0, id: files::new_id().map_err(files::storage_error)? };
                 let attachment = Attachment { key, author, nickname, name, size, caption };
@@ -1466,8 +1468,7 @@ impl Server {
     }
 
     fn text(&mut self, id: ClientId, target: TextTarget, text: String) {
-        let text = text.trim();
-        if text.is_empty() {
+        if text.trim().is_empty() {
             return;
         }
         if text.chars().count() > MAX_TEXT_LEN {
@@ -1481,7 +1482,7 @@ impl Server {
         if !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
             return self.error(id, "you are sending messages too fast");
         }
-        let msg = S2C::Text { from: id, target, channel, text: text.to_owned() };
+        let msg = S2C::Text { from: id, target, channel, text };
         match target {
             TextTarget::Server => self.broadcast(&msg, |c| c.last_sent_locations.contains_key(&id)),
             TextTarget::Channel => self.broadcast(&msg, |c| c.info.channel == channel),

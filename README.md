@@ -55,8 +55,9 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Roles and the ban list | ⋯ next to the server's name → Server settings…, with a Roles tab and a Bans tab |
 | Disconnect, reconnect | ⋯ next to the server's name → Disconnect. If the connection drops or you're kicked, the tree stays dimmed with why, and Reconnect |
 | Private message | Double-click a user, or right-click → Send private message |
-| Share an image | Paste its public HTTP(S) URL into chat, or paste a clipboard image into the channel message field and press **Send**. T7 previews PNG, JPEG, GIF and WebP images up to 8 MiB and 4096 pixels per side. Larger images can still be attached as files |
-| Upload or save a file | In channel chat, choose **+**, select files, optionally enter a caption and press **Send**. Select a posted file and choose **Save file**. Linux uses Zenity for file dialogs |
+| Format a message | Type Markdown or paste formatted text into chat. **Enter** sends and **Shift+Enter** adds a line. Start a line with three backticks and an optional language such as `python` to write a code block. Inside the block, **Enter** adds a line, **Tab** indents, and the **↑** send button or **Ctrl+Enter** (**⌘+Enter** on Mac) sends the draft |
+| Share an image | Paste its public HTTP(S) URL into chat, or paste an image into the channel message field. Check the thumbnail, optionally add a caption, then click the **↑** send button. T7 previews PNG, JPEG, GIF and WebP images up to 8 MiB and 4096 pixels per side. Larger images can still be attached as files |
+| Upload or save a file | In channel chat, choose **+**, select files, optionally enter a caption and click the **↑** send button. Select a posted file and choose **Save file**. Linux uses Zenity for file dialogs |
 | Find a file | **Files** opens the current channel's drawer beside chat. **All files** searches accessible channels by filename, uploader or channel name. Select a file to save it or show its post in chat |
 | Set the upload limit | A server admin with the server-wide **Manage roles** permission can open **Server settings → Files** and set the maximum GB per file. The default is 4 GB (4,000,000,000 bytes) |
 | Close a PM tab | Its ×, a middle-click, or right-click → Close |

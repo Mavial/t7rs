@@ -6,6 +6,7 @@ mod chat;
 mod connect;
 mod events;
 mod files;
+mod markdown;
 mod moderation;
 mod server_settings;
 mod sharing;
@@ -72,6 +73,7 @@ pub struct App {
     tabs: Vec<Tab>,
     active_tab: usize,
     input: String,
+    markdown_cache: egui_commonmark::CommonMarkCache,
     files: files::Files,
     focus_input: bool,
     form: Option<ConnectForm>,
@@ -125,6 +127,7 @@ impl App {
             tabs: base_tabs(),
             active_tab: 0,
             input: String::new(),
+            markdown_cache: egui_commonmark::CommonMarkCache::default(),
             files: files::Files::default(),
             focus_input: false,
             form: None,

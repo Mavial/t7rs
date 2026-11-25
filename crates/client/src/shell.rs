@@ -82,9 +82,13 @@ impl Shell {
         let Some(g) = &mut self.gfx else { return };
         let started = Instant::now();
 
-        let raw = g.input.take_egui_input(&g.window);
+        let mut raw = g.input.take_egui_input(&g.window);
+        self.app.prepare_chat_paste(&self.ctx, &mut raw.events);
         let app = &mut self.app;
-        let out = self.ctx.run_ui(raw, |ui| app.ui(ui));
+        let mut out = self.ctx.run_ui(raw, |ui| app.ui(ui));
+        out.platform_output.commands.retain(|command| {
+            !matches!(command, egui::OutputCommand::OpenUrl(url) if crate::image_preview::web_url(&url.url).is_none())
+        });
         g.input.handle_platform_output(&g.window, out.platform_output);
 
         if self.app.take_attention() && !g.window.has_focus() {
