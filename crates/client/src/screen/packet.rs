@@ -154,10 +154,7 @@ impl Assembler {
         }
         match &self.pending {
             Some(p) if p.frame > part.frame => return None,
-            Some(p) if p.frame < part.frame => {
-                let frame = p.frame;
-                self.abandon(frame);
-            }
+            Some(p) if p.frame < part.frame => self.abandon(),
             _ => {}
         }
         let p = self.pending.get_or_insert_with(|| Pending {
@@ -185,18 +182,15 @@ impl Assembler {
         self.pending.as_ref().map(|p| p.last_part_at + PART_GAP_TIMEOUT)
     }
 
-    pub fn give_up_if_overdue(&mut self, now: Instant) -> bool {
-        if self.deadline().is_none_or(|at| at > now) {
-            return false;
+    pub fn give_up_if_overdue(&mut self, now: Instant) {
+        if self.deadline().is_some_and(|at| at <= now) {
+            self.abandon();
         }
-        let frame = self.pending.as_ref().expect("has a deadline").frame;
-        self.abandon(frame);
-        true
     }
 
-    fn abandon(&mut self, frame: u32) {
-        self.pending = None;
-        self.newest = Some(frame);
+    fn abandon(&mut self) {
+        let p = self.pending.take().expect("a frame to abandon");
+        self.newest = Some(p.frame);
         self.decodable = None;
         self.abandoned += 1;
     }
@@ -339,12 +333,10 @@ mod tests {
         let t1 = t0 + PART_GAP_TIMEOUT * 3 / 4;
         assert_eq!(asm.push(parts[2], t1), None);
         assert_eq!(asm.deadline(), Some(t1 + PART_GAP_TIMEOUT), "from its latest part: it may still be coming in");
-        assert!(!asm.give_up_if_overdue(t0 + PART_GAP_TIMEOUT));
+        asm.give_up_if_overdue(t0 + PART_GAP_TIMEOUT);
         assert!(!asm.waiting_for_keyframe());
-        assert!(
-            asm.give_up_if_overdue(t1 + PART_GAP_TIMEOUT),
-            "the screen went still: no newer frame says it was lost"
-        );
+        asm.give_up_if_overdue(t1 + PART_GAP_TIMEOUT);
+        assert_eq!(asm.abandoned(), 1, "the screen went still: no newer frame says it was lost");
         assert!(asm.waiting_for_keyframe());
         assert_eq!(asm.deadline(), None);
         assert_eq!(asm.push(parts[1], t1 + PART_GAP_TIMEOUT), None, "too late");
