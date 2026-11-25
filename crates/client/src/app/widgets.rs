@@ -213,6 +213,10 @@ pub(super) fn slider(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeI
         ui.spacing_mut().slider_width = width;
         ui.add(egui::Slider::new(value, range.clone()).show_value(false));
     });
+    value_box(ui, value, range, unit);
+}
+
+pub(super) fn value_box(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, unit: Unit) {
     let speed = (range.end() - range.start()) / 200.0;
     let drag = egui::DragValue::new(value).range(range).speed(speed);
     let drag = match unit {
@@ -229,12 +233,70 @@ pub(super) fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).size(11.5).color(theme::TEXT_FAINT));
 }
 
+pub(super) fn row_hint(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal_top(|ui| {
+        ui.add_space(ROW_LABEL_W);
+        ui.vertical(|ui| hint(ui, text));
+    });
+}
+
+pub(super) fn described_switch(ui: &mut egui::Ui, on: &mut bool, label: &str, note: &str) -> egui::Response {
+    let resp = theme::switch(ui, on, label);
+    ui.add_space(-6.0);
+    hint(ui, note);
+    ui.add_space(6.0);
+    resp
+}
+
+pub(super) fn placeholder(text: &str) -> RichText {
+    RichText::new(text).color(theme::TEXT_FAINT)
+}
+
+pub(super) fn field(ui: &mut egui::Ui, label: &str, edit: egui::TextEdit<'_>) -> egui::Response {
+    field_label(ui, label);
+    let resp = ui.add(edit);
+    ui.add_space(8.0);
+    resp
+}
+
+pub(super) fn list_row(ui: &mut egui::Ui, label: &str, note: &str, picked: bool, sense: Sense) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), sense);
+    let p = ui.painter();
+    let fill = if picked {
+        theme::SURFACE_ACTIVE
+    } else if resp.hovered() {
+        theme::SURFACE_HOVER
+    } else {
+        Color32::TRANSPARENT
+    };
+    p.rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
+    let color = if picked || resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+    p.text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(13.5), color);
+    let note_pos = rect.right_center() - vec2(10.0, 0.0);
+    p.text(note_pos, Align2::RIGHT_CENTER, note, FontId::proportional(11.5), theme::TEXT_FAINT);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// A dialog's title, and a line explaining it unless `note` is empty.
 pub(super) fn dialog_header(ui: &mut egui::Ui, title: &str, note: &str) {
     ui.label(RichText::new(title).size(17.0).strong().color(theme::TEXT));
+    dialog_note(ui, note);
+}
+
+pub(super) fn person_header(ui: &mut egui::Ui, name: &str, title: &str, note: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+        paint_avatar(ui.painter(), rect.center(), 14.0, name);
+        ui.label(RichText::new(title).size(17.0).strong().color(theme::TEXT));
+    });
+    dialog_note(ui, note);
+}
+
+fn dialog_note(ui: &mut egui::Ui, note: &str) {
     if !note.is_empty() {
-        ui.add_space(2.0);
-        ui.label(RichText::new(note).size(12.5).color(theme::TEXT_DIM));
+        ui.add_space(4.0);
+        ui.label(RichText::new(note).size(13.0).color(theme::TEXT_DIM));
     }
     ui.add_space(14.0);
 }
@@ -242,7 +304,7 @@ pub(super) fn dialog_header(ui: &mut egui::Ui, title: &str, note: &str) {
 /// The right-aligned button row that ends a dialog: add the main action first.
 pub(super) fn dialog_footer(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(18.0);
-    ui.with_layout(Layout::right_to_left(Align::Center), add);
+    ui.with_layout(Layout::right_to_left(Align::Min), add);
 }
 
 pub(super) fn field_label(ui: &mut egui::Ui, text: &str) {
