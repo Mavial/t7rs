@@ -14,10 +14,13 @@ use crate::settings::Recent;
 use crate::sounds::Sound;
 
 impl App {
-    pub(super) fn poll_network(&mut self) {
+    pub(super) fn poll_network(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.net.rx.try_recv() {
             match ev {
                 NetEvent::Message(s, msg) if s == self.session => self.on_message(msg),
+                NetEvent::File(s, id, update) if s == self.session => {
+                    self.files.transfer_update(id, update, ctx, &self.net);
+                }
                 NetEvent::Ping(s, rtt) if s == self.session => self.ping = Some(rtt),
                 NetEvent::VoicePing(s, rtt) if s == self.session => self.voice.pong(rtt),
                 NetEvent::Secured(s, fingerprint) if s == self.session => {
@@ -50,6 +53,8 @@ impl App {
         let last = self.view.take();
         self.ping = None;
         self.voice.disconnected();
+        self.files = super::files::Files::default();
+        self.tabs[1].lines.retain(|line| !matches!(line.kind, LineKind::File(_)));
         let was_connected = matches!(was, Conn::Connected { .. });
         match (&reason, was_connected) {
             (Some(r), true) if kicked.is_none() => self.push(0, LineKind::Error, format!("Disconnected: {r}")),
@@ -179,6 +184,7 @@ impl App {
                 self.push(tab, LineKind::Error, message);
             }
             S2C::SendKeyframe => self.send_keyframe(),
+            S2C::Files(event) => self.file_event(event),
             S2C::Rejected { .. } | S2C::Pong { .. } => {}
         }
     }
@@ -212,6 +218,10 @@ impl App {
         self.tabs = base_tabs();
         self.active_tab = 1;
         self.sync_channel_tab_title();
+        if let Some(channel) = self.view.as_ref().and_then(ServerView::my_channel) {
+            self.files_joined(channel);
+        }
+        self.net.send(C2S::Files(t7_proto::files::Command::Subscribe));
         self.push(0, LineKind::System, format!("Connected to {name}"));
         self.sound(Sound::Connected);
         if !welcome.is_empty() {
@@ -262,6 +272,7 @@ impl App {
         let is_me = id == view.my_id;
         self.apply(&S2C::ClientMoved { id, channel });
         if is_me {
+            self.files_joined(channel);
             self.sync_channel_tab_title();
             let ch = self.channel_name(channel);
             self.push(1, LineKind::System, format!("You joined {ch}"));

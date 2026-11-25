@@ -24,6 +24,7 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::audio::{Playback, VoiceSink};
+use crate::file_transfer;
 use crate::screen::AccessUnit;
 use crate::screen::packet::{Assembled, Assembler, Pacer, Pushed, VideoPart};
 
@@ -36,6 +37,7 @@ enum Command {
     Send(C2S),
     Voice { seq: u32, payload: Vec<u8> },
     Video { au: AccessUnit, encoded_at: Instant },
+    File(file_transfer::Task),
     Disconnect,
 }
 
@@ -54,6 +56,7 @@ enum Out {
     Control(C2S),
     Voice { seq: u32, payload: Vec<u8> },
     Video { au: AccessUnit, encoded_at: Instant },
+    File(file_transfer::Task),
 }
 
 /// Each connection attempt gets a fresh session id; the UI ignores events
@@ -69,6 +72,7 @@ pub enum NetEvent {
     Secured(SessionId, Fingerprint),
     NeedKeyframe(SessionId),
     Closed(SessionId, Ended),
+    File(SessionId, u64, file_transfer::Update),
 }
 
 /// Why a session ended.
@@ -148,6 +152,10 @@ impl Net {
 
     pub fn send(&self, msg: C2S) {
         let _ = self.tx.send(Command::Send(msg));
+    }
+
+    pub fn transfer(&self, task: file_transfer::Task) {
+        let _ = self.tx.send(Command::File(task));
     }
 
     pub fn disconnect(&self) {
@@ -329,6 +337,7 @@ async fn command_loop(
             Command::Send(msg) => Out::Control(msg),
             Command::Voice { seq, payload } => Out::Voice { seq, payload },
             Command::Video { au, encoded_at } => Out::Video { au, encoded_at },
+            Command::File(task) => Out::File(task),
             Command::Disconnect => {
                 if let Some((tx, _)) = current.take() {
                     let _ = tx.send(Out::Control(C2S::Goodbye));
@@ -475,6 +484,9 @@ async fn session(
     voice_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut voice: Option<VoiceLink> = None;
     let mut pacer = Pacer::default();
+    let mut transfers = tokio::task::JoinSet::new();
+    let mut client = None;
+    let mut file_key = None;
 
     loop {
         let sock = voice.as_ref().map(|v| v.sock.clone());
@@ -499,11 +511,15 @@ async fn session(
                 Some(Ok(S2C::Rejected { reason })) => return Ended::Failed(reason),
                 Some(Ok(msg)) => {
                     if let (S2C::Welcome { your_id, voice_key, .. }, Some(server)) = (&msg, server) {
+                        client = Some(*your_id);
                         match VoiceLink::open(server, *your_id, voice_key).await {
                             Ok(link) => voice = Some(link),
                             Err(e) => tracing::warn!("voice socket: {e}"),
                         }
                         voice_ping.reset_immediately();
+                    }
+                    if let S2C::Files(t7_proto::files::Event::Ready { key, .. }) = &msg {
+                        file_key = Some(*key);
                     }
                     if let S2C::ClientSharing { id: sharer, sharing: false } | S2C::ClientLeft { id: sharer, .. } = &msg {
                         viewer.lock().unwrap().share_ended(*sharer);
@@ -513,6 +529,7 @@ async fn session(
                 Some(Err(FrameError::Io(_))) | None => return Ended::Failed("Connection to the server was lost".into()),
                 Some(Err(e)) => return Ended::Failed(format!("Protocol error: {e}")),
             },
+            _ = transfers.join_next(), if !transfers.is_empty() => {}
             (res, mut buf) = udp_recv => {
                 // Errors here are usually ICMP "unreachable" bounces on Windows; keep listening.
                 if let (Ok(n), Some(v)) = (res, &mut voice) {
@@ -556,6 +573,16 @@ async fn session(
                 }
             }
             out = outgoing.recv() => match out {
+                Some(Out::File(task)) => {
+                    let connection = server.zip(client).zip(file_key).map(|((address, client), key)| {
+                        file_transfer::Connection { address, fingerprint, client, key, identity: attempt.key.clone() }
+                    });
+                    let events = events.clone();
+                    let transfer_id = task.id;
+                    transfers.spawn(file_transfer::run(connection, task, move |update| {
+                        events.emit(NetEvent::File(id, transfer_id, update));
+                    }));
+                }
                 Some(Out::Voice { seq, payload }) => {
                     if let Some(v) = &mut voice {
                         v.send(ToServer::Audio { seq, payload: &payload }).await;

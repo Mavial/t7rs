@@ -13,6 +13,7 @@ pub struct Config {
     /// Empty string = no password.
     pub password: String,
     pub max_clients: u32,
+    pub max_file_size_bytes: u64,
     pub admin_token: Option<serde::de::IgnoredAny>,
     /// Seeds `channels.toml` on first start; after that, that file is used.
     pub channels: Vec<ChannelConfig>,
@@ -23,6 +24,8 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct ChannelConfig {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_key: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub topic: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +62,7 @@ impl Default for Config {
             bind: format!("0.0.0.0:{DEFAULT_PORT}"),
             password: String::new(),
             max_clients: 128,
+            max_file_size_bytes: t7_proto::files::DEFAULT_LIMIT,
             admin_token: None,
             channels: Vec::new(),
         }
@@ -73,6 +77,8 @@ bind = "0.0.0.0:9988"
 # Leave empty for a public server.
 password = ""
 max_clients = 128
+# Starting limit per upload. The owner and server admins can override it in T7.
+max_file_size_bytes = 4000000000
 # On first start the log shows a claim token. In T7, the ⋯ next to the
 # server's name, then Claim ownership, makes whoever enters it first the owner.
 # Roles and who holds them are kept in roles.toml next to this file.

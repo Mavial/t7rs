@@ -29,22 +29,23 @@ pub async fn handle(stream: TcpStream, addr: SocketAddr, acceptor: TlsAcceptor, 
         Err(_) => return tracing::debug!(%addr, "TLS handshake timed out"),
     };
     let exporter = tls::exporter(stream.get_ref().1);
-    let (read, write) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read);
+    let mut reader = BufReader::new(stream);
     let mut scratch = Vec::with_capacity(512);
 
-    let (outbox, rx) = mpsc::channel::<Frame>(OUTBOX_CAPACITY);
-    let mut writer = tokio::spawn(write_loop(write, rx));
-
-    // Handshake: the first frame must be Hello.
     let hello = timeout_at(deadline, read_frame::<_, C2S>(&mut reader, &mut scratch)).await;
     let (protocol, nickname, password, proof) = match hello {
         Ok(Ok(C2S::Hello { protocol, nickname, password, identity })) => (protocol, nickname, password, identity),
+        Ok(Ok(C2S::FileHello { client, key, identity, request })) => {
+            return crate::files::transfer(reader, &core, client, key, identity.verify(&exporter), request).await;
+        }
         Ok(Ok(_)) => return tracing::debug!(%addr, "first message was not Hello"),
         Ok(Err(e)) => return tracing::debug!(%addr, "handshake failed: {e}"),
         Err(_) => return tracing::debug!(%addr, "handshake timed out"),
     };
 
+    let (mut reader, write) = tokio::io::split(reader);
+    let (outbox, rx) = mpsc::channel::<Frame>(OUTBOX_CAPACITY);
+    let mut writer = tokio::spawn(write_loop(write, rx));
     let (reply, id) = oneshot::channel();
     let identity = proof.verify(&exporter);
     let join = Event::Join { addr, protocol, nickname, password, identity, outbox, reply };

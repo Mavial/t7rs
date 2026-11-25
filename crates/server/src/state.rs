@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
+use t7_proto::files::{self as wire_files, Attachment, ChannelFile, Cursor};
 use t7_proto::perms::{Override, Perm, Permissions, Rank, RoleChange, RoleId, Roles, Scope, Standing, Subject};
 use t7_proto::voice::{self, ToClient, ToServer};
 use t7_proto::{
@@ -21,10 +22,11 @@ use t7_proto::{
     validate_nickname,
 };
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use crate::bans::{self, Bans, NewBan, describe_duration};
 use crate::channels::{ChannelError, Channels};
+use crate::files;
 use crate::roles::RoleStore;
 
 /// A complete, ready-to-write frame shared between all recipients.
@@ -58,6 +60,7 @@ pub enum Event {
         from: SocketAddr,
         data: Vec<u8>,
     },
+    File(files::Core),
 }
 
 struct Client {
@@ -79,6 +82,16 @@ struct Client {
     last_sent_permissions: Permissions,
     last_sent_locations: HashMap<ClientId, ChannelId>,
     arrived: Instant,
+    protocol: u16,
+    file_session: Option<FileSession>,
+    file_password: Option<u64>,
+}
+
+struct FileSession {
+    key: wire_files::SessionKey,
+    slots: Arc<Semaphore>,
+    bucket: TokenBucket,
+    access: (Vec<ChannelId>, bool),
 }
 
 impl Client {
@@ -197,6 +210,7 @@ pub struct Server {
     channels: Channels,
     bans: Bans,
     roles: RoleStore,
+    files: files::Store,
     data_dir: Option<PathBuf>,
     clients: HashMap<ClientId, Client>,
     next_id: ClientId,
@@ -209,20 +223,21 @@ pub struct Server {
 
 impl Server {
     pub fn new(
-        info: ServerInfo,
-        password: Option<String>,
+        cfg: &crate::config::Config,
         channels: Channels,
         bans: Bans,
         data_dir: Option<PathBuf>,
         roles: RoleStore,
+        files: files::Store,
         udp: Arc<UdpSocket>,
     ) -> Self {
         Self {
-            info,
-            password,
+            info: ServerInfo { name: cfg.name.clone(), welcome: cfg.welcome.clone(), max_clients: cfg.max_clients },
+            password: cfg.password().map(str::to_owned),
             channels,
             bans,
             roles,
+            files,
             data_dir,
             clients: HashMap::new(),
             next_id: 1,
@@ -249,6 +264,7 @@ impl Server {
             Event::Message { id, msg } => self.message(id, msg),
             Event::Left { id, reason } => self.remove(id, reason),
             Event::Voice { from, mut data } => self.voice(from, &mut data),
+            Event::File(request) => self.file_transfer(request),
         }
     }
 
@@ -401,6 +417,9 @@ impl Server {
                 last_sent_permissions: permissions,
                 last_sent_locations: locations,
                 arrived: Instant::now(),
+                protocol,
+                file_session: None,
+                file_password: None,
             },
         );
         if renamed {
@@ -452,6 +471,9 @@ impl Server {
         }
         match msg {
             C2S::Hello { .. } => self.error(id, "already connected"),
+            C2S::FileHello { .. } => self.error(id, "open a separate connection to transfer a file"),
+            C2S::Files(command) if client.protocol >= wire_files::VERSION => self.file_command(id, command),
+            C2S::Files(_) => self.error(id, "update T7 to use channel files"),
             C2S::JoinChannel { channel, password } => self.join_channel(id, channel, password.as_deref()),
             C2S::SendText { target, text } => self.text(id, target, text),
             C2S::SetStatus(status) => {
@@ -547,6 +569,185 @@ impl Server {
             }
             C2S::Preview { sharer } => self.preview(id, sharer),
         }
+    }
+
+    fn file_command(&mut self, id: ClientId, command: wire_files::Command) {
+        use wire_files::{Command, Event};
+
+        let event = match command {
+            Command::Subscribe => {
+                if self.clients[&id].file_session.is_none() {
+                    let mut key = [0; 32];
+                    if let Err(e) = getrandom::fill(&mut key) {
+                        return self
+                            .send(id, &S2C::Files(Event::Error { request: None, message: files::storage_error(e) }));
+                    }
+                    self.clients.get_mut(&id).expect("connected").file_session = Some(FileSession {
+                        key,
+                        slots: Arc::new(Semaphore::new(3)),
+                        bucket: TokenBucket::new(16.0, 8.0),
+                        access: (Vec::new(), false),
+                    });
+                }
+                let key = self.clients[&id].file_session.as_ref().expect("subscribed").key;
+                self.send(id, &S2C::Files(Event::Ready { limit: self.files.limit(), key }));
+                self.sync_file_access(id, true);
+                return;
+            }
+            Command::List { request, channel, before, query } => {
+                let Some(session) = self.clients.get_mut(&id).and_then(|c| c.file_session.as_mut()) else { return };
+                if !session.bucket.take() || query.len() > wire_files::NAME_BYTES {
+                    Event::Error {
+                        request: Some(request),
+                        message: "Too many file requests or search text is too long".into(),
+                    }
+                } else if channel.is_some_and(|channel| !self.file_access(id, channel, false)) {
+                    Event::Error { request: Some(request), message: files::unavailable() }
+                } else {
+                    let scope = self
+                        .channels
+                        .file_channels()
+                        .filter(|&(_, ch)| channel.is_none_or(|wanted| wanted == ch) && self.file_access(id, ch, false))
+                        .map(|(key, ch)| (key, (ch, self.channels.get(ch).expect("found").name.as_str())))
+                        .collect();
+                    let (files, next) = self.files.page(&scope, before, &query);
+                    Event::Page { request, files, next }
+                }
+            }
+            Command::SetLimit(bytes) => {
+                if !self.may(id, Perm::ManageRoles, Scope::Server) {
+                    Event::Error { request: None, message: "You can't change the upload limit".into() }
+                } else if !(1..=wire_files::MAX_LIMIT).contains(&bytes) {
+                    Event::Error {
+                        request: None,
+                        message: "Enter a positive file size within the supported range".into(),
+                    }
+                } else if let Err(err) = self.files.set_limit(bytes) {
+                    Event::Error { request: None, message: files::storage_error(err) }
+                } else {
+                    self.broadcast(&S2C::Files(Event::Limit(bytes)), |c| c.file_session.is_some());
+                    return;
+                }
+            }
+        };
+        self.send(id, &S2C::Files(event));
+    }
+
+    fn file_access(&self, id: ClientId, channel: ChannelId, posting: bool) -> bool {
+        let Some(c) = self.clients.get(&id) else { return false };
+        let may = |perm| c.last_sent_permissions.may_in(channel, perm);
+        self.channels.get(channel).is_some_and(|info| info.kind == ChannelKind::Voice)
+            && c.last_sent_permissions.sees(channel)
+            && may(Perm::Join)
+            && (may(Perm::Bypass)
+                || self
+                    .channels
+                    .password_revision(channel)
+                    .is_none_or(|revision| c.info.channel == channel && c.file_password == Some(revision)))
+            && (!posting || (c.info.channel == channel && may(Perm::SendMessages)))
+    }
+
+    fn sync_file_access(&mut self, id: ClientId, force: bool) {
+        let Some(client) = self.clients.get(&id).filter(|c| c.file_session.is_some()) else { return };
+        let mut readable: Vec<_> = self
+            .channels
+            .file_channels()
+            .map(|(_, id)| id)
+            .filter(|&channel| self.file_access(id, channel, false))
+            .collect();
+        readable.sort_unstable();
+        let can_post_here = self.file_access(id, client.info.channel, true);
+        let state =
+            &mut self.clients.get_mut(&id).expect("connected").file_session.as_mut().expect("subscribed").access;
+        if force || *state != (readable.clone(), can_post_here) {
+            *state = (readable.clone(), can_post_here);
+            self.send(id, &S2C::Files(wire_files::Event::Access { readable, can_post_here }));
+        }
+    }
+
+    fn file_transfer(&mut self, req: files::Core) {
+        match req {
+            files::Core::Start { client, key, identity, request, reply } => {
+                let _ = reply.send(self.start_file(client, key, identity, request));
+            }
+            files::Core::Check { client, channel, posting, reply } => {
+                let _ = reply.send(self.file_access(client, channel, posting));
+            }
+            files::Core::Publish { client, channel, record, staged, reply } => {
+                let result = if reply.is_closed()
+                    || !self.file_access(client, channel, true)
+                    || self.channels.file_key(channel) != Some(&record.channel_key)
+                {
+                    Err(files::unavailable())
+                } else {
+                    let posted = ChannelFile { channel, attachment: record.attachment.clone() };
+                    self.files.publish(record, staged).map_err(files::storage_error).map(|()| {
+                        self.broadcast(&S2C::Files(wire_files::Event::Posted(posted)), |c| {
+                            c.file_session.as_ref().is_some_and(|s| s.access.0.binary_search(&channel).is_ok())
+                        });
+                    })
+                };
+                let _ = reply.send(result);
+            }
+        }
+    }
+
+    fn start_file(
+        &mut self,
+        id: ClientId,
+        key: wire_files::SessionKey,
+        identity: Option<Identity>,
+        req: wire_files::Request,
+    ) -> Result<files::Job, String> {
+        use wire_files::Request;
+
+        let c = self.clients.get_mut(&id).ok_or_else(files::unavailable)?;
+        let session = c
+            .file_session
+            .as_mut()
+            .filter(|s| s.key == key && Some(c.info.identity) == identity)
+            .ok_or_else(files::unavailable)?;
+        if !session.bucket.take() {
+            return Err("Too many file requests. Try again in a moment".into());
+        }
+        let permit = session.slots.clone().try_acquire_owned().map_err(|_| "Too many active transfers".to_owned())?;
+        let (author, nickname) = (c.info.identity, c.info.nickname.clone());
+        let (channel, operation) = match req {
+            Request::Upload { channel, name, size, caption } => {
+                if !self.file_access(id, channel, true) {
+                    return Err(files::unavailable());
+                }
+                if !wire_files::valid_name(&name) {
+                    return Err("That file name is not supported".into());
+                }
+                let limit = self.files.limit();
+                if size > limit {
+                    return Err(format!("The file exceeds this server's {limit}-byte per-file limit"));
+                }
+                let caption = caption.trim().to_owned();
+                if caption.chars().count() > MAX_TEXT_LEN || caption.chars().any(char::is_control) {
+                    return Err("The attachment message is too long or contains control characters".into());
+                }
+                let channel_key = self.channels.file_key(channel).expect("checked").to_owned();
+                let key = Cursor { posted_ms: 0, id: files::new_id().map_err(files::storage_error)? };
+                let attachment = Attachment { key, author, nickname, name, size, caption };
+                let temporary_channel = self.channels.get(channel).expect("checked").temporary;
+                let record = files::Record { channel_key, temporary_channel, attachment };
+                (channel, files::Operation::Upload { root: self.files.root().to_owned(), record })
+            }
+            Request::Download { id: file } => {
+                let record = self.files.get(file).ok_or_else(files::unavailable)?;
+                let channel = self
+                    .channels
+                    .file_channels()
+                    .find(|(key, _)| *key == record.channel_key)
+                    .map(|(_, ch)| ch)
+                    .filter(|&ch| self.file_access(id, ch, false))
+                    .ok_or_else(files::unavailable)?;
+                (channel, files::Operation::Download { path: self.files.content(file), size: record.attachment.size })
+            }
+        };
+        Ok(files::Job { client: id, channel, operation, permit })
     }
 
     fn set_sharing(&mut self, id: ClientId, sharing: bool) {
@@ -645,7 +846,7 @@ impl Server {
             return self.error(id, "you are moving people too fast");
         }
         tracing::info!(target, by = id, channel, "client moved");
-        if let Err(e) = self.enter_or_create_room(target, channel) {
+        if let Err(e) = self.enter_or_create_room(target, channel, None) {
             self.error(id, &format!("no room for {name} there: {}", e.message()));
         }
     }
@@ -746,16 +947,24 @@ impl Server {
         if kind == ChannelKind::Category {
             return self.error(id, "a category can't be joined; join a channel in it");
         }
-        if self.clients[&id].info.channel == channel {
+        let already_here = self.clients[&id].info.channel == channel;
+        if already_here && self.file_access(id, channel, false) {
             return;
         }
         let may = self.standing(id, Scope::Channel(channel)).perms;
         if !may.has(Perm::View) || !may.has(Perm::Join) {
             return self.error(id, "you can't join this channel");
         }
-        if !may.has(Perm::Bypass) && !self.channels.password_ok(channel, password) {
+        let knows_password = self.channels.password_ok(channel, password);
+        if !may.has(Perm::Bypass) && !knows_password {
             let msg = if password.is_some() { "wrong channel password" } else { "this channel needs a password" };
             return self.error(id, msg);
+        }
+        let grant = self.channels.password_revision(channel).filter(|_| knows_password);
+        if already_here {
+            self.clients.get_mut(&id).expect("connected").file_password = grant;
+            self.sync_file_access(id, false);
+            return;
         }
         if !may.has(Perm::Bypass) && !self.has_room(channel) {
             return self.error(id, "channel is full");
@@ -763,12 +972,17 @@ impl Server {
         if kind == ChannelKind::Lobby && !self.clients.get_mut(&id).expect("exists").text_bucket.take() {
             return self.error(id, "you are opening rooms too fast");
         }
-        if let Err(e) = self.enter_or_create_room(id, channel) {
+        if let Err(e) = self.enter_or_create_room(id, channel, grant) {
             self.error(id, &format!("no room for you there: {}", e.message()));
         }
     }
 
-    fn enter_or_create_room(&mut self, id: ClientId, channel: ChannelId) -> Result<(), ChannelError> {
+    fn enter_or_create_room(
+        &mut self,
+        id: ClientId,
+        channel: ChannelId,
+        grant: Option<u64>,
+    ) -> Result<(), ChannelError> {
         let lobby = self.channels.get(channel).is_some_and(|c| c.kind == ChannelKind::Lobby);
         let channel = if lobby {
             let name = self.channels.room_name(channel, &self.clients[&id].info.nickname);
@@ -780,20 +994,27 @@ impl Server {
         } else {
             channel
         };
-        self.move_to(id, channel);
+        self.move_to_with_password(id, channel, grant);
         self.tidy_rooms();
         Ok(())
     }
 
     fn move_to(&mut self, id: ClientId, channel: ChannelId) {
+        self.move_to_with_password(id, channel, None);
+    }
+
+    fn move_to_with_password(&mut self, id: ClientId, channel: ChannelId, grant: Option<u64>) {
         self.place(id, channel);
+        self.clients.get_mut(&id).expect("connected").file_password = grant;
         self.sync_about(id);
+        self.sync_file_access(id, false);
     }
 
     fn place(&mut self, id: ClientId, channel: ChannelId) {
         self.set_sharing(id, false);
         let client = self.clients.get_mut(&id).expect("exists");
         client.info.channel = channel;
+        client.file_password = None;
         client.arrived = Instant::now();
         client.watching.clear();
         client.previews.clear();
@@ -892,6 +1113,9 @@ impl Server {
         }
         self.send_channel_lists(&lists);
         self.sync_about_evicted_first(&evicted, &ids);
+        for &id in &ids {
+            self.sync_file_access(id, false);
+        }
         if !editors.is_empty() {
             self.broadcast(&S2C::Roles(self.roles.roles().clone()), |c| editors.contains(&c.info.id));
         }
@@ -954,7 +1178,7 @@ impl Server {
                     self.save_channels();
                 }
                 if kind == ChannelKind::Voice && self.clients[&id].last_sent_permissions.may_in(channel, Perm::View) {
-                    self.move_to(id, channel);
+                    self.move_to_with_password(id, channel, self.channels.password_revision(channel));
                 }
                 self.tidy_rooms();
             }
@@ -989,6 +1213,7 @@ impl Server {
             return self.error(id, "you can't delete this channel");
         }
         let permanent = self.channels.get(channel).is_some_and(|c| !c.temporary);
+        let keys = self.channel_file_keys(channel);
         let removed: HashSet<ChannelId> = match self.channels.delete(channel) {
             Ok(removed) => removed.into_iter().collect(),
             Err(e) => return self.error(id, &e.message()),
@@ -1000,8 +1225,8 @@ impl Server {
             self.move_to(client, default);
         }
         self.channels_changed();
-        if permanent {
-            self.save_channels();
+        if !permanent || self.save_channels() {
+            self.files.remove_channels(&keys);
         }
         self.tidy_rooms();
     }
@@ -1170,12 +1395,14 @@ impl Server {
         self.refresh(ChannelListsTo::Everyone, RolesTo::NewEditors);
     }
 
-    fn save_channels(&self) {
+    fn save_channels(&self) -> bool {
         if let Some(path) = self.data_dir.as_ref().map(|d| d.join("channels.toml"))
             && let Err(e) = self.channels.save(&path)
         {
             tracing::error!("cannot save channels to {}: {e}", path.display());
+            return false;
         }
+        true
     }
 
     fn tidy_rooms(&mut self) {
@@ -1190,9 +1417,20 @@ impl Server {
         let occupied: HashSet<ChannelId> = self.clients.values().map(|c| c.info.channel).collect();
         let abandoned = self.channels.abandoned_temporaries(&occupied);
         for &channel in &abandoned {
-            let _ = self.channels.delete(channel);
+            let keys = self.channel_file_keys(channel);
+            if self.channels.delete(channel).is_ok() {
+                self.files.remove_channels(&keys);
+            }
         }
         !abandoned.is_empty()
+    }
+
+    fn channel_file_keys(&self, channel: ChannelId) -> HashSet<String> {
+        self.channels
+            .subtree(channel)
+            .into_iter()
+            .filter_map(|id| self.channels.file_key(id).map(str::to_owned))
+            .collect()
     }
 
     fn hand_rooms_to_new_owners(&mut self) -> bool {
@@ -1367,6 +1605,10 @@ fn encode(msg: &S2C) -> Frame {
 
 pub fn unix_now() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+pub fn unix_ms() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// What a banned client is told when it tries to join.

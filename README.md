@@ -55,6 +55,10 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Roles and the ban list | ⋯ next to the server's name → Server settings…, with a Roles tab and a Bans tab |
 | Disconnect, reconnect | ⋯ next to the server's name → Disconnect. If the connection drops or you're kicked, the tree stays dimmed with why, and Reconnect |
 | Private message | Double-click a user, or right-click → Send private message |
+| Share an image | Paste its public HTTP(S) URL into chat, or paste a clipboard image into the channel message field and press **Send**. T7 previews PNG, JPEG, GIF and WebP images up to 8 MiB and 4096 pixels per side. Larger images can still be attached as files |
+| Upload or save a file | In channel chat, choose **+**, select files, optionally enter a caption and press **Send**. Select a posted file and choose **Save file**. Linux uses Zenity for file dialogs |
+| Find a file | **Files** opens the current channel's drawer beside chat. **All files** searches accessible channels by filename, uploader or channel name. Select a file to save it or show its post in chat |
+| Set the upload limit | A server admin with the server-wide **Manage roles** permission can open **Server settings → Files** and set the maximum GB per file. The default is 4 GB (4,000,000,000 bytes) |
 | Close a PM tab | Its ×, a middle-click, or right-click → Close |
 | Mute mic / sound off | `Ctrl+Shift+M` / `Ctrl+Shift+D`, or the buttons next to your name, bottom-left. Sound off silences the other people, not notification sounds |
 | Away, nickname | Click your name bottom-left, or `Ctrl+Shift+A` for away. A new nickname is used the next time you connect |
@@ -203,6 +207,16 @@ The server keeps more files next to its config:
   `overrides` what it allows and denies each role (role 0 is Everyone), and
   `kind` whether it is a `"category"` or a `"lobby"`. The config's
   `[[channels]]` take the same keys.
+- `files/` holds completed uploads and their metadata. Keep it together with
+  `channels.toml` when backing up or moving a server. Each channel has a
+  generated `file_key` that keeps its uploads attached across renames, moves
+  and restarts. Deleting a channel removes its uploads. Linked images stay
+  on their original host.
+- `max_file_size_bytes` in the server config sets the initial per-file limit.
+  Saving a limit in Server settings writes `file-settings.toml`, which takes
+  precedence on restart. Users can upload where they can post in their current
+  channel, and browse channels they can see and join. A protected channel
+  requires joining with its current password or the Bypass permission.
 - `bans.toml`: the ban list, saved at every ban and unban. Expired bans are
   dropped when the server starts and when someone opens the ban list. To
   lift a ban by hand, stop the server and delete its `[[bans]]` entry.

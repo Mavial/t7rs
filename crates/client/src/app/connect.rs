@@ -150,6 +150,7 @@ impl App {
         let pinned = self.settings.server_certs.get(&ServerKey::of(&address)).copied();
         let login_password = Some(password.clone()).filter(|p| !p.is_empty());
         let key = self.settings.identity_key.get_or_insert_with(settings::new_identity_key).clone();
+        self.files = super::files::Files::default();
         self.session = self.net.connect(address.clone(), nickname, login_password, pinned, key);
         self.conn = Conn::Connecting(Login { address, password });
         self.shelf.folded.clear();

@@ -20,6 +20,8 @@ const MAX_LIMIT: u32 = 1000;
 struct Channel {
     info: ChannelInfo,
     password: Option<String>,
+    password_revision: u64,
+    file_key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,7 @@ pub enum ChannelError {
     KindSettings(ChannelKind),
     DefaultKind(ChannelKind),
     HidesDefault,
+    NoRandomness,
 }
 
 impl ChannelError {
@@ -61,6 +64,7 @@ impl ChannelError {
             ChannelError::HidesDefault => {
                 "everyone must be able to see the default channel and the channels above it".into()
             }
+            ChannelError::NoRandomness => "could not generate a channel key".into(),
         }
     }
 }
@@ -106,6 +110,14 @@ impl Channels {
         default: &mut Option<ChannelId>,
     ) -> Result<(), String> {
         for (order, c) in list.iter().enumerate() {
+            let file_key = match &c.file_key {
+                Some(key) if valid_file_key(key) => key.clone(),
+                Some(_) => return Err(format!("{}: invalid file_key", c.name)),
+                None => crate::files::new_key().map_err(|e| e.to_string())?,
+            };
+            if self.map.values().any(|channel| channel.file_key == file_key) {
+                return Err(format!("{}: duplicate file_key", c.name));
+            }
             let id = self.next_id;
             self.next_id += 1;
             let password = c.password.clone().filter(|p| !p.is_empty());
@@ -138,7 +150,7 @@ impl Channels {
                 kind: c.kind,
                 overrides: Vec::new(),
             };
-            self.map.insert(id, Channel { info, password });
+            self.map.insert(id, Channel { info, password, password_revision: 0, file_key });
             for o in &c.overrides {
                 self.set_override(id, *o).map_err(|e| format!("{}: {}", c.name, e.message()))?;
             }
@@ -153,7 +165,14 @@ impl Channels {
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let file: ChannelsFile = toml::from_str(&text).map_err(std::io::Error::other)?;
-        Self::from_config(&file.channels).map_err(std::io::Error::other)
+        let channels = Self::from_config(&file.channels).map_err(std::io::Error::other)?;
+        fn keys(list: &[ChannelConfig]) -> usize {
+            list.iter().map(|c| usize::from(c.file_key.is_some()) + keys(&c.children)).sum()
+        }
+        if keys(&file.channels) != channels.map.len() {
+            channels.save(path)?;
+        }
+        Ok(channels)
     }
 
     /// Writes the permanent channels.
@@ -176,6 +195,7 @@ impl Channels {
         }
         Some(ChannelConfig {
             name: c.info.name.clone(),
+            file_key: Some(c.file_key.clone()),
             topic: c.info.topic.clone(),
             max_clients: c.info.max_clients,
             password: c.password.clone(),
@@ -193,6 +213,18 @@ impl Channels {
 
     pub fn get(&self, id: ChannelId) -> Option<&ChannelInfo> {
         self.map.get(&id).map(|c| &c.info)
+    }
+
+    pub fn file_key(&self, id: ChannelId) -> Option<&str> {
+        self.map.get(&id).map(|c| c.file_key.as_str())
+    }
+
+    pub fn file_channels(&self) -> impl Iterator<Item = (&str, ChannelId)> {
+        self.map.values().filter(|c| c.info.kind == ChannelKind::Voice).map(|c| (c.file_key.as_str(), c.info.id))
+    }
+
+    pub fn password_revision(&self, id: ChannelId) -> Option<u64> {
+        self.map.get(&id).filter(|c| c.password.is_some()).map(|c| c.password_revision)
     }
 
     /// All channel ids, parents before children, siblings in order.
@@ -261,7 +293,8 @@ impl Channels {
             kind,
             overrides: Vec::new(),
         };
-        self.map.insert(id, Channel { info, password });
+        let file_key = crate::files::new_key().map_err(|_| ChannelError::NoRandomness)?;
+        self.map.insert(id, Channel { info, password, password_revision: 0, file_key });
         Ok(id)
     }
 
@@ -276,10 +309,14 @@ impl Channels {
         c.info.name = name;
         c.info.topic = topic;
         c.info.max_clients = limit;
-        match &settings.password {
-            PasswordChange::Keep => {}
-            PasswordChange::Remove => c.password = None,
-            PasswordChange::Set(p) => c.password = Some(p.clone()).filter(|p| !p.is_empty()),
+        let password = match &settings.password {
+            PasswordChange::Keep => c.password.clone(),
+            PasswordChange::Remove => None,
+            PasswordChange::Set(p) => Some(p.clone()).filter(|p| !p.is_empty()),
+        };
+        if password != c.password {
+            c.password_revision += 1;
+            c.password = password;
         }
         c.info.has_password = c.password.is_some();
         Ok(())
@@ -528,6 +565,10 @@ impl Channels {
     }
 }
 
+fn valid_file_key(key: &str) -> bool {
+    key.len() == 32 && key.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+}
+
 fn singular(kind: ChannelKind) -> &'static str {
     match kind {
         ChannelKind::Voice => "voice channel",
@@ -590,7 +631,11 @@ mod tests {
         assert_eq!(names(&ch), ["Lobby", "Gaming", "Squad"]);
         assert_eq!(ch.get(ch.default_id()).unwrap().name, "Gaming");
         assert!(ch.get(1).unwrap().has_password);
+        list[0].file_key = ch.file_key(1).map(str::to_owned);
+        list[1].file_key = ch.file_key(2).map(str::to_owned);
+        list[1].children[0].file_key = ch.file_key(3).map(str::to_owned);
         assert_eq!(ch.to_config(), list);
+        assert_eq!(Channels::from_config(&list).unwrap().to_config(), list);
         assert_eq!(names(&Channels::from_config(&[]).unwrap()), ["Lobby"]);
     }
 

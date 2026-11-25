@@ -5,6 +5,7 @@ mod channel_dialog;
 mod chat;
 mod connect;
 mod events;
+mod files;
 mod moderation;
 mod server_settings;
 mod sharing;
@@ -71,6 +72,7 @@ pub struct App {
     tabs: Vec<Tab>,
     active_tab: usize,
     input: String,
+    files: files::Files,
     focus_input: bool,
     form: Option<ConnectForm>,
     /// Shown on the empty state / connect dialog after a failed attempt.
@@ -123,6 +125,7 @@ impl App {
             tabs: base_tabs(),
             active_tab: 0,
             input: String::new(),
+            files: files::Files::default(),
             focus_input: false,
             form: None,
             last_error: None,
@@ -274,9 +277,10 @@ fn manages(view: &ServerView, scope: Scope) -> bool {
 /// What the window shell needs from the app.
 impl App {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        self.poll_network();
-        self.sync_screens();
         let ctx = ui.ctx().clone();
+        self.poll_network(&ctx);
+        self.sync_screens();
+        self.poll_file_workers(&ctx);
         self.sync_shelf(&ctx);
         self.drive_audio(&ctx);
         self.shortcuts(&ctx);
@@ -289,6 +293,7 @@ impl App {
         self.server_settings_dialog(&ctx);
         self.poke_card(&ctx);
         self.channel_dialog(&ctx);
+        self.file_detail(&ctx);
         self.cert_change_dialog(&ctx);
     }
 

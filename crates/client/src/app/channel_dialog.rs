@@ -310,7 +310,9 @@ impl App {
     pub(super) fn join_channel(&mut self, channel: ChannelId) {
         let Some(view) = &self.view else { return };
         let Some(ch) = view.channels.get(&channel) else { return };
-        if view.my_channel() == Some(channel) {
+        if view.my_channel() == Some(channel)
+            && !(ch.has_password && self.files.limit.is_some() && !self.files.reads(channel))
+        {
             return;
         }
         if ch.has_password && !view.may_in(channel, Perm::Bypass) {

@@ -5,16 +5,18 @@
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke, vec2};
+use t7_proto::files::ChannelFile;
 use t7_proto::model::ServerView;
 use t7_proto::{C2S, ChannelKind, ClientId, TextTarget};
 
+use super::files::Files;
 use super::sidebar::HEADER_H;
 use super::widgets::{paint_avatar, truncated};
 use super::{App, Conn};
 use crate::icons::{self, Icon};
-use crate::theme;
+use crate::theme::{self, Btn};
 
-const MAX_LINES: usize = 1000;
+pub(super) const MAX_LINES: usize = 1000;
 const GROUP_GAP: TimeDelta = TimeDelta::minutes(5);
 const TEXT_X: f32 = 44.0;
 
@@ -22,6 +24,7 @@ pub(super) enum LineKind {
     System,
     Error,
     Msg { from: ClientId, name: String },
+    File(ChannelFile),
 }
 
 pub(super) struct Line {
@@ -29,11 +32,17 @@ pub(super) struct Line {
     pub(super) time: String,
     pub(super) kind: LineKind,
     pub(super) text: String,
+    link: Option<ureq::http::Uri>,
 }
 
 impl Line {
     pub(super) fn new(at: NaiveDateTime, kind: LineKind, text: String) -> Self {
-        Self { at, time: at.format("%H:%M").to_string(), kind, text }
+        let link = if matches!(kind, LineKind::Msg { .. }) {
+            text.split_whitespace().find_map(crate::image_preview::link)
+        } else {
+            None
+        };
+        Self { at, time: at.format("%H:%M").to_string(), kind, text, link }
     }
 }
 
@@ -72,6 +81,7 @@ pub(super) enum Entry<'a> {
     Day(NaiveDate),
     Said { name: &'a str, lines: &'a [Line] },
     Note(&'a Line),
+    File(&'a ChannelFile, &'a str),
 }
 
 pub(super) fn entries(lines: &[Line]) -> impl Iterator<Item = Entry<'_>> {
@@ -86,12 +96,16 @@ pub(super) fn entries(lines: &[Line]) -> impl Iterator<Item = Entry<'_>> {
         }
         let LineKind::Msg { from, name } = &line.kind else {
             i += 1;
-            return Some(Entry::Note(line));
+            return Some(match &line.kind {
+                LineKind::File(file) => Entry::File(file, &line.time),
+                _ => Entry::Note(line),
+            });
         };
         let start = i;
         i += 1;
         while let Some(next) = lines.get(i)
             && matches!(&next.kind, LineKind::Msg { from: f, .. } if f == from)
+            && lines[i - 1].link.is_none()
             && next.at.date() == date
             && next.at - lines[i - 1].at < GROUP_GAP
         {
@@ -183,7 +197,16 @@ impl App {
 
     fn send_chat(&mut self) {
         let text = self.input.trim().to_owned();
-        if text.is_empty() || !matches!(self.conn, Conn::Connected { .. }) {
+        if !matches!(self.conn, Conn::Connected { .. }) {
+            return;
+        }
+        if self.tabs[self.active_tab].kind == TabKind::Channel && self.files.has_staged() {
+            if self.files.queue_uploads(&text, &self.net) {
+                self.input.clear();
+            }
+            return;
+        }
+        if text.is_empty() {
             return;
         }
         let target = match self.tabs[self.active_tab].kind {
@@ -198,9 +221,7 @@ impl App {
     pub(super) fn push(&mut self, tab: usize, kind: LineKind, text: impl Into<String>) {
         let t = &mut self.tabs[tab];
         t.lines.push(Line::new(chrono::Local::now().naive_local(), kind, text.into()));
-        if t.lines.len() > MAX_LINES {
-            t.lines.drain(..t.lines.len() - MAX_LINES);
-        }
+        trim_lines(&mut t.lines);
         if tab != self.active_tab {
             t.unread += 1;
         }
@@ -237,8 +258,22 @@ impl App {
                 return;
             }
             self.pane_header(ui);
+            self.files.transfer_rows(ui);
+            if self.files.library_open
+                && let Some(view) = &self.view
+            {
+                self.files.library(ui, view, &self.net);
+                return;
+            }
             self.shelf(ui);
             self.tabs[self.active_tab].unread = 0;
+            if self.tabs[self.active_tab].kind == TabKind::Channel
+                && self.files.drawer_open
+                && let Some(view) = &self.view
+                && let Some(channel) = self.files.drawer(ui, view, &self.net)
+            {
+                self.join_channel(channel);
+            }
             self.composer(ui);
             self.chat_log(ui);
         });
@@ -248,14 +283,34 @@ impl App {
         let (mut open, mut close) = (None, None);
         let frame = egui::Frame::new().inner_margin(Margin { left: 20, right: 12, top: 0, bottom: 0 });
         egui::Panel::top("pane-header").frame(frame).exact_size(HEADER_H).show(ui, |ui| {
+            if self.files.library_open {
+                ui.horizontal_centered(|ui| {
+                    ui.label(RichText::new("All files").size(17.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(Btn::secondary("Back to chat").small()).clicked() {
+                            self.files.library_open = false;
+                        }
+                    });
+                });
+                return;
+            }
             let gap = 2.0;
             let tabs_w: f32 =
                 self.tabs.iter().enumerate().map(|(i, t)| tab_width(ui, t, i == self.active_tab) + gap).sum();
             let full = ui.available_width();
-            let tabs_room = tabs_w.min((full - 140.0).max(0.0));
+            let file_controls = self.files.limit.is_some();
+            let channel_tab = self.tabs[self.active_tab].kind == TabKind::Channel;
+            let tools_room = if !file_controls {
+                0.0
+            } else if channel_tab {
+                128.0
+            } else {
+                75.0
+            };
+            let tabs_room = tabs_w.min((full - tools_room - 125.0).max(0.0));
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                let (title, _) = ui.allocate_exact_size(vec2(full - tabs_room, 28.0), Sense::hover());
+                let (title, _) = ui.allocate_exact_size(vec2(full - tabs_room - tools_room, 28.0), Sense::hover());
                 self.paint_title(ui, title.with_max_x(title.right() - 16.0));
                 let mut tabs = |ui: &mut egui::Ui| {
                     ui.spacing_mut().item_spacing.x = gap;
@@ -284,6 +339,16 @@ impl App {
                     });
                 } else {
                     tabs(ui);
+                }
+                if file_controls {
+                    ui.add_space(7.0);
+                    if channel_tab && ui.add(Btn::secondary("Files").small()).clicked() {
+                        self.files.drawer_open = !self.files.drawer_open;
+                    }
+                    ui.add_space(5.0);
+                    if ui.add(Btn::ghost("All files").small()).clicked() {
+                        self.files.open_library(&self.net);
+                    }
                 }
             });
         });
@@ -328,6 +393,7 @@ impl App {
 
     fn composer(&mut self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.active_tab];
+        let files = tab.kind == TabKind::Channel && self.files.limit.is_some();
         let hint = match tab.kind {
             TabKind::Server => "Message everyone on the server".to_owned(),
             TabKind::Channel => format!("Message #{}", tab.title),
@@ -350,6 +416,9 @@ impl App {
                 );
                 return;
             }
+            if files {
+                self.files.staged_rows(ui);
+            }
             let field = egui::Frame::new()
                 .fill(theme::SURFACE)
                 .corner_radius(CornerRadius::same(8))
@@ -357,7 +426,38 @@ impl App {
                 .inner_margin(Margin { left: 12, right: 10, top: 3, bottom: 3 });
             field.show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    if files {
+                        if ui
+                            .add_enabled(self.files.can_post(), Btn::ghost("+").small())
+                            .on_hover_text(self.files.limit.map_or_else(
+                                || "Attach files or paste an image".into(),
+                                |limit| {
+                                    format!(
+                                        "Attach files or paste an image · {} per file",
+                                        super::files::size_label(limit)
+                                    )
+                                },
+                            ))
+                            .clicked()
+                        {
+                            self.files.pick(ui.ctx());
+                        }
+                        let id = egui::Id::unique("chat-composer");
+                        if self.files.can_post()
+                            && ui.memory(|m| m.has_focus(id))
+                            && let Some(image) = ui.input_mut(|i| {
+                                let at = i.events.iter().position(|ev| matches!(ev, egui::Event::PasteImage(_)))?;
+                                match i.events.remove(at) {
+                                    egui::Event::PasteImage(image) => Some(image),
+                                    _ => None,
+                                }
+                            })
+                        {
+                            self.files.paste(ui.ctx(), image);
+                        }
+                    }
                     let edit = egui::TextEdit::singleline(&mut self.input)
+                        .id(egui::Id::unique("chat-composer"))
                         .hint_text(RichText::new(hint).color(theme::TEXT_FAINT))
                         .frame(egui::Frame::NONE)
                         .desired_width(ui.available_width() - 52.0)
@@ -373,13 +473,22 @@ impl App {
                     if std::mem::take(&mut self.focus_input) {
                         resp.request_focus();
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| kbd(ui, "Enter"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.files.has_staged() && files {
+                            if ui.add(Btn::primary("Send").small()).clicked() {
+                                self.send_chat();
+                                self.focus_input = true;
+                            }
+                        } else {
+                            kbd(ui, "Enter");
+                        }
+                    });
                 });
             });
         });
     }
 
-    fn chat_log(&self, ui: &mut egui::Ui) {
+    fn chat_log(&mut self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.active_tab];
         let spoken = tab.lines.iter().any(|l| !matches!(l.kind, LineKind::System));
         if !spoken && tab.kind != TabKind::Server {
@@ -403,12 +512,21 @@ impl App {
                 for entry in entries(&tab.lines) {
                     match entry {
                         Entry::Day(day) => day_separator(ui, &day_label(day, today)),
-                        Entry::Said { name, lines } => said(ui, name, lines),
+                        Entry::Said { name, lines } => {
+                            said(ui, name, lines, &mut self.files);
+                        }
                         Entry::Note(line) => note(ui, line),
+                        Entry::File(file, time) => self.files.chat_post(ui, file, time, &self.net),
                     }
                 }
             });
         });
+    }
+}
+
+pub(super) fn trim_lines(lines: &mut Vec<Line>) {
+    if lines.len() > MAX_LINES {
+        lines.drain(..lines.len() - MAX_LINES);
     }
 }
 
@@ -434,7 +552,7 @@ fn day_separator(ui: &mut egui::Ui, label: &str) {
     p.hline(text.right() + 10.0..=rect.right(), rect.center().y, stroke);
 }
 
-fn said(ui: &mut egui::Ui, name: &str, lines: &[Line]) {
+fn said(ui: &mut egui::Ui, name: &str, lines: &[Line], files: &mut Files) {
     let width = ui.available_width();
     let text_w = width - TEXT_X;
     let color = theme::avatar_color(name);
@@ -445,22 +563,25 @@ fn said(ui: &mut egui::Ui, name: &str, lines: &[Line]) {
         lines.iter().map(|l| p.layout(l.text.clone(), FontId::proportional(14.0), theme::TEXT, text_w)).collect();
     let height = header.size().y + 2.0 + texts.iter().map(|g| g.size().y + 2.0).sum::<f32>();
     let (rect, _) = ui.allocate_exact_size(vec2(width, height + 12.0), Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return;
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let top = rect.top() + 6.0;
+        paint_avatar(p, egui::pos2(rect.left() + 16.0, top + 16.0), 16.0, name);
+        let x = rect.left() + TEXT_X;
+        let header_h = header.size().y;
+        let time_pos = egui::pos2(x + header.size().x + 8.0, top + header_h - time.size().y - 1.0);
+        p.galley(egui::pos2(x, top), header, color);
+        p.galley(time_pos, time, theme::TEXT_FAINT);
+        let mut y = top + header_h + 2.0;
+        for text in texts {
+            let h = text.size().y;
+            p.galley(egui::pos2(x, y), text, theme::TEXT);
+            y += h + 2.0;
+        }
     }
-    let p = ui.painter();
-    let top = rect.top() + 6.0;
-    paint_avatar(p, egui::pos2(rect.left() + 16.0, top + 16.0), 16.0, name);
-    let x = rect.left() + TEXT_X;
-    let header_h = header.size().y;
-    let time_pos = egui::pos2(x + header.size().x + 8.0, top + header_h - time.size().y - 1.0);
-    p.galley(egui::pos2(x, top), header, color);
-    p.galley(time_pos, time, theme::TEXT_FAINT);
-    let mut y = top + header_h + 2.0;
-    for text in texts {
-        let h = text.size().y;
-        p.galley(egui::pos2(x, y), text, theme::TEXT);
-        y += h + 2.0;
+    if let Some(url) = lines.last().and_then(|line| line.link.as_ref()) {
+        ui.indent(ui.next_auto_id(), |ui| files.linked_image(ui, url));
+        ui.add_space(5.0);
     }
 }
 
@@ -506,6 +627,7 @@ mod tests {
                 Entry::Day(_) => ("day", 0),
                 Entry::Said { lines, .. } => ("said", lines.len()),
                 Entry::Note(_) => ("note", 1),
+                Entry::File(_, _) => ("file", 1),
             })
             .collect()
     }

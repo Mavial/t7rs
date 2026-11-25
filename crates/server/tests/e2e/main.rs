@@ -2,6 +2,7 @@
 
 mod basics;
 mod channels;
+mod files;
 mod harness;
 mod moderation;
 mod ownership;

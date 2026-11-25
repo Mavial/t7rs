@@ -12,6 +12,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod files;
 pub mod identity;
 pub mod model;
 pub mod perms;
@@ -21,7 +22,7 @@ pub mod voice;
 
 /// This build's protocol. New messages are only ever appended to the enums
 /// below, so older clients keep working for everything they know about.
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 /// Oldest client protocol a server still accepts.
 pub const MIN_PROTOCOL_VERSION: u16 = 7;
 /// Default port of a T7 server (TCP for control, UDP for voice).
@@ -328,6 +329,14 @@ pub enum C2S {
     Preview {
         sharer: ClientId,
     },
+    Files(files::Command),
+    /// First frame on a separate connection for one transfer (protocol 10).
+    FileHello {
+        client: ClientId,
+        key: files::SessionKey,
+        identity: IdentityProof,
+        request: files::Request,
+    },
 }
 
 /// Server → client.
@@ -422,6 +431,7 @@ pub enum S2C {
     /// To a sharer: make the next frame a keyframe, because someone started
     /// watching or lost frames.
     SendKeyframe,
+    Files(files::Event),
 }
 
 #[derive(Debug)]

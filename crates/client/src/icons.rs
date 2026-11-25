@@ -40,6 +40,7 @@ pub enum Icon {
     Pencil,
     Trash,
     Chat,
+    File,
     Bell,
     Kick,
     Ban,
@@ -230,6 +231,10 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line((4.0, 6.5), (20.0, 6.5));
             pen.poly(&[(9.5, 6.5), (9.5, 3.5), (14.5, 3.5), (14.5, 6.5)], false);
             pen.poly(&[(6.0, 6.5), (7.0, 20.5), (17.0, 20.5), (18.0, 6.5)], false);
+        }
+        Icon::File => {
+            pen.poly(&[(5.0, 2.0), (14.0, 2.0), (19.0, 7.0), (19.0, 22.0), (5.0, 22.0)], true);
+            pen.poly(&[(14.0, 2.0), (14.0, 7.0), (19.0, 7.0)], false);
         }
         Icon::Chat => pen
             .poly(&[(3.5, 5.0), (20.5, 5.0), (20.5, 16.0), (11.0, 16.0), (6.5, 20.0), (6.5, 16.0), (3.5, 16.0)], true),

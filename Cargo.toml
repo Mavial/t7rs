@@ -11,7 +11,7 @@ license = "MIT"
 t7-proto = { path = "crates/proto" }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Self-signed server certificates, on ring like the rest of the TLS stack.

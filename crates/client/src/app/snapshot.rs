@@ -616,7 +616,7 @@ struct Canvas {
 }
 
 impl Canvas {
-    fn new((w, h): (u32, u32), make: fn(&egui::Context) -> App, scale: f32) -> Self {
+    fn new((w, h): (u32, u32), make: impl FnOnce(&egui::Context) -> App, scale: f32) -> Self {
         let ctx = egui::Context::default();
         let app = make(&ctx);
         let renderer = EguiSoftwareRender::new(ColorFieldOrder::Rgba).with_caching(false);
@@ -633,8 +633,13 @@ impl Canvas {
     }
 
     fn draw(&mut self, raw: egui::RawInput) {
+        self.draw_observing(raw, |_| {});
+    }
+
+    fn draw_observing(&mut self, raw: egui::RawInput, inspect: impl FnOnce(&[egui::epaint::ClippedShape])) {
         let app = &mut self.app;
         let out = self.ctx.run_ui(raw, |ui| app.ui(ui));
+        inspect(&out.shapes);
         let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
         let mut target = BufferMutRef::new(&mut self.px, self.size.0 as usize, self.size.1 as usize);
         let mut delta = out.textures_delta;
@@ -665,8 +670,12 @@ fn render(
         }
         canvas.draw(raw);
     }
-    let (w, h) = size;
-    let px = canvas.px;
+    save_canvas(&canvas, dir, name);
+}
+
+fn save_canvas(canvas: &Canvas, dir: &std::path::Path, name: &str) {
+    let (w, h) = canvas.size;
+    let px = &canvas.px;
     let file = std::fs::File::create(dir.join(format!("{name}.png"))).expect("create png");
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
     enc.set_color(png::ColorType::Rgba);
@@ -722,4 +731,127 @@ fn frame_time() {
         at(0.1),
         at(0.9)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "drives two native clients and a local server through clipboard sharing"]
+async fn clipboard_to_chat_and_files() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let path = root.path().to_owned();
+    let server = tokio::spawn(async move {
+        t7_server::serve(listener, &t7_server::config::Config::default(), Some(&path)).await.unwrap();
+    });
+    let client = |nick: &str, size| {
+        Canvas::new(
+            size,
+            |ctx| {
+                let mut settings = Settings::default();
+                settings.status.muted = true;
+                settings.status.deafened = true;
+                let launch = Launch { nickname: Some(nick.into()), address: address.clone() };
+                App::new(ctx, settings, Some(launch), Arc::new(|| {}))
+            },
+            1.0,
+        )
+    };
+    let mut sender = client("Mira", (1100, 720));
+    let mut viewer = client("Jules", (760, 480));
+    let mut frame = 0;
+    fn tick(canvas: &mut Canvas, frame: &mut usize, event: Option<egui::Event>) {
+        let mut raw = canvas.input(*frame);
+        *frame += 1;
+        raw.events.extend(event);
+        canvas.draw(raw);
+    }
+    fn click(canvas: &mut Canvas, frame: &mut usize, text: &str) {
+        let mut pos = None;
+        canvas.draw_observing(canvas.input(*frame), |shapes| {
+            for shape in shapes {
+                if let egui::Shape::Text(t) = &shape.shape
+                    && t.galley.text() == text
+                {
+                    pos = Some(t.pos + t.galley.size() / 2.0);
+                }
+            }
+        });
+        let pos = pos.unwrap_or_else(|| panic!("missing visible control: {text}"));
+        tick(canvas, frame, Some(egui::Event::PointerMoved(pos)));
+        for pressed in [true, false] {
+            tick(
+                canvas,
+                frame,
+                Some(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                }),
+            );
+        }
+    }
+    async fn until(canvas: &mut Canvas, frame: &mut usize, condition: impl Fn(&Canvas) -> bool) {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !condition(canvas) {
+                tick(canvas, frame, None);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("client did not reach the expected state");
+    }
+    until(&mut viewer, &mut frame, |c| c.app.files.can_post()).await;
+    until(&mut sender, &mut frame, |c| c.app.files.can_post()).await;
+    sender.app.focus_input = true;
+    tick(&mut sender, &mut frame, None);
+    let green = Color32::from_rgb(21, 215, 93);
+    let image = ColorImage::filled([640, 240], green);
+    tick(&mut sender, &mut frame, Some(egui::Event::PasteImage(Arc::new(image))));
+    until(&mut sender, &mut frame, |c| c.app.files.has_staged()).await;
+    click(&mut sender, &mut frame, "Send");
+    until(&mut viewer, &mut frame, |c| c.px.iter().filter(|p| p[..3] == [21, 215, 93]).count() > 1000).await;
+    click(&mut viewer, &mut frame, "Files");
+    assert!(viewer.app.files.drawer_open);
+    tick(&mut viewer, &mut frame, None);
+    let dir = std::env::var_os("T7_SNAPSHOT_DIR").map(PathBuf::from);
+    if let Some(dir) = &dir {
+        std::fs::create_dir_all(dir).unwrap();
+        save_canvas(&viewer, dir, "files-small");
+    }
+    click(&mut viewer, &mut frame, "View all files");
+    assert!(viewer.app.files.library_open);
+    until(&mut viewer, &mut frame, |c| c.app.tabs[1].lines.iter().any(|l| matches!(l.kind, LineKind::File(_)))).await;
+    for _ in 0..8 {
+        tick(&mut viewer, &mut frame, None);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    if let Some(dir) = &dir {
+        save_canvas(&viewer, dir, "files-library");
+    }
+    click(&mut viewer, &mut frame, "Clipboard image.png");
+    tick(&mut viewer, &mut frame, None);
+    click(&mut viewer, &mut frame, "Show in chat");
+    assert!(!viewer.app.files.library_open);
+    if let Ok(url) = std::env::var("T7_TEST_IMAGE_URL") {
+        sender.app.focus_input = true;
+        tick(&mut sender, &mut frame, None);
+        tick(&mut sender, &mut frame, Some(egui::Event::Paste(url.clone())));
+        for pressed in [true, false] {
+            tick(
+                &mut sender,
+                &mut frame,
+                Some(egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                }),
+            );
+        }
+        let uri = url.parse().expect("image URL");
+        until(&mut viewer, &mut frame, |c| c.app.files.linked_preview_ready(&uri)).await;
+    }
+    server.abort();
 }

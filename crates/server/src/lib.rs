@@ -4,6 +4,7 @@ mod bans;
 mod channels;
 pub mod config;
 mod conn;
+mod files;
 mod roles;
 mod state;
 
@@ -11,7 +12,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use t7_proto::{ServerInfo, tls};
+use t7_proto::tls;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 
@@ -48,6 +49,8 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
         _ => Bans::default(),
     };
     let roles = load_or_init_roles(cfg, data_dir)?;
+    let file_store =
+        files::Store::open(data_dir, cfg.max_file_size_bytes, channels.file_channels().map(|(key, _)| key).collect())?;
     let (cert, key) = tls_certificate(data_dir)?;
     tracing::info!("TLS certificate fingerprint (SHA-256): {}", tls::Fingerprint::of(&cert));
     let acceptor = tls::acceptor(cert, key).map_err(|e| {
@@ -56,16 +59,7 @@ pub async fn serve(listener: TcpListener, cfg: &Config, data_dir: Option<&Path>)
         ))
     })?;
 
-    let info = ServerInfo { name: cfg.name.clone(), welcome: cfg.welcome.clone(), max_clients: cfg.max_clients };
-    let server = Server::new(
-        info,
-        cfg.password().map(str::to_owned),
-        channels,
-        bans,
-        data_dir.map(Path::to_owned),
-        roles,
-        udp.clone(),
-    );
+    let server = Server::new(cfg, channels, bans, data_dir.map(Path::to_owned), roles, file_store, udp.clone());
 
     let (core_tx, core_rx) = mpsc::channel(4096);
     tokio::spawn(server.run(core_rx));

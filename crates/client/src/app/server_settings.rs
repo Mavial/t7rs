@@ -21,12 +21,15 @@ pub(super) struct ServerSettings {
     pub(super) picked: Pick,
     name_draft: String,
     adding_role: Option<String>,
+    limit_draft: String,
+    limit_known: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SettingsTab {
     Roles,
     Bans,
+    Files,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -313,8 +316,15 @@ impl App {
             self.net.send(C2S::ListBans);
         }
         let picked = Pick::Role(RoleId::MODERATOR);
-        self.server_settings =
-            Some(ServerSettings { tab, bans: None, picked, name_draft: String::new(), adding_role: None });
+        self.server_settings = Some(ServerSettings {
+            tab,
+            bans: None,
+            picked,
+            name_draft: String::new(),
+            adding_role: None,
+            limit_draft: String::new(),
+            limit_known: None,
+        });
     }
 
     pub(super) fn server_settings_dialog(&mut self, ctx: &egui::Context) {
@@ -322,12 +332,15 @@ impl App {
             self.server_settings = None;
             return;
         };
-        let tabs: Vec<(SettingsTab, &str)> =
-            [(SettingsTab::Roles, "Roles", Perm::ManageRoles), (SettingsTab::Bans, "Bans", Perm::Ban)]
-                .into_iter()
-                .filter(|(_, _, perm)| view.may(*perm))
-                .map(|(tab, label, _)| (tab, label))
-                .collect();
+        let tabs: Vec<(SettingsTab, &str)> = [
+            (SettingsTab::Roles, "Roles", Perm::ManageRoles),
+            (SettingsTab::Bans, "Bans", Perm::Ban),
+            (SettingsTab::Files, "Files", Perm::ManageRoles),
+        ]
+        .into_iter()
+        .filter(|(tab, _, perm)| view.may(*perm) && (*tab != SettingsTab::Files || self.files.limit.is_some()))
+        .map(|(tab, label, _)| (tab, label))
+        .collect();
         let Some(&(first, _)) = tabs.first() else {
             self.server_settings = None;
             return;
@@ -359,6 +372,11 @@ impl App {
                         ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
                     }
                     (SettingsTab::Bans, _) => bans_tab(ui, settings.bans.as_deref(), &mut send),
+                    (SettingsTab::Files, _) => {
+                        if let Some(limit) = self.files.limit {
+                            file_settings(ui, settings, limit, &mut self.files.limit_error, &mut send);
+                        }
+                    }
                 }
             });
             ui.add_space(18.0);
@@ -372,5 +390,43 @@ impl App {
         if done || modal.should_close() {
             self.server_settings = None;
         }
+    }
+}
+
+fn file_settings(
+    ui: &mut egui::Ui,
+    settings: &mut ServerSettings,
+    limit: u64,
+    error: &mut Option<String>,
+    send: &mut Vec<C2S>,
+) {
+    use super::files::{limit_from_gb, limit_in_gb};
+    if settings.limit_known != Some(limit) {
+        settings.limit_known = Some(limit);
+        settings.limit_draft = limit_in_gb(limit);
+    }
+    section(ui, "File uploads");
+    ui.add_space(5.0);
+    ui.label("Maximum size per file");
+    ui.horizontal(|ui| {
+        let edit = text_input(&mut settings.limit_draft).desired_width(120.0).char_limit(21);
+        if ui.add(edit).changed() {
+            *error = None;
+        }
+        ui.label("GB");
+        let bytes = limit_from_gb(&settings.limit_draft);
+        if ui.add_enabled(bytes.is_some_and(|bytes| bytes != limit), Btn::primary("Save limit")).clicked()
+            && let Some(bytes) = bytes
+        {
+            *error = None;
+            send.push(C2S::Files(t7_proto::files::Command::SetLimit(bytes)));
+        }
+        if bytes.is_none() && !settings.limit_draft.is_empty() {
+            ui.label(RichText::new("Enter a positive size in GB").color(theme::RED));
+        }
+    });
+    hint(ui, "Applies to new uploads in every channel.");
+    if let Some(error) = error {
+        ui.label(RichText::new(error.as_str()).color(theme::RED));
     }
 }
