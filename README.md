@@ -287,9 +287,10 @@ crates/
   the screen that has a new picture, so the main window doesn't repaint for
   video. For the shelf's stills, a client asks the server for a preview: the
   server asks the sharer for a keyframe and forwards that one keyframe to
-  whoever asked, up to 8 asks at once and one more per second after that. The
-  client decodes it once to a 320×180 still on a thread of its own, then drops
-  the decoder. Stills come when you join a channel, when someone starts
+  whoever asked, up to 8 asks at once and one more per second after that; in
+  testing that keyframe was 10 to 41 KB at 1080p. The client decodes it once
+  on a thread of its own, scaled to the pixels the shelf draws it at, then
+  drops the decoder. Stills come when you join a channel, when someone starts
   sharing, and when you point at one, never on a timer.
 - **Sound cleanup** (`crates/client/src/dsp.rs`), on the microphone, 10 ms at a time:
   high-pass filter and WebRTC AEC3 echo cancellation (pure-Rust `sonora`), then
