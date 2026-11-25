@@ -136,6 +136,7 @@ pub struct Assembler {
     pending: Option<Pending>,
     newest: Option<u32>,
     decodable: Option<u32>,
+    abandoned: u32,
 }
 
 struct Pending {
@@ -151,18 +152,14 @@ impl Assembler {
         if self.newest.is_some_and(|n| part.frame <= n) {
             return None;
         }
-        let mut lost = false;
         match &self.pending {
             Some(p) if p.frame > part.frame => return None,
             Some(p) if p.frame < part.frame => {
-                self.newest = Some(p.frame);
-                self.decodable = None;
-                self.pending = None;
-                lost = true;
+                let frame = p.frame;
+                self.abandon(frame);
             }
             _ => {}
         }
-        let lost = lost.then_some(Assembled::NeedKeyframe);
         let p = self.pending.get_or_insert_with(|| Pending {
             frame: part.frame,
             last_part_at: now,
@@ -171,14 +168,14 @@ impl Assembler {
             missing: usize::from(part.parts),
         });
         if p.key != part.key || p.parts.len() != usize::from(part.parts) {
-            return lost;
+            return None;
         }
-        let Some(slot @ None) = p.parts.get_mut(usize::from(part.part)) else { return lost };
+        let Some(slot @ None) = p.parts.get_mut(usize::from(part.part)) else { return None };
         *slot = Some(part.payload.to_vec());
         p.last_part_at = now;
         p.missing -= 1;
         if p.missing > 0 {
-            return lost;
+            return None;
         }
         let p = self.pending.take().expect("just completed");
         Some(self.finish(p))
@@ -192,10 +189,20 @@ impl Assembler {
         if self.deadline().is_none_or(|at| at > now) {
             return false;
         }
-        let p = self.pending.take().expect("has a deadline");
-        self.newest = Some(p.frame);
-        self.decodable = None;
+        let frame = self.pending.as_ref().expect("has a deadline").frame;
+        self.abandon(frame);
         true
+    }
+
+    fn abandon(&mut self, frame: u32) {
+        self.pending = None;
+        self.newest = Some(frame);
+        self.decodable = None;
+        self.abandoned += 1;
+    }
+
+    pub fn abandoned(&self) -> u32 {
+        self.abandoned
     }
 
     pub fn wait_for_keyframe(&mut self) {
@@ -268,13 +275,24 @@ mod tests {
         assert_eq!(whole(&mut asm, &key), [Assembled::Frame(key)]);
         assert_eq!(deliver(&mut asm, &next, &[0, 2]), []);
         let after = au(2, false, MAX_VIDEO_PAYLOAD + 1);
-        let lost_then_undecodable = [Assembled::NeedKeyframe, Assembled::NeedKeyframe];
-        assert_eq!(whole(&mut asm, &after), lost_then_undecodable);
+        assert_eq!(whole(&mut asm, &after), [Assembled::NeedKeyframe]);
+        assert_eq!(asm.abandoned(), 1);
         assert_eq!(deliver(&mut asm, &next, &[1]), [], "too late");
         assert_eq!(whole(&mut asm, &au(3, false, 10)), [Assembled::NeedKeyframe]);
         let (key, next) = (au(4, true, 10), au(5, false, 10));
         assert_eq!(whole(&mut asm, &key), [Assembled::Frame(key)]);
         assert_eq!(whole(&mut asm, &next), [Assembled::Frame(next)]);
+    }
+
+    #[test]
+    fn a_keyframe_in_one_part_still_counts_the_frame_it_replaced() {
+        let mut asm = Assembler::default();
+        let (key, next) = (au(0, true, 10), au(1, false, 3 * MAX_VIDEO_PAYLOAD));
+        assert_eq!(whole(&mut asm, &key), [Assembled::Frame(key)]);
+        assert_eq!(deliver(&mut asm, &next, &[0]), []);
+        let key = au(2, true, 10);
+        assert_eq!(whole(&mut asm, &key), [Assembled::Frame(key)]);
+        assert_eq!(asm.abandoned(), 1);
     }
 
     #[test]

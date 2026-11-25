@@ -211,7 +211,6 @@ struct Watched {
 struct Seen {
     shown: u32,
     undecodable: u32,
-    expired: u32,
     keyframes_asked: u32,
 }
 
@@ -228,8 +227,9 @@ impl Watched {
 
 impl Drop for Watched {
     fn drop(&mut self) {
-        let Seen { shown, undecodable, expired, keyframes_asked } = self.seen;
-        tracing::info!(shown, undecodable, expired, keyframes_asked, "stopped watching a screen");
+        let Seen { shown, undecodable, keyframes_asked } = self.seen;
+        let abandoned = self.assembler.abandoned();
+        tracing::info!(shown, undecodable, abandoned, keyframes_asked, "stopped watching a screen");
     }
 }
 
@@ -262,9 +262,7 @@ impl Viewer {
 
     fn give_up_on_overdue_frames(&mut self, now: Instant) {
         for w in self.watched.values_mut() {
-            if w.assembler.give_up_if_overdue(now) {
-                w.seen.expired += 1;
-            }
+            w.assembler.give_up_if_overdue(now);
         }
     }
 
