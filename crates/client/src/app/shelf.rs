@@ -89,7 +89,7 @@ impl App {
     }
 
     fn ask_unasked(&mut self, ctx: &egui::Context) {
-        if self.shelf_folded() {
+        if self.view.as_ref().and_then(ServerView::my_channel).is_some_and(|c| self.shelf.folded.contains(&c)) {
             return;
         }
         let unasked: Vec<ClientId> = self.shelf.cards.iter().filter(|c| c.asked.is_none()).map(|c| c.sharer).collect();
@@ -99,16 +99,10 @@ impl App {
     }
 
     fn ask_still(&mut self, sharer: ClientId, ctx: &egui::Context) {
-        if let Some(card) = self.shelf.card(sharer) {
-            card.asked = Some(Instant::now());
-        }
+        self.shelf.card(sharer).expect("a card for each sharer asked").asked = Some(Instant::now());
         let size = still_size(ctx.pixels_per_point());
         let sink = preview::spawn_decode(sharer, size, self.shelf.still_tx.clone(), ctx.clone());
         self.net.preview(sharer, sink);
-    }
-
-    fn shelf_folded(&self) -> bool {
-        self.view.as_ref().and_then(ServerView::my_channel).is_some_and(|c| self.shelf.folded.contains(&c))
     }
 
     pub(super) fn shelf(&mut self, ui: &mut egui::Ui) {
@@ -150,13 +144,12 @@ impl App {
                 }
             })
             .inner;
-        let ctx = ui.ctx().clone();
         if pointed != self.shelf.pointed {
             self.shelf.pointed = pointed;
             if let Some(sharer) = pointed
                 && self.shelf.card(sharer).is_some_and(|c| c.asked.is_none_or(|at| at.elapsed() >= ASK_AGAIN))
             {
-                self.ask_still(sharer, &ctx);
+                self.ask_still(sharer, ui.ctx());
             }
         }
         match action {
@@ -167,7 +160,7 @@ impl App {
             }
             Some(Action::Fold(false)) => {
                 self.shelf.folded.remove(&channel);
-                self.ask_unasked(&ctx);
+                self.ask_unasked(ui.ctx());
             }
             None => {}
         }
@@ -192,9 +185,13 @@ fn one_line(ui: &mut egui::Ui, line: &str, icon: Icon, fold: &str) -> bool {
     let x = sharing::live_badge(p, pos2(rect.left(), y), false).right() + 8.0;
     let text = truncated(ui, line, FontId::proportional(12.5), theme::TEXT_DIM, rect.right() - x - 80.0);
     p.galley(pos2(x, y - text.size().y / 2.0), text, theme::TEXT_DIM);
-    let slot = Rect::from_min_max(pos2(rect.right() - 80.0, rect.top()), rect.right_bottom());
+    fold_at(ui, rect, icon, fold)
+}
+
+fn fold_at(ui: &mut egui::Ui, row: Rect, icon: Icon, text: &str) -> bool {
+    let slot = Rect::from_min_max(pos2(row.right() - 80.0, row.top()), pos2(row.right(), row.top() + 24.0));
     let resp = ui.put(slot, |ui: &mut egui::Ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| fold_button(ui, icon, fold)).inner
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| fold_button(ui, icon, text)).inner
     });
     resp.clicked()
 }
@@ -281,15 +278,7 @@ fn lone_card(ui: &mut egui::Ui, c: &Shown) -> (Option<Action>, Option<ClientId>)
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| ui.add(button)).inner
         })
         .clicked();
-    let fold = Rect::from_min_max(pos2(rect.right() - 80.0, rect.top()), pos2(rect.right(), rect.top() + 24.0));
-    let folded = ui
-        .put(fold, |ui: &mut egui::Ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                fold_button(ui, Icon::ChevronDown, "Hide")
-            })
-            .inner
-        })
-        .clicked();
+    let folded = fold_at(ui, rect, Icon::ChevronDown, "Hide");
     let action = if folded { Some(Action::Fold(true)) } else { clicked.then_some(picked) };
     (action, pointed.then_some(c.sharer))
 }

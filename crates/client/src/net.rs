@@ -6,6 +6,7 @@
 //! link to the same server address.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::net::SocketAddr;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
@@ -206,11 +207,10 @@ impl Viewer {
         {
             w.assembler.wait_for_keyframe();
         }
-        if let Some(asked) = self.previews.get_mut(&from)
-            && let Some(Assembled::Frame(au)) = asked.assembler.push(part)
-            && let Some(asked) = self.previews.remove(&from)
+        if let Entry::Occupied(mut asked) = self.previews.entry(from)
+            && let Some(Assembled::Frame(au)) = asked.get_mut().assembler.push(part)
         {
-            (asked.sink)(au);
+            (asked.remove().sink)(au);
         }
     }
 

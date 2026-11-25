@@ -87,19 +87,20 @@ impl Client {
     fn takes_preview(&mut self, sharer: ClientId, frame: u32, key: bool) -> bool {
         let Some(preview) = self.previews.get_mut(&sharer) else { return false };
         match *preview {
-            Preview::Asked if key => *preview = Preview::Sending { frame },
-            Preview::Sending { frame: sending } if sending == frame => {}
+            Preview::Asked if key => {
+                *preview = Preview::Sending { frame };
+                true
+            }
+            Preview::Sending { frame: sending } if sending == frame => true,
             Preview::Sending { frame: sending } if sending < frame => {
                 self.previews.remove(&sharer);
-                return false;
+                false
             }
-            Preview::Asked | Preview::Sending { .. } => return false,
+            Preview::Asked | Preview::Sending { .. } => false,
         }
-        true
     }
 }
 
-#[derive(Clone, Copy)]
 enum Preview {
     Asked,
     Sending { frame: u32 },

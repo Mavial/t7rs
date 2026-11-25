@@ -16,8 +16,7 @@ pub fn spawn_decode(sharer: ClientId, size: [usize; 2], stills: Sender<Still>, c
             let started = Instant::now();
             match still(&au, size) {
                 Ok(image) => {
-                    let (bytes, took) = (au.data.len(), started.elapsed());
-                    tracing::debug!(sharer, bytes, ?took, "screen preview");
+                    tracing::debug!(sharer, bytes = au.data.len(), took = ?started.elapsed(), "screen preview");
                     if stills.send((sharer, image)).is_ok() {
                         ctx.request_repaint();
                     }
