@@ -402,15 +402,8 @@ const SCENES: &[Scene] = &[
         app
     }),
     ("27-voice-settings-cant-speak", (1100, 720), |ctx| {
-        let mut app = connected(ctx);
+        let mut app = settings_on(ctx, SettingsPage::Voice);
         app.apply(&S2C::ClientSpeech { id: 1, speech: Speech::NotHere });
-        app.settings_dialog = Some(SettingsDialog {
-            page: SettingsPage::Voice,
-            packs: Vec::new(),
-            inputs: vec!["Microphone (USB)".into()],
-            outputs: vec!["Headphones".into()],
-            binding: false,
-        });
         app
     }),
     ("28-server-muted", (1100, 720), |ctx| {

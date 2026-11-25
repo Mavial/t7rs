@@ -5,9 +5,8 @@ use t7_proto::{C2S, ChannelId, ClientId, MAX_REASON_LEN};
 
 use super::chat::LineKind;
 use super::sidebar::HEADER_H;
-use super::widgets::described_switch;
 use super::widgets::{
-    dialog_footer, field, icon_button, paint_avatar, person_header, placeholder, section, text_input,
+    described_switch, dialog_footer, field, icon_button, paint_avatar, person_header, placeholder, section, text_input,
 };
 use super::{App, Lost, default_channel_name};
 use crate::icons::Icon;
@@ -285,12 +284,10 @@ impl App {
     }
 
     pub(super) fn poke_card(&mut self, ctx: &egui::Context) {
-        let Some(newest) = self.pokes.back() else { return };
+        let pokes = &*self.pokes.make_contiguous();
+        let Some(newest) = pokes.last() else { return };
         let online = self.view.as_ref().is_some_and(|v| v.clients.contains_key(&newest.from));
-        let reply_to = online.then_some(newest.from);
         let join = self.view.as_ref().and_then(|v| channel_to_join(v, newest.from));
-        let avatar = newest.name.clone();
-        let pokes = self.pokes.make_contiguous();
         let title = card_title(pokes);
         let several = pokes.len() > 1;
         let mut action = None;
@@ -310,7 +307,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
                         let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-                        paint_avatar(ui.painter(), rect.center(), 14.0, &avatar);
+                        paint_avatar(ui.painter(), rect.center(), 14.0, &newest.name);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
                             ui.set_width(ui.available_width() - 40.0);
@@ -320,7 +317,7 @@ impl App {
                             job.append(&title.newest_poker, 0.0, fmt(theme::TEXT));
                             job.append(&title.rest, 0.0, fmt(theme::TEXT_DIM));
                             ui.label(job);
-                            ui.label(RichText::new(&pokes[pokes.len() - 1].time).size(11.5).color(theme::TEXT_FAINT));
+                            ui.label(RichText::new(&newest.time).size(11.5).color(theme::TEXT_FAINT));
                         });
                         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                             if icon_button(ui, Icon::Cross, "Dismiss").clicked() {
@@ -336,10 +333,9 @@ impl App {
                     let older = pokes.len().saturating_sub(POKES_SHOWN);
                     if older > 0 {
                         ui.add_space(4.0);
-                        let text = if older == 1 { "and 1 earlier".to_owned() } else { format!("and {older} earlier") };
-                        ui.label(RichText::new(text).size(11.5).color(theme::TEXT_FAINT));
+                        ui.label(RichText::new(format!("and {older} earlier")).size(11.5).color(theme::TEXT_FAINT));
                     }
-                    if reply_to.is_some() {
+                    if online {
                         ui.add_space(10.0);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if let Some((channel, name)) = &join
@@ -347,10 +343,8 @@ impl App {
                             {
                                 action = Some(CardAction::Join(*channel));
                             }
-                            if let Some(id) = reply_to
-                                && ui.add(Btn::secondary("Reply").small()).clicked()
-                            {
-                                action = Some(CardAction::Reply(id));
+                            if ui.add(Btn::secondary("Reply").small()).clicked() {
+                                action = Some(CardAction::Reply(newest.from));
                             }
                         });
                     }
