@@ -357,6 +357,12 @@ impl<'a> Tree<'a> {
         }
     }
 
+    fn entry_keeping_menu_open(&mut self, ui: &mut egui::Ui, item: Item, action: TreeAction) {
+        if ui.add(item).clicked() {
+            self.picked = Some(action);
+        }
+    }
+
     fn channel_menu(&mut self, ui: &mut egui::Ui, row: &ChannelRow) {
         menu_style(ui, 220.0);
         let ch = row.ch;
@@ -382,9 +388,7 @@ impl<'a> Tree<'a> {
         }
         if row.may_rearrange {
             for (icon, label, delta) in [(Icon::ArrowUp, "Move up", -1), (Icon::ArrowDown, "Move down", 1)] {
-                if ui.add(Item::new(icon, label)).clicked() {
-                    self.picked = Some(TreeAction::Shift(ch.id, delta));
-                }
+                self.entry_keeping_menu_open(ui, Item::new(icon, label), TreeAction::Shift(ch.id, delta));
             }
         }
         if row.may_make_default {
