@@ -71,10 +71,8 @@ struct Client {
     voice_bucket: TokenBucket,
     watching: BTreeSet<ClientId>,
     video_bucket: TokenBucket,
-    /// The frame being dropped for going over the video rate limit.
-    video_dropping: Option<u32>,
-    /// Frames dropped for that during this share.
-    video_over_limit: u32,
+    over_limit_frame: Option<u32>,
+    frames_over_limit: u32,
     keyframe_asked: Option<Instant>,
     previews: BTreeMap<ClientId, Preview>,
     preview_bucket: TokenBucket,
@@ -88,13 +86,24 @@ impl Client {
         Subject { client: self.info.id, identity: self.info.identity }
     }
 
-    /// Logs what the share lost to the rate limit, now that it has ended.
     fn share_ended(&mut self) {
-        let frames = std::mem::take(&mut self.video_over_limit);
+        let frames = std::mem::take(&mut self.frames_over_limit);
         if frames > 0 {
             tracing::info!(id = self.info.id, frames, "screen share went over the video rate limit");
         }
-        self.video_dropping = None;
+        self.over_limit_frame = None;
+    }
+
+    fn over_video_limit(&mut self, frame: u32, bytes: usize) -> bool {
+        if self.over_limit_frame == Some(frame) {
+            return true;
+        }
+        if self.video_bucket.take_n(bytes as f32) {
+            return false;
+        }
+        self.over_limit_frame = Some(frame);
+        self.frames_over_limit += 1;
+        true
     }
 
     fn takes_preview(&mut self, sharer: ClientId, frame: u32, key: bool) -> bool {
@@ -277,12 +286,7 @@ impl Server {
                 if !sender.info.sharing || sender.info.speech != Speech::Allowed {
                     return;
                 }
-                // Once one part is over the limit, the rest of its frame is of no use to viewers.
-                if sender.video_dropping == Some(frame) || !sender.video_bucket.take_n(payload.len() as f32) {
-                    if sender.video_dropping != Some(frame) {
-                        sender.video_dropping = Some(frame);
-                        sender.video_over_limit += 1;
-                    }
+                if sender.over_video_limit(frame, payload.len()) {
                     return;
                 }
                 let channel = sender.info.channel;
@@ -389,8 +393,8 @@ impl Server {
                 voice_bucket: TokenBucket::voice(),
                 watching: BTreeSet::new(),
                 video_bucket: TokenBucket::video(),
-                video_dropping: None,
-                video_over_limit: 0,
+                over_limit_frame: None,
+                frames_over_limit: 0,
                 keyframe_asked: None,
                 previews: BTreeMap::new(),
                 preview_bucket: TokenBucket::preview(),

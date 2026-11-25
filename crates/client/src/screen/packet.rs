@@ -7,14 +7,8 @@ use super::AccessUnit;
 
 pub const FRAME_PACE: Duration = Duration::from_millis(16);
 const MAX_BURST: usize = 32;
-/// A frame this old when it reaches the pacer was held up on the way: sending
-/// it would only put the picture further behind.
 pub const STALE_AFTER: Duration = Duration::from_millis(100);
-/// How long after its latest part a frame still missing parts is lost: a
-/// screen that goes still sends no newer frame to show it was. Counted from
-/// the latest part, not the first, so a keyframe still trickling in over a
-/// slow link isn't given up on.
-pub const INCOMPLETE_AFTER: Duration = Duration::from_millis(100);
+pub const PART_GAP_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoPart<'a> {
@@ -39,8 +33,7 @@ pub fn packetize(au: &AccessUnit) -> impl Iterator<Item = VideoPart<'_>> {
 
 /// Spreads each access unit's parts evenly over [`FRAME_PACE`] from when it
 /// arrives, so a keyframe doesn't leave in one burst. A newer access unit
-/// makes the rest of the older ones due at once, and a keyframe drops the
-/// older ones not started yet.
+/// makes the rest of the older ones due at once.
 #[derive(Default)]
 pub struct Pacer {
     queue: VecDeque<Sending>,
@@ -50,10 +43,8 @@ pub struct Pacer {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Pushed {
     Queued,
-    /// Not sent: too large to number, or older than [`STALE_AFTER`]. The
-    /// frames after it are skipped until a keyframe: ask the encoder for one.
-    Dropped,
-    /// Skipped while waiting for that keyframe.
+    TooLarge,
+    Stale,
     Skipped,
 }
 
@@ -65,17 +56,19 @@ struct Sending {
 }
 
 impl Pacer {
-    /// Queues `au`, encoded at `made`. Keyframes are never too old: they are
-    /// what the frames after them need.
-    pub fn push(&mut self, au: AccessUnit, made: Instant, now: Instant) -> Pushed {
-        let stale = !au.key && now.saturating_duration_since(made) > STALE_AFTER;
-        if au.data.len() > MAX_ACCESS_UNIT || (stale && !self.skipping) {
+    pub fn push(&mut self, au: AccessUnit, encoded_at: Instant, now: Instant) -> Pushed {
+        if au.data.len() > MAX_ACCESS_UNIT {
             self.skipping = true;
-            return Pushed::Dropped;
+            return Pushed::TooLarge;
+        }
+        let stale = !au.key && now.saturating_duration_since(encoded_at) > STALE_AFTER;
+        if stale && !self.skipping {
+            self.skipping = true;
+            return Pushed::Stale;
         }
         if au.key {
             self.skipping = false;
-            self.queue.retain(|s| s.sent > 0);
+            self.drop_unstarted();
         } else if self.skipping {
             return Pushed::Skipped;
         }
@@ -84,6 +77,10 @@ impl Pacer {
             self.queue.push_back(Sending { au, parts, sent: 0, since: now });
         }
         Pushed::Queued
+    }
+
+    fn drop_unstarted(&mut self) {
+        self.queue.retain(|s| s.sent > 0);
     }
 
     pub fn next_at(&self) -> Option<Instant> {
@@ -143,7 +140,7 @@ pub struct Assembler {
 
 struct Pending {
     frame: u32,
-    latest: Instant,
+    last_part_at: Instant,
     key: bool,
     parts: Vec<Option<Vec<u8>>>,
     missing: usize,
@@ -168,7 +165,7 @@ impl Assembler {
         let lost = lost.then_some(Assembled::NeedKeyframe);
         let p = self.pending.get_or_insert_with(|| Pending {
             frame: part.frame,
-            latest: now,
+            last_part_at: now,
             key: part.key,
             parts: vec![None; usize::from(part.parts)],
             missing: usize::from(part.parts),
@@ -178,7 +175,7 @@ impl Assembler {
         }
         let Some(slot @ None) = p.parts.get_mut(usize::from(part.part)) else { return lost };
         *slot = Some(part.payload.to_vec());
-        p.latest = now;
+        p.last_part_at = now;
         p.missing -= 1;
         if p.missing > 0 {
             return lost;
@@ -187,14 +184,11 @@ impl Assembler {
         Some(self.finish(p))
     }
 
-    /// When the frame still missing parts is given up on.
     pub fn deadline(&self) -> Option<Instant> {
-        self.pending.as_ref().map(|p| p.latest + INCOMPLETE_AFTER)
+        self.pending.as_ref().map(|p| p.last_part_at + PART_GAP_TIMEOUT)
     }
 
-    /// Gives up on the frame still missing parts if its deadline has passed,
-    /// so the screen waits for a keyframe. Says whether it did.
-    pub fn expire(&mut self, now: Instant) -> bool {
+    pub fn give_up_if_overdue(&mut self, now: Instant) -> bool {
         if self.deadline().is_none_or(|at| at > now) {
             return false;
         }
@@ -324,15 +318,18 @@ mod tests {
         assert_eq!(whole(&mut asm, &key), [Assembled::Frame(key)]);
         let parts: Vec<VideoPart<'_>> = packetize(&next).collect();
         assert_eq!(asm.push(parts[0], t0), None);
-        let t1 = t0 + INCOMPLETE_AFTER * 3 / 4;
+        let t1 = t0 + PART_GAP_TIMEOUT * 3 / 4;
         assert_eq!(asm.push(parts[2], t1), None);
-        assert_eq!(asm.deadline(), Some(t1 + INCOMPLETE_AFTER), "from its latest part: it may still be coming in");
-        assert!(!asm.expire(t0 + INCOMPLETE_AFTER));
+        assert_eq!(asm.deadline(), Some(t1 + PART_GAP_TIMEOUT), "from its latest part: it may still be coming in");
+        assert!(!asm.give_up_if_overdue(t0 + PART_GAP_TIMEOUT));
         assert!(!asm.waiting_for_keyframe());
-        assert!(asm.expire(t1 + INCOMPLETE_AFTER), "the screen went still: no newer frame says it was lost");
+        assert!(
+            asm.give_up_if_overdue(t1 + PART_GAP_TIMEOUT),
+            "the screen went still: no newer frame says it was lost"
+        );
         assert!(asm.waiting_for_keyframe());
         assert_eq!(asm.deadline(), None);
-        assert_eq!(asm.push(parts[1], t1 + INCOMPLETE_AFTER), None, "too late");
+        assert_eq!(asm.push(parts[1], t1 + PART_GAP_TIMEOUT), None, "too late");
     }
 
     #[test]
@@ -340,7 +337,7 @@ mod tests {
         let t0 = Instant::now();
         let late = t0 + STALE_AFTER + Duration::from_millis(1);
         let mut pacer = Pacer::default();
-        assert_eq!(pacer.push(au(0, false, 10), t0, late), Pushed::Dropped, "held up on the way");
+        assert_eq!(pacer.push(au(0, false, 10), t0, late), Pushed::Stale, "held up on the way");
         assert_eq!(pacer.push(au(1, false, 10), late, late), Pushed::Skipped, "can't be decoded without it");
         assert_eq!(pacer.push(au(2, false, 10), t0, late), Pushed::Skipped);
         assert_eq!(pacer.next_at(), None);
@@ -382,7 +379,7 @@ mod tests {
         assert_eq!(pacer.next_at(), Some(t0));
         assert_eq!(sends(&mut pacer, t0, &[0, 0, 7, 15]), [1, 0, 7, 8]);
         assert_eq!(pacer.next_at(), None, "all 16 sent by 15 ms");
-        assert_eq!(pacer.push(au(1, true, MAX_ACCESS_UNIT + 1), t0, t0), Pushed::Dropped, "too large to number");
+        assert_eq!(pacer.push(au(1, true, MAX_ACCESS_UNIT + 1), t0, t0), Pushed::TooLarge, "too large to number");
         assert_eq!(pacer.next_at(), None);
     }
 

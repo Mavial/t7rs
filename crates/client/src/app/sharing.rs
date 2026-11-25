@@ -117,7 +117,8 @@ impl App {
         let latency = stats.latency_total.checked_div(stats.encoded).unwrap_or_default();
         let (captured, encoded, bytes, max) = (stats.captured, stats.encoded, stats.bytes, stats.latency_max);
         let sent = self.net.take_video_sent();
-        let (parts, failed, dropped, skipped) = (sent.parts, sent.failed, sent.dropped, sent.skipped);
+        let (parts, socket_refused, too_large, stale, skipped) =
+            (sent.parts, sent.socket_refused, sent.too_large, sent.stale, sent.skipped);
         tracing::info!(
             captured,
             encoded,
@@ -125,8 +126,9 @@ impl App {
             ?latency,
             ?max,
             parts,
-            failed,
-            dropped,
+            socket_refused,
+            too_large,
+            stale,
             skipped,
             "stopped sharing the screen"
         );

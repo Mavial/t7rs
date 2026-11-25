@@ -34,12 +34,8 @@ const VOICE_PING_INTERVAL: Duration = Duration::from_secs(1);
 enum Command {
     Connect(Attempt),
     Send(C2S),
-    Voice {
-        seq: u32,
-        payload: Vec<u8>,
-    },
-    /// With when it was encoded.
-    Video(AccessUnit, Instant),
+    Voice { seq: u32, payload: Vec<u8> },
+    Video { au: AccessUnit, encoded_at: Instant },
     Disconnect,
 }
 
@@ -57,7 +53,7 @@ struct Attempt {
 enum Out {
     Control(C2S),
     Voice { seq: u32, payload: Vec<u8> },
-    Video(AccessUnit, Instant),
+    Video { au: AccessUnit, encoded_at: Instant },
 }
 
 /// Each connection attempt gets a fresh session id; the UI ignores events
@@ -71,6 +67,7 @@ pub enum NetEvent {
     VoicePing(SessionId, Duration),
     /// TLS is up, and this is the server's certificate.
     Secured(SessionId, Fingerprint),
+    NeedKeyframe(SessionId),
     Closed(SessionId, Ended),
 }
 
@@ -104,15 +101,12 @@ pub struct Net {
     sent: Arc<Mutex<VideoSent>>,
 }
 
-/// What became of the screen frames this client shared.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct VideoSent {
     pub parts: u32,
-    /// Parts the socket refused.
-    pub failed: u32,
-    /// Frames too large or held up too long to send.
-    pub dropped: u32,
-    /// Frames skipped after one was dropped, until a keyframe.
+    pub socket_refused: u32,
+    pub too_large: u32,
+    pub stale: u32,
     pub skipped: u32,
 }
 
@@ -171,11 +165,10 @@ impl Net {
     pub fn video_sink(&self) -> VideoSink {
         let tx = self.tx.clone();
         Arc::new(move |au| {
-            let _ = tx.send(Command::Video(au, Instant::now()));
+            let _ = tx.send(Command::Video { au, encoded_at: Instant::now() });
         })
     }
 
-    /// What became of the frames shared since the last call.
     pub fn take_video_sent(&self) -> VideoSent {
         std::mem::take(&mut *self.sent.lock().unwrap())
     }
@@ -214,14 +207,11 @@ struct Watched {
     seen: Seen,
 }
 
-/// What became of one watched screen's frames, logged when the watch ends.
 #[derive(Debug, Default, Clone, Copy)]
 struct Seen {
     shown: u32,
-    /// Complete but not shown: a frame before them was lost.
-    unshown: u32,
-    /// Given up on with parts missing, and no newer frame had come.
-    incomplete: u32,
+    undecodable: u32,
+    expired: u32,
     keyframes_asked: u32,
 }
 
@@ -231,8 +221,6 @@ impl Watched {
         Watched { sink, assembler: Assembler::default(), next_ask, seen: Seen::default() }
     }
 
-    /// When to look at this screen again: to ask for a keyframe, or to give
-    /// up on a frame still missing parts.
     fn due(&self) -> Option<Instant> {
         if self.assembler.waiting_for_keyframe() { Some(self.next_ask) } else { self.assembler.deadline() }
     }
@@ -240,8 +228,8 @@ impl Watched {
 
 impl Drop for Watched {
     fn drop(&mut self) {
-        let Seen { shown, unshown, incomplete, keyframes_asked } = self.seen;
-        tracing::info!(shown, unshown, incomplete, keyframes_asked, "stopped watching a screen");
+        let Seen { shown, undecodable, expired, keyframes_asked } = self.seen;
+        tracing::info!(shown, undecodable, expired, keyframes_asked, "stopped watching a screen");
     }
 }
 
@@ -253,11 +241,11 @@ impl Viewer {
                     if (w.sink)(au) {
                         w.seen.shown += 1;
                     } else {
-                        w.seen.unshown += 1;
+                        w.seen.undecodable += 1;
                         w.assembler.wait_for_keyframe();
                     }
                 }
-                Some(Assembled::NeedKeyframe) => w.seen.unshown += 1,
+                Some(Assembled::NeedKeyframe) => w.seen.undecodable += 1,
                 None => {}
             }
         }
@@ -272,14 +260,17 @@ impl Viewer {
         self.watched.values().filter_map(Watched::due).min()
     }
 
-    /// Gives up on frames past their deadline, then says which screens to ask
-    /// for a keyframe.
+    fn give_up_on_overdue_frames(&mut self, now: Instant) {
+        for w in self.watched.values_mut() {
+            if w.assembler.give_up_if_overdue(now) {
+                w.seen.expired += 1;
+            }
+        }
+    }
+
     fn ask(&mut self, now: Instant) -> Vec<ClientId> {
         let mut ask = Vec::new();
         for (&sharer, w) in &mut self.watched {
-            if w.assembler.expire(now) {
-                w.seen.incomplete += 1;
-            }
             if w.assembler.waiting_for_keyframe() && w.next_ask <= now {
                 w.next_ask = now + voice::KEYFRAME_INTERVAL;
                 w.seen.keyframes_asked += 1;
@@ -339,7 +330,7 @@ async fn command_loop(
             }
             Command::Send(msg) => Out::Control(msg),
             Command::Voice { seq, payload } => Out::Voice { seq, payload },
-            Command::Video(au, made) => Out::Video(au, made),
+            Command::Video { au, encoded_at } => Out::Video { au, encoded_at },
             Command::Disconnect => {
                 if let Some((tx, _)) = current.take() {
                     let _ = tx.send(Out::Control(C2S::Goodbye));
@@ -418,10 +409,9 @@ impl VoiceLink {
         let _ = self.sock.send(&self.buf).await;
     }
 
-    /// `false` if the socket refused it: a lost part.
-    fn try_send(&mut self, msg: ToServer<'_>) -> bool {
+    fn try_send(&mut self, msg: ToServer<'_>) -> std::io::Result<()> {
         self.crypto.seal(msg, &mut self.buf);
-        self.sock.try_send(&self.buf).is_ok()
+        self.sock.try_send(&self.buf).map(drop)
     }
 }
 
@@ -542,7 +532,12 @@ async fn session(
                 }
             }
             () = viewer_due => {
-                let due = viewer.lock().unwrap().ask(Instant::now());
+                let due = {
+                    let now = Instant::now();
+                    let mut viewer = viewer.lock().unwrap();
+                    viewer.give_up_on_overdue_frames(now);
+                    viewer.ask(now)
+                };
                 for from in due {
                     if let Err(e) = write_frame(&mut writer, &C2S::NeedKeyframe { from }).await {
                         return Ended::Failed(format!("Connection lost: {e}"));
@@ -551,15 +546,15 @@ async fn session(
             }
             () = video_due => {
                 if let Some(v) = &mut voice {
-                    let (mut count, mut failed) = (0, 0);
+                    let (mut count, mut refused) = (0, 0);
                     pacer.send_due(Instant::now(), |p| {
                         let VideoPart { frame, part, parts, key, payload } = p;
                         count += 1;
-                        failed += u32::from(!v.try_send(ToServer::Video { frame, part, parts, key, payload }));
+                        refused += u32::from(v.try_send(ToServer::Video { frame, part, parts, key, payload }).is_err());
                     });
                     let mut sent = sent.lock().unwrap();
                     sent.parts += count;
-                    sent.failed += failed;
+                    sent.socket_refused += refused;
                 }
             }
             out = outgoing.recv() => match out {
@@ -568,16 +563,18 @@ async fn session(
                         v.send(ToServer::Audio { seq, payload: &payload }).await;
                     }
                 }
-                Some(Out::Video(au, made)) => {
+                Some(Out::Video { au, encoded_at }) => {
                     if voice.is_some() {
-                        match pacer.push(au, made, Instant::now()) {
+                        let pushed = pacer.push(au, encoded_at, Instant::now());
+                        let mut sent = sent.lock().unwrap();
+                        match pushed {
                             Pushed::Queued => {}
-                            Pushed::Dropped => {
-                                sent.lock().unwrap().dropped += 1;
-                                // What the server would pass on once a viewer noticed, only sooner.
-                                events.emit(NetEvent::Message(id, S2C::SendKeyframe));
-                            }
-                            Pushed::Skipped => sent.lock().unwrap().skipped += 1,
+                            Pushed::TooLarge => sent.too_large += 1,
+                            Pushed::Stale => sent.stale += 1,
+                            Pushed::Skipped => sent.skipped += 1,
+                        }
+                        if matches!(pushed, Pushed::TooLarge | Pushed::Stale) {
+                            events.emit(NetEvent::NeedKeyframe(id));
                         }
                     }
                 }
@@ -629,7 +626,7 @@ impl Drop for AbortOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen::packet::{INCOMPLETE_AFTER, packetize};
+    use crate::screen::packet::{PART_GAP_TIMEOUT, packetize};
 
     #[test]
     fn default_port() {
@@ -733,9 +730,11 @@ mod tests {
         let first = packetize(&last).next().unwrap();
         let arrived = start + voice::KEYFRAME_INTERVAL;
         viewer.push(1, first, arrived);
-        let deadline = arrived + INCOMPLETE_AFTER;
+        let deadline = arrived + PART_GAP_TIMEOUT;
         assert_eq!(viewer.due(), Some(deadline), "the rest of the frame may still come");
-        assert_eq!(viewer.ask(arrived + INCOMPLETE_AFTER / 2), NOBODY);
+        viewer.give_up_on_overdue_frames(arrived + PART_GAP_TIMEOUT / 2);
+        assert_eq!(viewer.ask(arrived + PART_GAP_TIMEOUT / 2), NOBODY);
+        viewer.give_up_on_overdue_frames(deadline);
         assert_eq!(viewer.ask(deadline), [1], "it didn't, and the screen went still");
         assert_eq!(viewer.due(), Some(deadline + voice::KEYFRAME_INTERVAL));
         assert_eq!(*got.lock().unwrap(), [0]);
