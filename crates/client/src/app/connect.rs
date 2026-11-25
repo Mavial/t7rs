@@ -224,7 +224,7 @@ impl App {
     fn first_run_form(&mut self, ui: &mut egui::Ui) {
         self.open_connect_form();
         let error = self.last_error.as_deref();
-        let Some(form) = &mut self.form else { return };
+        let form = self.form.as_mut().expect("form open");
         let mut submit = false;
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.16).max(20.0));

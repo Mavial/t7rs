@@ -389,9 +389,10 @@ impl App {
             TabKind::Channel => format!("Message #{}", tab.title),
             TabKind::Private(_) => format!("Message {}", tab.title),
         };
+        let connected = matches!(self.conn, Conn::Connected { .. });
         let frame = egui::Frame::new().inner_margin(Margin { left: 20, right: 20, top: 4, bottom: 16 });
-        if !matches!(self.conn, Conn::Connected { .. }) {
-            egui::Panel::bottom("composer").frame(frame).show_separator_line(false).show(ui, |ui| {
+        egui::Panel::bottom("composer").frame(frame).show_separator_line(false).show(ui, |ui| {
+            if !connected {
                 let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::hover());
                 let p = ui.painter();
                 p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
@@ -403,10 +404,8 @@ impl App {
                     FontId::proportional(14.0),
                     theme::TEXT_FAINT,
                 );
-            });
-            return;
-        }
-        egui::Panel::bottom("composer").frame(frame).show_separator_line(false).show(ui, |ui| {
+                return;
+            }
             let field = egui::Frame::new()
                 .fill(theme::SURFACE)
                 .corner_radius(CornerRadius::same(8))

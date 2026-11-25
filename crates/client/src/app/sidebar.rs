@@ -15,7 +15,7 @@ use super::chat::LineKind;
 use super::widgets::{
     Item, menu_button, menu_separator, menu_style, mic_held, paint_avatar, text_input, toggle, truncated,
 };
-use super::{App, Conn, manages};
+use super::{App, Conn, Lost, manages};
 use crate::icons::{self, Icon};
 use crate::theme::{self, Btn};
 
@@ -26,7 +26,7 @@ const NO_VOICE: &str = "Voice packets aren't getting through. The server's UDP p
 
 pub(super) enum Banner {
     UpdateReady(String),
-    Lost { headline: String, detail: String },
+    Lost(Lost),
 }
 
 #[derive(Clone, Copy)]
@@ -137,7 +137,7 @@ impl App {
 
     pub(super) fn banner(&self) -> Option<Banner> {
         if let Conn::Lost { why, .. } = &self.conn {
-            return Some(Banner::Lost { headline: why.headline.clone(), detail: why.detail.clone() });
+            return Some(Banner::Lost(why.clone()));
         }
         match self.updater.status() {
             crate::update::Status::Ready(version) => Some(Banner::UpdateReady(version)),
@@ -212,25 +212,24 @@ impl App {
             }
             Some(ServerAction::Disconnect) => self.disconnect(),
             Some(ServerAction::Reconnect) => self.reconnect(),
-            Some(ServerAction::BackToServers) => self.forget_lost(),
+            Some(ServerAction::BackToServers) => {
+                self.conn = Conn::Disconnected;
+                self.active_tab = 0;
+            }
             None => {}
         }
     }
 
     fn server_button(&self, ui: &mut egui::Ui) -> Option<ServerAction> {
-        if matches!(self.conn, Conn::Disconnected) {
+        let Some(address) = self.address() else {
             let resp = menu_button(ui, Icon::Plus).on_hover_text("Connect to a server (Ctrl+S)");
             return resp.clicked().then_some(ServerAction::Connect);
-        }
+        };
         let resp = menu_button(ui, Icon::Dots);
         let mut picked = None;
         let lost = matches!(self.conn, Conn::Lost { .. });
         egui::Popup::menu(&resp).align(RectAlign::BOTTOM_END).show(|ui| {
-            picked = if lost {
-                lost_menu(ui, self.address().unwrap_or_default())
-            } else {
-                server_menu(ui, self.view.as_ref(), self.address().unwrap_or_default())
-            };
+            picked = if lost { lost_menu(ui, address) } else { server_menu(ui, self.view.as_ref(), address) };
         });
         picked
     }
@@ -245,11 +244,11 @@ impl App {
                 (format!("T7 {version} is ready"), None),
                 Btn::primary("Restart").small(),
             ),
-            Banner::Lost { headline, detail } => (
+            Banner::Lost(why) => (
                 theme::RED.gamma_multiply(0.12),
                 Icon::Warning,
                 theme::RED,
-                (headline.clone(), Some(detail.clone())),
+                (why.headline.clone(), Some(why.detail.clone())),
                 Btn::secondary("Reconnect").small(),
             ),
         };
@@ -287,7 +286,7 @@ impl App {
                     .put(slot, button)
                     .on_hover_text(match &banner {
                         Banner::UpdateReady(_) => "T7 restarts with the update and reconnects.",
-                        Banner::Lost { .. } => "Connect to this server again",
+                        Banner::Lost(_) => "Connect to this server again",
                     })
                     .clicked();
             });
@@ -295,7 +294,7 @@ impl App {
         if clicked {
             match banner {
                 Banner::UpdateReady(_) => self.restart_to_update(),
-                Banner::Lost { .. } => self.reconnect(),
+                Banner::Lost(_) => self.reconnect(),
             }
         }
     }
