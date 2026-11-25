@@ -72,7 +72,6 @@ impl Updater {
         Self { status, wake: spawned.ok().map(|_| wake) }
     }
 
-    /// An updater stuck at `status`, for drawing what each state looks like.
     #[cfg(test)]
     pub fn showing(status: Status) -> Self {
         Self { status: Arc::new(Mutex::new(status)), wake: None }

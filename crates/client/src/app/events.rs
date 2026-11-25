@@ -50,7 +50,6 @@ impl App {
         self.ping = None;
         self.voice.disconnected();
         let was_connected = matches!(was, Conn::Connected { .. });
-        // The kick notice already said who and why.
         match (&reason, was_connected) {
             (Some(r), true) if kicked.is_none() => self.push(0, LineKind::Error, format!("Disconnected: {r}")),
             (_, true) => self.push(0, LineKind::System, "Disconnected"),
@@ -66,11 +65,9 @@ impl App {
         }
         let why = kicked.or_else(|| reason.clone().map(|detail| Lost { headline: "Disconnected".into(), detail }));
         match (was, why, last) {
-            // Keep the last tree and chat on screen, with why, until reconnecting.
             (Conn::Connected { server, login }, Some(why), Some(last)) => {
                 self.conn = Conn::Lost { server, login, why, last: Box::new(last) };
             }
-            // A failed attempt opens the form again, with the error under the address.
             (Conn::Connecting(login), _, _) => {
                 if reason.is_some() && self.cert_change.is_none() {
                     self.reopen_connect_form(login);

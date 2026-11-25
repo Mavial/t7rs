@@ -70,7 +70,6 @@ fn recent_card(ui: &mut egui::Ui, r: &Recent) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A labeled field, outlined in red with the error under it when there is one.
 fn input(
     ui: &mut egui::Ui,
     label: &str,
@@ -98,8 +97,6 @@ fn input(
     resp
 }
 
-/// The form's fields. Typing starts where it's needed: the address when it is
-/// blank or failed, else the nickname.
 fn form_fields(ui: &mut egui::Ui, form: &mut ConnectForm, nickname_first: bool, error: Option<&str>) {
     let (address, nickname) = if nickname_first {
         let nickname = input(ui, "Nickname", &mut form.nickname, "", false, None);
@@ -116,7 +113,6 @@ fn form_fields(ui: &mut egui::Ui, form: &mut ConnectForm, nickname_first: bool, 
 }
 
 impl App {
-    /// Opens the connect dialog, or keeps the one already open.
     pub(super) fn open_connect_form(&mut self) {
         if self.form.is_some() {
             return;
@@ -134,14 +130,12 @@ impl App {
         });
     }
 
-    /// After a failed attempt: the same address again, with the error under it.
     pub(super) fn reopen_connect_form(&mut self, login: Login) {
         let Login { address, password } = login;
         self.form =
             Some(ConnectForm { address, nickname: self.settings.nickname.clone(), password, focus_requested: false });
     }
 
-    /// Nobody has joined a server yet: the main pane is the connect form.
     fn first_run(&self) -> bool {
         matches!(self.conn, Conn::Disconnected) && self.settings.recent.is_empty()
     }
@@ -171,7 +165,6 @@ impl App {
         }
     }
 
-    /// The main pane before you're on a server.
     pub(super) fn empty_state(&mut self, ui: &mut egui::Ui) {
         if let Conn::Connecting(login) = &self.conn {
             let (name, address) = (self.server_name(), login.address.clone());
@@ -196,7 +189,6 @@ impl App {
         }
     }
 
-    /// Saved servers, one click each, under a button for a new address.
     fn join_a_server(&mut self, ui: &mut egui::Ui) {
         let (mut connect_to, mut open_form) = (None, false);
         ui.vertical_centered(|ui| {
@@ -229,8 +221,6 @@ impl App {
         }
     }
 
-    /// Opening T7 for the first time is the connect form, with the nickname
-    /// filled in: the address is the only blank.
     fn first_run_form(&mut self, ui: &mut egui::Ui) {
         self.open_connect_form();
         let error = self.last_error.as_deref();
@@ -261,7 +251,7 @@ impl App {
 
     pub(super) fn connect_dialog(&mut self, ctx: &egui::Context) {
         if self.first_run() {
-            return; // the main pane shows the form
+            return;
         }
         let error = self.last_error.as_deref();
         let Some(form) = &mut self.form else { return };
@@ -299,9 +289,6 @@ impl App {
         }
     }
 
-    /// What happened, what it could mean, then both fingerprints. Not
-    /// connecting is the default; trusting is a plain button, since after an
-    /// admin reinstalls it is often the right call.
     pub(super) fn cert_change_dialog(&mut self, ctx: &egui::Context) {
         let Some(change) = &self.cert_change else { return };
         let (mut trust, mut cancel) = (false, false);
