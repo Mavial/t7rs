@@ -1,5 +1,5 @@
 //! The main pane on a server: a header with where you are and the chat tabs,
-//! a strip while someone in your channel shares their screen, the chat, and
+//! the shelf while people in your channel share their screens, the chat, and
 //! the box you type in.
 
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
@@ -10,9 +10,9 @@ use t7_proto::{C2S, ChannelKind, ClientId, TextTarget};
 
 use super::sidebar::HEADER_H;
 use super::widgets::{paint_avatar, truncated};
-use super::{App, Conn, sharing};
+use super::{App, Conn};
 use crate::icons::{self, Icon};
-use crate::theme::{self, Btn};
+use crate::theme;
 
 const MAX_LINES: usize = 1000;
 const GROUP_GAP: TimeDelta = TimeDelta::minutes(5);
@@ -237,7 +237,7 @@ impl App {
                 return;
             }
             self.pane_header(ui);
-            self.live_strip(ui);
+            self.shelf(ui);
             self.tabs[self.active_tab].unread = 0;
             self.composer(ui);
             self.chat_log(ui);
@@ -323,62 +323,6 @@ impl App {
         if !aside.is_empty() && rect.right() - aside_x > 40.0 {
             let aside = truncated(ui, &aside, FontId::proportional(12.5), theme::TEXT_FAINT, rect.right() - aside_x);
             p.galley(egui::pos2(aside_x, y - aside.size().y / 2.0), aside, theme::TEXT_FAINT);
-        }
-    }
-
-    fn live_strip(&mut self, ui: &mut egui::Ui) {
-        let Some(view) = &self.view else { return };
-        let Some(channel) = view.my_channel() else { return };
-        let sharers: Vec<(ClientId, String)> = (view.clients_in(channel).into_iter())
-            .filter(|c| c.sharing && c.id != view.my_id)
-            .map(|c| (c.id, c.nickname.clone()))
-            .collect();
-        if sharers.is_empty() {
-            return;
-        }
-        let watched = self.watching.as_ref().map(|w| w.sharer);
-        let mut picked = None;
-        let frame = egui::Frame::new().inner_margin(Margin { left: 20, right: 12, top: 6, bottom: 6 });
-        egui::Panel::top("live").frame(frame).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for (id, name) in &sharers {
-                let watching = watched == Some(*id);
-                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
-                let p = ui.painter();
-                let y = rect.center().y;
-                paint_avatar(p, egui::pos2(rect.left() + 11.0, y), 11.0, name);
-                let mut x = rect.left() + 32.0;
-                if !watching {
-                    x = sharing::live_badge(p, egui::pos2(x, y)).right() + 8.0;
-                }
-                let (before, after) = if watching {
-                    ("You're watching ", " in its own window")
-                } else {
-                    ("", " is sharing their screen")
-                };
-                let mut job = LayoutJob::default();
-                let fmt = |color| TextFormat { font_id: FontId::proportional(12.5), color, ..Default::default() };
-                job.append(before, 0.0, fmt(theme::TEXT_DIM));
-                job.append(name, 0.0, fmt(theme::TEXT));
-                job.append(after, 0.0, fmt(theme::TEXT_DIM));
-                let button =
-                    if watching { Btn::secondary("Stop watching").small() } else { Btn::primary("Watch").small() };
-                job.wrap = egui::text::TextWrapping::truncate_at_width(rect.right() - x - 120.0);
-                let galley = ui.painter().layout_job(job);
-                ui.painter().galley(egui::pos2(x, y - galley.size().y / 2.0), galley, theme::TEXT);
-                let slot = Rect::from_min_max(egui::pos2(rect.right() - 120.0, rect.top()), rect.right_bottom());
-                let resp = ui.put(slot, |ui: &mut egui::Ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(button)).inner
-                });
-                if resp.clicked() {
-                    picked = Some((*id, watching));
-                }
-            }
-        });
-        match picked {
-            Some((_, true)) => self.stop_watching(),
-            Some((id, false)) => self.watch(id),
-            None => {}
         }
     }
 

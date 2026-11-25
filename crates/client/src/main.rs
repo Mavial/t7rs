@@ -7,6 +7,7 @@ mod channel_drop;
 mod dsp;
 mod icons;
 mod net;
+mod preview;
 mod ptt;
 mod resample;
 mod screen;

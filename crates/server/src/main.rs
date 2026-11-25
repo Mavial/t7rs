@@ -48,7 +48,7 @@ fn main() {
         let token =
             t7_server::reset_owner_claim(&data_dir).unwrap_or_else(|e| fail(format!("owner reset failed: {e}")));
         println!("claim token: {token}");
-        println!("Start the server. In T7, the menu next to CHANNELS, then Claim ownership: it works once.");
+        println!("Start the server. In T7, the ⋯ next to the server's name, then Claim ownership: it works once.");
         return;
     }
     let mut cfg = Config::load_or_create(&args.config).unwrap_or_else(|e| fail(e));

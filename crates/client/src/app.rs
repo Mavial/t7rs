@@ -8,6 +8,7 @@ mod events;
 mod moderation;
 mod server_settings;
 mod sharing;
+mod shelf;
 mod sidebar;
 #[cfg(test)]
 mod snapshot;
@@ -91,9 +92,10 @@ pub struct App {
     /// Set by the Restart button: the shell closes the window after this frame.
     quit: bool,
     sharing: Option<sharing::Sharing>,
-    watching: Option<sharing::Watching>,
+    watching: Vec<sharing::Watching>,
     screen_wake: crate::watch::Wake,
     share_sources: Vec<crate::screen::SourceInfo>,
+    shelf: shelf::Shelf,
 }
 
 impl App {
@@ -138,9 +140,10 @@ impl App {
             updater: crate::update::Updater::start(ctx.clone()),
             quit: false,
             sharing: None,
-            watching: None,
+            watching: Vec::new(),
             screen_wake,
             share_sources: Vec::new(),
+            shelf: shelf::Shelf::new(),
         };
         app.sound_pack = Pack::open(app.settings.audio.sound_pack.as_deref());
         if let Some(l) = launch {
@@ -274,6 +277,7 @@ impl App {
         self.poll_network();
         self.sync_screens();
         let ctx = ui.ctx().clone();
+        self.sync_shelf(&ctx);
         self.drive_audio(&ctx);
         self.shortcuts(&ctx);
         self.sidebar(ui);

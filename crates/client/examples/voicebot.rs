@@ -5,15 +5,22 @@
 //!     cargo run --example voicebot -- ADDR poke NICK [MESSAGE]  # poke someone
 //!     cargo run --example voicebot -- ADDR claim TOKEN [SECONDS]  # claim ownership and stay
 //!     cargo run --example voicebot -- ADDR temp NAME PASSWORD [SECONDS]  # make a temporary channel and stay
+//!     cargo run --example voicebot -- ADDR share [SECONDS] [WINDOW]  # share a screen, or a window by title
 //!
 //! Joins the default channel. `listen` prints, per speaker, how many frames
 //! arrived and how loud they decode, so a real client's capture → encode →
 //! send path can be checked without ears.
 
+#[path = "../src/screen/mod.rs"]
+#[allow(dead_code, reason = "the bot only shares, so it never decodes")]
+mod screen;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use screen::packet::{Pacer, VideoPart};
+use screen::{Quality, Share, Source};
 use t7_proto::voice::{self, FRAME_SAMPLES, ToClient, ToServer};
 use t7_proto::{
     C2S, ChannelSettings, ClientId, DEFAULT_PORT, PROTOCOL_VERSION, PasswordChange, S2C, identity, read_frame, tls,
@@ -41,11 +48,13 @@ async fn main() {
     let identity = identity::IdentityKey::from_seed(seed).prove(&tls::exporter(tls.get_ref().1));
     let (r, mut w) = tokio::io::split(tls);
     let mut r = BufReader::new(r);
+    let window = rest.get(1).filter(|_| mode == "share").cloned();
     let nickname = match mode.as_str() {
         "tone" => "ToneBot",
         "poke" => "PokeBot",
         "claim" => "OwnerBot",
         "temp" => "RaidLead",
+        "share" => window.as_deref().unwrap_or("ScreenBot"),
         _ => "ListenBot",
     }
     .to_owned();
@@ -109,7 +118,14 @@ async fn main() {
         return;
     }
     // Keep the control connection drained.
-    tokio::spawn(async move { while read_frame::<_, S2C>(&mut r, &mut buf).await.is_ok() {} });
+    let (keyframe, mut keyframes) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok(msg) = read_frame::<_, S2C>(&mut r, &mut buf).await {
+            if msg == S2C::SendKeyframe {
+                let _ = keyframe.send(());
+            }
+        }
+    });
 
     let udp = UdpSocket::bind("0.0.0.0:0").await.unwrap();
     udp.connect(server).await.unwrap();
@@ -118,7 +134,53 @@ async fn main() {
     udp.send(&out).await.unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(secs);
-    if mode == "tone" {
+    if mode == "share" {
+        let sources = screen::sources();
+        let source = match &window {
+            Some(title) => {
+                sources.iter().find(|s| matches!(s.source, Source::Window(_)) && s.name.contains(title.as_str()))
+            }
+            None => sources.iter().find(|s| matches!(s.source, Source::Monitor(_))),
+        };
+        let Some(source) = source else { return println!("nothing to share called {window:?}") };
+        println!("sharing {}", source.name);
+        let (units_tx, mut units) = tokio::sync::mpsc::unbounded_channel();
+        let send = move |au| {
+            let _ = units_tx.send(au);
+        };
+        let share = Share::start(source.source, Quality::P1080_30, send, || {}).expect("share");
+        write_frame(&mut w, &C2S::SetSharing(true)).await.unwrap();
+        let (mut sent, mut bytes, mut asked) = (0u32, 0usize, 0u32);
+        let mut pacer = Pacer::default();
+        let mut ping = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            let due = pacer.next_at();
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline.into()) => break,
+                Some(()) = keyframes.recv() => {
+                    asked += 1;
+                    share.request_keyframe();
+                }
+                Some(au) = units.recv() => {
+                    sent += 1;
+                    bytes += au.data.len();
+                    pacer.push(au, Instant::now());
+                }
+                () = tokio::time::sleep_until(due.unwrap_or(deadline).into()), if due.is_some() => {
+                    pacer.send_due(Instant::now(), |VideoPart { frame, part, parts, key, payload }| {
+                        crypto.seal(ToServer::Video { frame, part, parts, key, payload }, &mut out);
+                        let _ = udp.try_send(&out);
+                    });
+                }
+                _ = ping.tick() => {
+                    crypto.seal(ToServer::Ping { nonce: 3 }, &mut out);
+                    udp.send(&out).await.unwrap();
+                    write_frame(&mut w, &C2S::Ping { nonce: 0 }).await.unwrap();
+                }
+            }
+        }
+        println!("sent {sent} frames, {} kB, {asked} keyframes asked for", bytes / 1000);
+    } else if mode == "tone" {
         let mut enc =
             opus1::OpusEncoder::new(opus1::SampleRate::Hz48000, opus1::Channels::Mono, opus1::Application::Voip)
                 .unwrap();

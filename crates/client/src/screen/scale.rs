@@ -5,6 +5,26 @@ use super::Picture;
 const WEIGHT_BITS: u32 = 8;
 const WEIGHT_ONE: u32 = 1 << WEIGHT_BITS;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Area {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Area {
+    pub fn whole(width: usize, height: usize) -> Area {
+        Area { x: 0, y: 0, width, height }
+    }
+
+    pub fn clear(self, out: &mut [u32], stride: usize) {
+        for y in self.y..self.y + self.height {
+            out[y * stride + self.x..][..self.width].fill(0);
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Scaler {
     sizes: (usize, usize, usize, usize),
@@ -14,32 +34,35 @@ pub struct Scaler {
 }
 
 impl Scaler {
-    /// Draws `picture` into `out`, `width` × `height` pixels in rows, as
-    /// large as fits and centered.
-    pub fn draw(&mut self, picture: &Picture, out: &mut [u32], width: usize, height: usize) {
+    /// Draws `picture` into `area` of `out`, whose rows are `stride` pixels
+    /// apart, as large as fits and centered, with black around it.
+    pub fn draw(&mut self, picture: &Picture, out: &mut [u32], stride: usize, area: Area) {
         let (pw, ph) = (picture.width as usize, picture.height as usize);
-        let out = &mut out[..width * height];
-        let (Some(window_w), Some(window_h)) = (NonZeroUsize::new(width), NonZeroUsize::new(height)) else { return };
+        let (Some(area_w), Some(area_h)) = (NonZeroUsize::new(area.width), NonZeroUsize::new(area.height)) else {
+            return;
+        };
+        let row_at = |i: usize| (area.y + i) * stride + area.x;
         if pw == 0 || ph == 0 || picture.pixels.len() < pw * ph {
-            return out.fill(0);
+            return area.clear(out, stride);
         }
-        let (x0, y0, w, h) = fit((pw, ph), (window_w, window_h));
+        let (x0, y0, w, h) = fit((pw, ph), (area_w, area_h));
         if self.sizes != (pw, ph, w, h) {
             self.sizes = (pw, ph, w, h);
             self.x = Axis::new(pw, w);
             self.y = Axis::new(ph, h);
             self.row = vec![0; pw];
         }
-        out[..y0 * width].fill(0);
-        out[(y0 + h) * width..].fill(0);
+        for i in (0..y0).chain(y0 + h..area.height) {
+            out[row_at(i)..][..area.width].fill(0);
+        }
         for i in 0..h {
-            let at = (y0 + i) * width;
+            let at = row_at(y0 + i);
             let (src_y, _) = self.y.at(i);
             if self.y.taps == 1 && i > 0 && self.y.at(i - 1).0 == src_y {
-                out.copy_within(at - width..at, at);
+                out.copy_within(at - stride..at - stride + area.width, at);
                 continue;
             }
-            let row = &mut out[at..at + width];
+            let row = &mut out[at..at + area.width];
             row[..x0].fill(0);
             row[x0 + w..].fill(0);
             let row = &mut row[x0..x0 + w];
@@ -162,7 +185,7 @@ mod tests {
 
     fn draw(p: &Picture, width: usize, height: usize) -> Vec<u32> {
         let mut out = vec![0xDEAD_BEEF; width * height];
-        Scaler::default().draw(p, &mut out, width, height);
+        Scaler::default().draw(p, &mut out, width, Area::whole(width, height));
         out
     }
 
@@ -194,6 +217,24 @@ mod tests {
             let row = [vec![0; left], vec![0x00C8_6432; inner], vec![0; w - left - inner]].concat();
             assert!(draw(&p, w, h).chunks(w).all(|r| r == row), "{w}x{h}");
         }
+    }
+
+    #[test]
+    fn drawing_into_an_area_leaves_the_rest_of_the_buffer_alone() {
+        const X: u32 = 0xDEAD_BEEF;
+        let mut out = vec![X; 5 * 4];
+        let area = Area { x: 1, y: 1, width: 3, height: 2 };
+        Scaler::default().draw(&picture(2, 2, |x, y| 1 + x + 2 * y), &mut out, 5, area);
+        #[rustfmt::skip]
+        assert_eq!(out, [
+            X, X, X, X, X,
+            X, 1, 2, 0, X,
+            X, 3, 4, 0, X,
+            X, X, X, X, X,
+        ]);
+        let mut out = vec![X; 4 * 3];
+        Scaler::default().draw(&picture(4, 1, |_, _| 7), &mut out, 4, Area { x: 2, y: 0, width: 2, height: 3 });
+        assert_eq!(out, [X, X, 0, 0, X, X, 7, 7, X, X, 0, 0], "black above and below, inside the area");
     }
 
     #[test]
