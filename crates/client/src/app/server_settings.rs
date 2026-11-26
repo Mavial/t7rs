@@ -8,7 +8,9 @@ use t7_proto::perms::{Perm, Perms, Rank, RoleChange, RoleId, Roles};
 use t7_proto::{BanInfo, C2S, MAX_ROLE_NAME_LEN};
 
 use super::App;
+use super::key_bindings::modal_closed;
 use super::widgets::{field, hint, list_row, paint_avatar, placeholder, section, text_input};
+use crate::bindings::{Action, Bindings};
 use crate::theme;
 use crate::theme::Btn;
 
@@ -21,6 +23,7 @@ pub(super) struct ServerSettings {
     pub(super) picked: Pick,
     name_draft: String,
     adding_role: Option<String>,
+    add_button: Option<egui::Id>,
     limit_draft: String,
     limit_known: Option<u64>,
 }
@@ -41,6 +44,23 @@ pub(super) enum Pick {
 
 const TAB_BODY_H: f32 = 480.0;
 const AROUND_TAB_BODY_H: f32 = 170.0;
+const ROLE_NAME: &str = "new-role-name";
+
+impl ServerSettings {
+    pub(super) fn role_submit_action(&self, ctx: &egui::Context) -> Option<Action> {
+        if self.tab != SettingsTab::Roles {
+            return None;
+        }
+        let focus = ctx.memory(egui::Memory::focused)?;
+        if self.adding_role.is_some() && (focus == egui::Id::unique(ROLE_NAME) || Some(focus) == self.add_button) {
+            return Some(Action::CreateRole);
+        }
+        match self.picked {
+            Pick::Role(id) if focus == egui::Id::unique(("role-name", id)) => Some(Action::RenameRole),
+            _ => None,
+        }
+    }
+}
 
 fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
     match bans {
@@ -70,7 +90,15 @@ fn bans_tab(ui: &mut egui::Ui, bans: Option<&[BanInfo]>, send: &mut Vec<C2S>) {
     }
 }
 
-fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut ServerSettings, send: &mut Vec<C2S>) {
+fn roles_tab(
+    ui: &mut egui::Ui,
+    view: &ServerView,
+    roles: &Roles,
+    s: &mut ServerSettings,
+    send: &mut Vec<C2S>,
+    submit: Option<Action>,
+    bindings: &Bindings,
+) {
     let mine = view.me().map_or(Rank::EVERYONE, |me| roles.rank(me.identity));
     if let Pick::Role(id) = s.picked
         && roles.role(id).is_none()
@@ -78,14 +106,22 @@ fn roles_tab(ui: &mut egui::Ui, view: &ServerView, roles: &Roles, s: &mut Server
         s.picked = Pick::Everyone;
     }
     ui.horizontal_top(|ui| {
-        ui.vertical(|ui| role_list(ui, roles, mine, s, send));
+        ui.vertical(|ui| role_list(ui, roles, mine, s, send, submit == Some(Action::CreateRole), bindings));
         ui.add_space(18.0);
-        ui.vertical(|ui| role_details(ui, view, roles, mine, s, send));
+        ui.vertical(|ui| role_details(ui, view, roles, mine, s, send, submit == Some(Action::RenameRole)));
     });
 }
 
 /// The roles from the owner down to everyone: pick one, drag to rank, or add one.
-fn role_list(ui: &mut egui::Ui, roles: &Roles, mine: Rank, s: &mut ServerSettings, send: &mut Vec<C2S>) {
+fn role_list(
+    ui: &mut egui::Ui,
+    roles: &Roles,
+    mine: Rank,
+    s: &mut ServerSettings,
+    send: &mut Vec<C2S>,
+    submit: bool,
+    bindings: &Bindings,
+) {
     let below = |role: RoleId| mine > roles.height(role);
     let change = |send: &mut Vec<C2S>, change| send.push(C2S::ChangeRoles(change));
     ui.set_width(160.0);
@@ -129,19 +165,35 @@ fn role_list(ui: &mut egui::Ui, roles: &Roles, mine: Rank, s: &mut ServerSetting
             None => {
                 if ui.add(Btn::ghost("+  New role").small()).clicked() {
                     s.adding_role = Some(String::new());
+                    s.add_button = None;
                 }
             }
             Some(name) => {
-                let edit = text_input(name).hint_text(placeholder("Name, then Enter")).char_limit(MAX_ROLE_NAME_LEN);
+                let field_id = egui::Id::unique(ROLE_NAME);
+                let edit = text_input(name)
+                    .id(field_id)
+                    .return_key(None)
+                    .hint_text(placeholder("Role name"))
+                    .char_limit(MAX_ROLE_NAME_LEN);
                 let field = ui.add(edit);
-                if field.lost_focus() {
-                    let name = std::mem::take(name).trim().to_owned();
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !name.is_empty() {
-                        change(send, RoleChange::Create { name });
-                    }
-                    s.adding_role = None;
-                } else if !field.has_focus() {
+                if s.add_button.is_none() {
                     field.request_focus();
+                }
+                let name = name.trim();
+                let tip = bindings.hint(ui.ctx(), Action::CreateRole, "Create role");
+                let (create, cancel) = ui
+                    .horizontal(|ui| {
+                        let create = ui.add_enabled(!name.is_empty(), Btn::primary("Add").small()).on_hover_text(tip);
+                        s.add_button = Some(create.id);
+                        let cancel = ui.add(Btn::ghost("Cancel").small());
+                        (!name.is_empty() && (create.clicked() || submit), cancel.clicked())
+                    })
+                    .inner;
+                if create {
+                    change(send, RoleChange::Create { name: name.to_owned() });
+                }
+                if create || cancel {
+                    s.adding_role = None;
                 }
             }
         }
@@ -156,6 +208,7 @@ fn role_details(
     mine: Rank,
     s: &mut ServerSettings,
     send: &mut Vec<C2S>,
+    rename: bool,
 ) {
     let below = |role: RoleId| mine > roles.height(role);
     let change = |send: &mut Vec<C2S>, change| send.push(C2S::ChangeRoles(change));
@@ -179,13 +232,16 @@ fn role_details(
             let role = roles.role(id).expect("checked above");
             let editable = below(id);
             let name_id = egui::Id::unique(("role-name", id));
-            if !ui.memory(|m| m.has_focus(name_id)) {
+            if !ui.memory(|m| m.has_focus(name_id) || m.had_focus_last_frame(name_id)) {
                 s.name_draft.clone_from(&role.name);
             }
-            let edit = text_input(&mut s.name_draft).id(name_id).char_limit(MAX_ROLE_NAME_LEN);
+            let edit = text_input(&mut s.name_draft).id(name_id).return_key(None).char_limit(MAX_ROLE_NAME_LEN);
             let field = ui.add_enabled_ui(editable, |ui| field(ui, "Name", edit)).inner;
             let name = s.name_draft.trim();
-            if field.lost_focus() && !name.is_empty() && name != role.name {
+            if rename {
+                field.surrender_focus();
+            }
+            if (rename || field.lost_focus()) && !name.is_empty() && name != role.name {
                 change(send, RoleChange::Rename { id, name: name.to_owned() });
             }
             if id == RoleId::MODERATOR {
@@ -322,12 +378,14 @@ impl App {
             picked,
             name_draft: String::new(),
             adding_role: None,
+            add_button: None,
             limit_draft: String::new(),
             limit_known: None,
         });
     }
 
     pub(super) fn server_settings_dialog(&mut self, ctx: &egui::Context) {
+        let submit = [Action::CreateRole, Action::RenameRole].into_iter().find(|action| self.pressed.remove(action));
         let (Some(settings), Some(view)) = (&mut self.server_settings, &self.view) else {
             self.server_settings = None;
             return;
@@ -367,7 +425,9 @@ impl App {
             ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
                 ui.set_min_height(height_shared_by_tabs);
                 match (settings.tab, &view.roles) {
-                    (SettingsTab::Roles, Some(roles)) => roles_tab(ui, view, roles, settings, &mut send),
+                    (SettingsTab::Roles, Some(roles)) => {
+                        roles_tab(ui, view, roles, settings, &mut send, submit, &self.settings.bindings);
+                    }
                     (SettingsTab::Roles, None) => {
                         ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT_TEXT));
                     }
@@ -387,7 +447,7 @@ impl App {
         for msg in send {
             self.net.send(msg);
         }
-        if done || modal.should_close() {
+        if done || modal_closed(&modal, self.pressed.contains(&Action::DismissDialog)) {
             self.server_settings = None;
         }
     }
@@ -428,5 +488,36 @@ fn file_settings(
     hint(ui, "Applies to new uploads in every channel.");
     if let Some(error) = error {
         ui.label(RichText::new(error.as_str()).color(theme::RED));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_name_shortcut_follows_the_focused_editor() {
+        let ctx = egui::Context::default();
+        let add = egui::Id::unique("add-button");
+        let s = ServerSettings {
+            tab: SettingsTab::Roles,
+            bans: None,
+            picked: Pick::Role(RoleId::MODERATOR),
+            name_draft: "Moderator".into(),
+            adding_role: Some("Friends".into()),
+            add_button: Some(add),
+            limit_draft: String::new(),
+            limit_known: None,
+        };
+        let rename = egui::Id::unique(("role-name", RoleId::MODERATOR));
+        for (focus, expected) in [
+            (egui::Id::unique(ROLE_NAME), Some(Action::CreateRole)),
+            (add, Some(Action::CreateRole)),
+            (rename, Some(Action::RenameRole)),
+            (egui::Id::unique("unrelated"), None),
+        ] {
+            ctx.memory_mut(|m| m.request_focus(focus));
+            assert_eq!(s.role_submit_action(&ctx), expected);
+        }
     }
 }

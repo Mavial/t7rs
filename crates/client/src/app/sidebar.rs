@@ -15,6 +15,7 @@ use super::widgets::{
     truncated,
 };
 use super::{App, Conn, Lost, manages};
+use crate::bindings::Action;
 use crate::icons::{self, Icon};
 use crate::theme::{self, Btn};
 
@@ -221,7 +222,8 @@ impl App {
 
     fn server_button(&self, ui: &mut egui::Ui) -> Option<ServerAction> {
         let Some(address) = self.address() else {
-            let resp = menu_button(ui, Icon::Plus).on_hover_text("Connect to a server (Ctrl+S)");
+            let tip = self.settings.bindings.hint(ui.ctx(), Action::OpenConnect, "Connect to a server");
+            let resp = menu_button(ui, Icon::Plus).on_hover_text(tip);
             return resp.clicked().then_some(ServerAction::Connect);
         };
         let resp = menu_button(ui, Icon::Dots);
@@ -384,11 +386,15 @@ impl App {
             });
             menu_separator(ui);
             let moon = if away { theme::AMBER } else { theme::TEXT_FAINT };
-            if ui.add(Item::new(Icon::Moon, "Away").right("Ctrl+Shift+A").icon_color(moon)).clicked() {
+            let away_key =
+                self.settings.bindings.get(Action::ToggleAway, None).map_or_else(String::new, |b| b.label(ui.ctx()));
+            if ui.add(Item::new(Icon::Moon, "Away").right(&away_key).icon_color(moon)).clicked() {
                 picked = Some(YouAction::Away);
                 ui.close();
             }
-            if ui.add(Item::new(Icon::Sliders, "Settings…").right("Ctrl+,")).clicked() {
+            let settings_key =
+                self.settings.bindings.get(Action::OpenSettings, None).map_or_else(String::new, |b| b.label(ui.ctx()));
+            if ui.add(Item::new(Icon::Sliders, "Settings…").right(&settings_key)).clicked() {
                 picked = Some(YouAction::Settings);
                 ui.close();
             }
@@ -405,9 +411,13 @@ impl App {
 
     fn voice_buttons(&mut self, ui: &mut egui::Ui) {
         let mut s = self.settings.status;
-        let mic_tip = if s.muted { "Unmute microphone (Ctrl+Shift+M)" } else { "Mute microphone (Ctrl+Shift+M)" };
+        let mic_tip = self.settings.bindings.hint(
+            ui.ctx(),
+            Action::ToggleMic,
+            if s.muted { "Unmute microphone" } else { "Mute microphone" },
+        );
         let mic = match self.my_speech() {
-            Speech::Allowed => toggle(ui, &mut s.muted, Icon::Mic, Icon::MicOff, theme::RED, mic_tip),
+            Speech::Allowed => toggle(ui, &mut s.muted, Icon::Mic, Icon::MicOff, theme::RED, &mic_tip),
             Speech::NotHere => {
                 mic_held(ui, Icon::MicOff, theme::TEXT_FAINT, "You can't speak in this channel");
                 false
@@ -418,8 +428,12 @@ impl App {
                 false
             }
         };
-        let sound_tip = if s.deafened { "Turn sound on (Ctrl+Shift+D)" } else { "Turn sound off (Ctrl+Shift+D)" };
-        let sound = toggle(ui, &mut s.deafened, Icon::Headphones, Icon::HeadphonesOff, theme::RED, sound_tip);
+        let sound_tip = self.settings.bindings.hint(
+            ui.ctx(),
+            Action::ToggleSound,
+            if s.deafened { "Turn sound on" } else { "Turn sound off" },
+        );
+        let sound = toggle(ui, &mut s.deafened, Icon::Headphones, Icon::HeadphonesOff, theme::RED, &sound_tip);
         if mic || sound {
             self.set_status(s);
         }

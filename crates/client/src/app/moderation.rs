@@ -4,11 +4,13 @@ use t7_proto::model::ServerView;
 use t7_proto::{C2S, ChannelId, ClientId, MAX_REASON_LEN};
 
 use super::chat::LineKind;
+use super::key_bindings::modal_closed;
 use super::sidebar::HEADER_H;
 use super::widgets::{
     described_switch, dialog_footer, field, icon_button, paint_avatar, person_header, placeholder, section, text_input,
 };
 use super::{App, Lost, default_channel_name};
+use crate::bindings::Action;
 use crate::icons::Icon;
 use crate::sounds::Sound;
 use crate::theme;
@@ -25,6 +27,16 @@ pub(super) struct PokeForm {
 pub(super) enum Moderation {
     Kick { target: ClientId, name: String, from_server: bool, reason: String, focused: bool },
     Ban { target: ClientId, name: String, reason: String, length: Option<u64>, include_ip: bool, focused: bool },
+}
+
+impl Moderation {
+    pub(super) fn submit_action(&self) -> Action {
+        match self {
+            Self::Kick { from_server: true, .. } => Action::KickServer,
+            Self::Kick { from_server: false, .. } => Action::KickChannel,
+            Self::Ban { .. } => Action::Ban,
+        }
+    }
 }
 
 struct BanLength {
@@ -165,6 +177,7 @@ impl App {
 
     pub(super) fn poke_dialog(&mut self, ctx: &egui::Context) {
         let Some(form) = &mut self.poke_form else { return };
+        let enter = self.pressed.remove(&Action::SendPoke);
         let (mut send, mut cancel) = (false, false);
         let modal = theme::modal("poke").show(ctx, |ui| {
             ui.set_width(400.0);
@@ -176,7 +189,7 @@ impl App {
                 edit.request_focus();
                 form.focus_requested = true;
             }
-            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if enter {
                 send = true;
             }
             dialog_footer(ui, |ui| {
@@ -192,7 +205,7 @@ impl App {
             let form = self.poke_form.take().expect("open");
             self.net.send(C2S::Poke { target: form.target, message: form.message.trim().to_owned() });
             self.push(0, LineKind::System, format!("You poked {}", form.name));
-        } else if cancel || modal.should_close() {
+        } else if cancel || modal_closed(&modal, self.pressed.contains(&Action::DismissDialog)) {
             self.poke_form = None;
         }
     }
@@ -211,9 +224,9 @@ impl App {
         let default_name = default_channel_name(view);
         let mut send: Option<C2S> = None;
         let mut cancel = false;
+        let enter = self.pressed.remove(&dialog.submit_action());
         let modal = theme::modal("moderation").show(ctx, |ui| {
             ui.set_width(440.0);
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             match dialog {
                 Moderation::Kick { target, name, from_server, reason, focused } => {
                     let (title, note) = if *from_server {
@@ -278,7 +291,7 @@ impl App {
         if let Some(msg) = send {
             self.net.send(msg);
             self.moderation = None;
-        } else if cancel || modal.should_close() {
+        } else if cancel || modal_closed(&modal, self.pressed.contains(&Action::DismissDialog)) {
             self.moderation = None;
         }
     }

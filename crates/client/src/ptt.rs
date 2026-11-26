@@ -2,7 +2,7 @@
 //! capture thread can poll globally (while a game has focus). This module maps
 //! them to and from egui input for binding, labels and the focused fallback.
 
-use egui::{InputState, Key, PointerButton};
+use egui::{Event, Key, Modifiers, PointerButton};
 
 const CONTROL: u16 = 0x11;
 const SHIFT: u16 = 0x10;
@@ -14,6 +14,7 @@ const KEYS: &[(u16, Key, &str)] = &[
     (0x09, Key::Tab, "Tab"),
     (0x08, Key::Backspace, "Backspace"),
     (0x0D, Key::Enter, "Enter"),
+    (0x1B, Key::Escape, "Esc"),
     (0x2D, Key::Insert, "Insert"),
     (0x2E, Key::Delete, "Delete"),
     (0x24, Key::Home, "Home"),
@@ -92,26 +93,24 @@ const BUTTONS: &[(u16, PointerButton, &str)] = &[
     (0x06, PointerButton::Extra2, "Mouse 5"),
 ];
 
-/// The key or button pressed this frame, for binding. Escape is left to cancel.
-pub fn capture(input: &InputState) -> Option<u16> {
-    for ev in &input.events {
-        match ev {
-            egui::Event::Key { key, pressed: true, .. } => {
-                if let Some(&(vk, ..)) = KEYS.iter().find(|(_, k, _)| k == key) {
-                    return Some(vk);
-                }
-            }
-            egui::Event::PointerButton { button, pressed: true, .. } => {
-                if let Some(&(vk, ..)) = BUTTONS.iter().find(|(_, b, _)| b == button) {
-                    return Some(vk);
-                }
-            }
-            _ => {}
+fn modifiers(m: Modifiers) -> [(u16, bool); 3] {
+    [(CONTROL, m.ctrl), (SHIFT, m.shift), (ALT, m.alt)]
+}
+
+pub fn capture(event: &Event, previous: Modifiers) -> Option<u16> {
+    match *event {
+        Event::Key { pressed: true, repeat: false, key, .. } => {
+            KEYS.iter().find(|(_, k, _)| *k == key).map(|&(vk, ..)| vk)
         }
+        Event::PointerButton { button, pressed: true, .. } => {
+            BUTTONS.iter().find(|(_, b, _)| *b == button).map(|&(vk, ..)| vk)
+        }
+        Event::ModifiersChanged(current) => modifiers(current)
+            .into_iter()
+            .find(|&(vk, down)| down && !modifiers(previous).contains(&(vk, true)))
+            .map(|(vk, _)| vk),
+        _ => None,
     }
-    // Modifier keys on their own arrive only as modifier state.
-    let m = input.modifiers;
-    [(m.ctrl, CONTROL), (m.shift, SHIFT), (m.alt, ALT)].into_iter().find(|(on, _)| *on).map(|(_, vk)| vk)
 }
 
 pub fn label(vk: u16) -> String {
@@ -121,24 +120,68 @@ pub fn label(vk: u16) -> String {
 }
 
 /// Whether the key is held, as far as our own window can tell.
-pub fn is_down(vk: u16, input: &InputState) -> bool {
-    if let Some(&(_, key, _)) = KEYS.iter().find(|(v, ..)| *v == vk) {
-        return input.key_down(key);
+pub fn transition(vk: u16, event: &Event) -> Option<bool> {
+    match *event {
+        Event::Key { key, pressed, .. } => KEYS.iter().any(|&(v, k, _)| v == vk && k == key).then_some(pressed),
+        Event::PointerButton { button, pressed, .. } => {
+            BUTTONS.iter().any(|&(v, b, _)| v == vk && b == button).then_some(pressed)
+        }
+        Event::ModifiersChanged(m) => modifiers(m).into_iter().find(|&(v, _)| v == vk).map(|(_, down)| down),
+        Event::WindowFocused(false) => Some(false),
+        _ => None,
     }
-    if let Some(&(_, button, _)) = BUTTONS.iter().find(|(v, ..)| *v == vk) {
-        return input.pointer.button_down(button);
+}
+
+pub fn overlaps(vk: u16, key: Key, mods: Modifiers) -> bool {
+    modifiers(mods).contains(&(vk, true)) || KEYS.iter().any(|&(v, k, _)| v == vk && k == key)
+}
+
+#[derive(Default)]
+pub enum Held {
+    #[default]
+    Up,
+    Key(Key),
+    MouseOrModifier,
+}
+
+impl Held {
+    pub fn update(&mut self, vk: u16, event: &Event) {
+        if let Event::Key { key, physical_key, pressed, repeat, .. } = *event {
+            let identity = physical_key.unwrap_or(key);
+            if !pressed && matches!(*self, Self::Key(held) if held == identity) {
+                *self = Self::Up;
+            } else if pressed && !repeat && transition(vk, event) == Some(true) {
+                *self = Self::Key(identity);
+            }
+        } else if let Some(down) = transition(vk, event) {
+            *self = if down { Self::MouseOrModifier } else { Self::Up };
+        }
     }
-    match vk {
-        CONTROL => input.modifiers.ctrl,
-        SHIFT => input.modifiers.shift,
-        ALT => input.modifiers.alt,
-        _ => false,
+
+    pub fn is_down(&self) -> bool {
+        !matches!(self, Self::Up)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn releasing_a_shifted_key_closes_the_local_gate() {
+        let mut held = Held::Up;
+        let key = |key, pressed, modifiers| Event::Key {
+            key,
+            physical_key: Some(Key::Num1),
+            pressed,
+            modifiers,
+            repeat: false,
+        };
+        held.update(0x31, &key(Key::Num1, true, Modifiers::NONE));
+        assert!(held.is_down());
+        held.update(0x31, &key(Key::Exclamationmark, false, Modifiers::SHIFT));
+        assert!(!held.is_down());
+    }
 
     #[test]
     fn codes_are_unique_and_labelled() {

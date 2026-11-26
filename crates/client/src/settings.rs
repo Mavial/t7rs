@@ -8,6 +8,7 @@ use t7_proto::identity::IdentityKey;
 use t7_proto::tls::Fingerprint;
 
 use crate::audio::AudioSettings;
+use crate::bindings::Bindings;
 use crate::net::ServerKey;
 use crate::screen::Quality;
 
@@ -17,6 +18,8 @@ pub struct Settings {
     pub nickname: String,
     pub status: ClientStatus,
     pub audio: AudioSettings,
+    #[serde(skip_serializing_if = "Bindings::is_empty")]
+    pub bindings: Bindings,
     pub recent: Vec<Recent>,
     /// Per-person volume by nickname; only values other than 100% are kept.
     pub user_volumes: std::collections::BTreeMap<String, f32>,
@@ -117,6 +120,7 @@ mod tests {
             nickname: "santi".into(),
             status: ClientStatus { muted: true, deafened: false, away: false },
             audio: AudioSettings { ptt_key: Some(crate::audio::PttKey { vk: 0x56 }), ..Default::default() },
+            bindings: Bindings::default(),
             recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
             user_volumes: [("Some One".to_owned(), 0.5)].into(),
             server_certs: [(ServerKey::of("1.2.3.4"), Fingerprint([0xab; 32]))].into(),
@@ -126,5 +130,29 @@ mod tests {
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn key_binding_overrides_preserve_legacy_push_to_talk() {
+        use crate::bindings::{Action, Binding, Chord};
+        let mut s: Settings = toml::from_str("nickname = 'Mira'\n[audio.ptt_key]\nvk = 86\n").unwrap();
+        let key = egui::Event::Key {
+            key: egui::Key::F6,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let remapped = Chord::from_press(&key).unwrap().0;
+        s.bindings.set(Action::ToggleMic, &mut s.audio.ptt_key, Some(Binding::Chord(remapped))).unwrap();
+        s.bindings.set(Action::SendChat, &mut s.audio.ptt_key, None).unwrap();
+
+        let saved = toml::to_string(&s).unwrap();
+        let loaded: Settings = toml::from_str(&saved).unwrap();
+        assert_eq!(loaded.audio.ptt_key.unwrap().vk, 86);
+        assert_eq!(loaded.bindings.chord(Action::ToggleMic), Some(remapped));
+        assert_eq!(loaded.bindings.chord(Action::SendChat), None);
+        assert_eq!(loaded.bindings.chord(Action::CodeNewline).unwrap().key, egui::Key::Enter);
+        assert_eq!(loaded.nickname, "Mira");
     }
 }

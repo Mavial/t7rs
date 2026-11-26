@@ -10,10 +10,12 @@ use t7_proto::model::ServerView;
 use t7_proto::{C2S, ChannelKind, ClientId, TextTarget};
 
 use super::files::Files;
+use super::key_bindings::{COMPOSER, SEND_BUTTON};
 use super::markdown::Body;
 use super::sidebar::HEADER_H;
 use super::widgets::{paint_avatar, truncated};
 use super::{App, Conn};
+use crate::bindings::Action;
 use crate::icons::{self, Icon};
 use crate::theme::{self, Btn};
 
@@ -175,9 +177,9 @@ fn tab_button(ui: &mut egui::Ui, tab: &Tab, active: bool) -> TabButton {
     TabButton { resp: resp.on_hover_cursor(egui::CursorIcon::PointingHand), close_clicked: closed }
 }
 
-fn send_button(ui: &mut egui::Ui, modifiers: egui::Modifiers) -> egui::Response {
+fn send_button(ui: &mut egui::Ui, tip: &str) -> egui::Response {
     let (_, rect) = ui.allocate_space(vec2(32.0, 32.0));
-    let response = ui.interact(rect, egui::Id::unique("chat-send"), Sense::click());
+    let response = ui.interact(rect, egui::Id::unique(SEND_BUTTON), Sense::click());
     let fill = if !response.enabled() {
         theme::SURFACE_ACTIVE
     } else if response.is_pointer_button_down_on() {
@@ -191,26 +193,10 @@ fn send_button(ui: &mut egui::Ui, modifiers: egui::Modifiers) -> egui::Response 
     let ink = if response.enabled() { theme::ON_ACCENT } else { theme::TEXT_FAINT };
     icons::paint(ui.painter(), rect.shrink(7.0), Icon::ArrowUp, ink);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, response.enabled(), "Send"));
-    let shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(modifiers, egui::Key::Enter));
-    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Send ({shortcut})"))
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
 }
 
 impl App {
-    pub(crate) fn prepare_chat_paste(&self, ctx: &egui::Context, events: &mut [egui::Event]) {
-        let id = egui::Id::unique("chat-composer");
-        for event in events {
-            if let egui::Event::Paste(text) = event
-                && ctx.memory(|m| m.has_focus(id))
-                && !egui::TextEdit::load_state(ctx, id).and_then(|state| state.cursor.char_range()).is_some_and(
-                    |range| super::markdown::in_code(&self.input, range.as_sorted_char_range().start.into()),
-                )
-                && let Some(markdown) = super::markdown::rich_paste(text)
-            {
-                *text = markdown;
-            }
-        }
-    }
-
     pub(super) fn open_private(&mut self, id: ClientId) {
         let idx = self.private_tab(id);
         self.active_tab = idx;
@@ -417,11 +403,21 @@ impl App {
         let upload_limit = self.files.limit.filter(|_| tab.kind == TabKind::Channel);
         let files = upload_limit.is_some();
         let draft_cap = (ui.available_height() * 0.38).clamp(68.0, 240.0);
-        let id = egui::Id::unique("chat-composer");
+        let id = egui::Id::unique(COMPOSER);
         let cursor = egui::TextEdit::load_state(ui.ctx(), id)
             .and_then(|s| s.cursor.char_range())
             .map_or(usize::MAX, |r| r.primary.index.into());
         let writing_code = super::markdown::in_fenced_code(&self.input, cursor);
+        let send = self.pressed.remove(&Action::SendChat) | self.pressed.remove(&Action::SendCode);
+        let outdent = self.pressed.remove(&Action::CodeOutdent);
+        let send_action = if writing_code { Action::SendCode } else { Action::SendChat };
+        let send_tip = self.settings.bindings.hint(ui.ctx(), send_action, "Send");
+        let attach_tip = self.settings.bindings.get(Action::ChatPaste, None).map_or_else(
+            || "Attach files".to_owned(),
+            |binding| format!("Attach files · Paste an image ({})", binding.label(ui.ctx())),
+        );
+        let send_becomes_newline =
+            self.settings.bindings.chord(Action::SendChat) == self.settings.bindings.chord(Action::CodeNewline);
         let hint = match tab.kind {
             TabKind::Server => "Message everyone on the server".to_owned(),
             TabKind::Channel => format!("Message #{}", tab.title),
@@ -452,9 +448,13 @@ impl App {
             field.show(ui, |ui| {
                 let focused = ui.memory(|m| m.has_focus(id));
                 if files && focused && self.files.can_post() {
-                    let images = ui.input_mut(|i| i.events.extract_if(.., |event| matches!(event, egui::Event::PasteImage(_))).collect::<Vec<_>>());
+                    let images = ui.input_mut(|i| {
+                        i.events.extract_if(.., |event| matches!(event, egui::Event::PasteImage(_))).collect::<Vec<_>>()
+                    });
                     for event in images {
-                        if let egui::Event::PasteImage(image) = event { self.files.paste(ui.ctx(), image); }
+                        if let egui::Event::PasteImage(image) = event {
+                            self.files.paste(ui.ctx(), image);
+                        }
                     }
                 }
                 if files && self.files.has_staged() {
@@ -469,29 +469,18 @@ impl App {
                     if let Some(limit) = upload_limit
                         && ui
                             .add_enabled(self.files.can_post(), Btn::ghost("+").small())
-                            .on_hover_text(format!(
-                                "Attach files or paste an image · {} per file",
-                                super::files::size_label(limit)
-                            ))
+                            .on_hover_text(format!("{attach_tip} · {} per file", super::files::size_label(limit)))
                             .clicked()
                     {
                         self.files.pick(ui.ctx());
                     }
-                    let send_modifiers = if writing_code { egui::Modifiers::COMMAND } else { egui::Modifiers::NONE };
-                    let send = focused && ui.input(|i| i.events.iter().any(|event| {
-                        matches!(event, egui::Event::Key { key: egui::Key::Enter, pressed: true, repeat: false, modifiers, .. }
-                            if modifiers.matches_exact(send_modifiers))
-                    }));
                     let width = (ui.available_width() - 32.0 - ui.spacing().item_spacing.x).max(1.0);
                     let mut layouter = super::markdown::draft_galley;
-                    let height = (layouter(ui, &self.input, width).size().y + 12.0)
-                        .clamp(34.0, draft_cap);
-                    let newline = if writing_code { egui::Modifiers::NONE } else { egui::Modifiers::SHIFT };
+                    let height = (layouter(ui, &self.input, width).size().y + 12.0).clamp(34.0, draft_cap);
                     let edit = egui::TextEdit::multiline(&mut self.input)
                         .id(id)
                         .desired_rows(1)
-                        .return_key(egui::KeyboardShortcut::new(newline, egui::Key::Enter))
-                        .lock_focus(writing_code)
+                        .return_key(None)
                         .hint_text(RichText::new(hint).color(theme::TEXT_FAINT))
                         .frame(egui::Frame::NONE)
                         .desired_width(width)
@@ -507,13 +496,23 @@ impl App {
                         .min_scrolled_height(height)
                         .show(ui, |ui| edit.show(ui))
                         .inner;
+                    if outdent && let Some(range) = output.cursor_range {
+                        use egui::TextBuffer;
+                        let mut caret = self.input.delete_selected(&range);
+                        self.input.decrease_indentation(&mut caret);
+                        output.state.cursor.set_char_range(Some(egui::text::CCursorRange::one(caret)));
+                        output.state.clone().store(ui.ctx(), id);
+                    }
                     let fence_opened_this_frame = !writing_code
                         && output.response.changed()
                         && output.cursor_range.is_some_and(|range| {
                             super::markdown::in_fenced_code(&self.input, range.primary.index.into())
                         });
                     if send {
-                        if fence_opened_this_frame && let Some(range) = output.cursor_range {
+                        if send_becomes_newline
+                            && fence_opened_this_frame
+                            && let Some(range) = output.cursor_range
+                        {
                             use egui::TextBuffer;
                             let mut caret = self.input.delete_selected(&range);
                             self.input.insert_text_at(&mut caret, "\n", usize::MAX);
@@ -531,7 +530,7 @@ impl App {
                         let ready = (!self.input.trim().is_empty() || files && self.files.has_staged())
                             && !(files && self.files.preparing_image())
                             && self.input.chars().count() <= t7_proto::MAX_TEXT_LEN;
-                        if ui.add_enabled(ready, |ui: &mut egui::Ui| send_button(ui, send_modifiers)).clicked() {
+                        if ui.add_enabled(ready, |ui: &mut egui::Ui| send_button(ui, &send_tip)).clicked() {
                             self.send_chat();
                             self.focus_input = true;
                         }

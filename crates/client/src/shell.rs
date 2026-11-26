@@ -83,7 +83,14 @@ impl Shell {
         let started = Instant::now();
 
         let mut raw = g.input.take_egui_input(&g.window);
-        self.app.prepare_chat_paste(&self.ctx, &mut raw.events);
+        self.app.prepare_input(&self.ctx, &mut raw, || {
+            if let Some(text) = g.input.clipboard_text() {
+                let text = text.replace("\r\n", "\n");
+                (!text.is_empty()).then_some(egui::Event::Paste(text))
+            } else {
+                g.input.clipboard_image().map(|image| egui::Event::PasteImage(Arc::new(image)))
+            }
+        });
         let app = &mut self.app;
         let mut out = self.ctx.run_ui(raw, |ui| app.ui(ui));
         out.platform_output.commands.retain(|command| {
@@ -112,6 +119,7 @@ impl Shell {
                     let px: &mut [[u8; 4]] = bytemuck::cast_slice_mut(&mut buf);
                     let mut target = BufferMutRef::new(px, size.width as usize, size.height as usize);
                     g.renderer.render(&mut target, &prims, &out.textures_delta, out.pixels_per_point);
+                    out.textures_delta.clear();
                     if let Err(e) = buf.present() {
                         tracing::error!("cannot present frame: {e}");
                     }
@@ -211,7 +219,7 @@ impl ApplicationHandler<Wake> for Shell {
         if let Some(screen) = &mut self.screen
             && screen.id() == id
         {
-            match screen.event(&event) {
+            match screen.event(&event, &self.app.settings().bindings, self.app.capturing_binding()) {
                 Some(watch::Action::Close) => {
                     self.screen = None;
                     self.app.stop_watching_all();
@@ -222,7 +230,16 @@ impl ApplicationHandler<Wake> for Shell {
             return self.schedule(Duration::ZERO);
         }
         let Some(g) = self.gfx.as_mut().filter(|g| g.window.id() == id) else { return };
+        g.input.set_clipboard_shortcuts(self.app.clipboard_shortcuts());
+        let start = g.input.egui_input().events.len();
         let response = g.input.on_window_event(&g.window, &event);
+        if matches!(&event, WindowEvent::KeyboardInput { event, .. } if event.repeat) {
+            for event in &mut g.input.egui_input_mut().events[start..] {
+                if let egui::Event::Key { repeat, .. } = event {
+                    *repeat = true;
+                }
+            }
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.store.save(self.app.settings());

@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod bindings;
 mod brand;
 mod channel_drop;
 mod dsp;

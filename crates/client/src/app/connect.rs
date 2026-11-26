@@ -4,8 +4,10 @@
 use egui::{Align, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, vec2};
 use t7_proto::tls::Fingerprint;
 
+use super::key_bindings::modal_closed;
 use super::widgets::{dialog_footer, field_label, logo, paint_avatar, text_input, truncated};
 use super::{App, Conn, Login};
+use crate::bindings::Action;
 use crate::icons::Icon;
 use crate::net::ServerKey;
 use crate::settings::Recent;
@@ -136,7 +138,7 @@ impl App {
             Some(ConnectForm { address, nickname: self.settings.nickname.clone(), password, focus_requested: false });
     }
 
-    fn first_run(&self) -> bool {
+    pub(super) fn first_run(&self) -> bool {
         matches!(self.conn, Conn::Disconnected) && self.settings.recent.is_empty()
     }
 
@@ -206,7 +208,8 @@ impl App {
                 ui.label(RichText::new(err).color(theme::RED));
             }
             ui.add_space(16.0);
-            open_form = ui.add(Btn::primary("Connect to a server").min_width(FORM_W)).on_hover_text("Ctrl+S").clicked();
+            let tip = self.settings.bindings.hint(ui.ctx(), Action::OpenConnect, "Connect to a server");
+            open_form = ui.add(Btn::primary("Connect to a server").min_width(FORM_W)).on_hover_text(tip).clicked();
             ui.add_space(4.0);
             for r in &self.settings.recent {
                 if recent_card(ui, r).clicked() {
@@ -225,6 +228,8 @@ impl App {
 
     fn first_run_form(&mut self, ui: &mut egui::Ui) {
         self.open_connect_form();
+        let enter = self.pressed.remove(&Action::FirstConnect);
+        let tip = self.settings.bindings.hint(ui.ctx(), Action::FirstConnect, "Connect");
         let error = self.last_error.as_deref();
         let form = self.form.as_mut().expect("form open");
         let mut submit = false;
@@ -241,8 +246,8 @@ impl App {
                 form_fields(ui, form, true, error);
                 ui.add_space(8.0);
                 let ready = form.ready();
-                let button = ui.add_enabled(ready, Btn::primary("Connect").min_width(FORM_W));
-                submit = ready && (button.clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                let button = ui.add_enabled(ready, Btn::primary("Connect").min_width(FORM_W)).on_hover_text(&tip);
+                submit = ready && (button.clicked() || enter);
             });
         });
         if submit {
@@ -257,6 +262,8 @@ impl App {
         }
         let error = self.last_error.as_deref();
         let Some(form) = &mut self.form else { return };
+        let enter = self.pressed.remove(&Action::Connect);
+        let binding = self.settings.bindings.get(Action::Connect, None);
         let mut submit = false;
         let mut cancel = false;
         let modal = theme::modal("connect").show(ctx, |ui| {
@@ -264,7 +271,7 @@ impl App {
             ui.label(RichText::new("Connect to a server").size(17.0).color(theme::TEXT));
             ui.add_space(14.0);
             form_fields(ui, form, false, error);
-            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if enter {
                 submit = form.ready();
             }
             dialog_footer(ui, |ui| {
@@ -274,12 +281,14 @@ impl App {
                 if ui.add(Btn::secondary("Cancel")).clicked() {
                     cancel = true;
                 }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.label(RichText::new("Ctrl+S").size(11.5).color(theme::TEXT_FAINT));
-                });
+                if let Some(binding) = binding {
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.label(RichText::new(binding.label(ctx)).size(11.5).color(theme::TEXT_FAINT));
+                    });
+                }
             });
         });
-        if modal.should_close() {
+        if modal_closed(&modal, self.pressed.contains(&Action::DismissDialog)) {
             cancel = true;
         }
         if submit {
@@ -339,7 +348,7 @@ impl App {
             self.settings.server_certs.insert(ServerKey::of(&change.address), change.presented);
             let nickname = self.settings.nickname.clone();
             self.connect(change.address, nickname, change.password);
-        } else if cancel || modal.should_close() {
+        } else if cancel || modal_closed(&modal, self.pressed.contains(&Action::DismissDialog)) {
             self.cert_change = None;
         }
     }

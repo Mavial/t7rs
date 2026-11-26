@@ -102,6 +102,8 @@ pub struct Shared {
     deafened: AtomicBool,
     /// Push-to-talk key held while our window has focus (non-Windows fallback).
     ptt_local: AtomicBool,
+    ptt_capturing: AtomicBool,
+    ptt_rearm: AtomicBool,
     error: Mutex<Option<String>>,
     /// What the speakers just played (48 kHz), for the echo canceller.
     echo_reference: Mutex<VecDeque<f32>>,
@@ -117,6 +119,8 @@ impl Shared {
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
             ptt_local: AtomicBool::new(false),
+            ptt_capturing: AtomicBool::new(false),
+            ptt_rearm: AtomicBool::new(false),
             error: Mutex::new(None),
             echo_reference: Mutex::new(VecDeque::with_capacity(ECHO_REFERENCE_MAX)),
         });
@@ -136,6 +140,29 @@ impl Shared {
 
     pub fn set_ptt_local(&self, down: bool) {
         self.ptt_local.store(down, Ordering::Relaxed);
+    }
+
+    pub fn start_binding_capture(&self) {
+        self.ptt_capturing.store(true, Ordering::Release);
+        self.ptt_rearm.store(true, Ordering::Relaxed);
+        self.set_ptt_local(false);
+    }
+
+    pub fn finish_binding_capture(&self) {
+        self.ptt_capturing.store(false, Ordering::Release);
+    }
+
+    fn ptt_pressed(&self, key: Option<PttKey>) -> bool {
+        if self.ptt_capturing.load(Ordering::Acquire) {
+            return false;
+        }
+        let down = key.is_some_and(|k| key_down_global(k.vk) || self.ptt_local.load(Ordering::Relaxed));
+        if down {
+            !self.ptt_rearm.load(Ordering::Relaxed)
+        } else {
+            self.ptt_rearm.store(false, Ordering::Relaxed);
+            false
+        }
     }
 
     /// Latest microphone level in dBFS (after gain).
@@ -487,9 +514,7 @@ fn capture_worker(rx: mpsc::Receiver<Vec<f32>>, rate: u32, shared: &Shared, sink
                     }
                     now < hold_until
                 }
-                TxMode::PushToTalk => {
-                    ptt.is_some_and(|k| key_down_global(k.vk)) || shared.ptt_local.load(Ordering::Relaxed)
-                }
+                TxMode::PushToTalk => shared.ptt_pressed(ptt),
             };
             let open = wants && !shared.muted.load(Ordering::Relaxed) && !shared.deafened.load(Ordering::Relaxed);
             let was_open = shared.transmitting.swap(open, Ordering::Relaxed);
@@ -632,6 +657,23 @@ fn key_down_global(_vk: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_suspends_push_to_talk_until_the_key_is_released() {
+        let shared = Shared::new(AudioSettings::default());
+        let key = Some(PttKey { vk: 0 });
+        shared.set_ptt_local(true);
+        assert!(shared.ptt_pressed(key));
+        shared.start_binding_capture();
+        shared.set_ptt_local(true);
+        assert!(!shared.ptt_pressed(key));
+        shared.finish_binding_capture();
+        assert!(!shared.ptt_pressed(key));
+        shared.set_ptt_local(false);
+        assert!(!shared.ptt_pressed(key));
+        shared.set_ptt_local(true);
+        assert!(shared.ptt_pressed(key));
+    }
 
     fn encoded_tone(frames: usize) -> Vec<Vec<u8>> {
         let mut enc =
