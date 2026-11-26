@@ -43,6 +43,7 @@ pub struct LeagueWindow {
 }
 
 impl Source {
+    #[cfg_attr(not(windows), allow(dead_code, reason = "only the examples select windows on this platform"))]
     pub fn is_window(self) -> bool {
         !matches!(self, Self::Monitor(_))
     }
@@ -90,6 +91,7 @@ pub(crate) fn picker_sources() -> PickerSources {
 
 /// Monitors (the primary first), then the windows that can be captured.
 /// Empty where screen sharing is not supported.
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the examples list ungrouped sources on this platform"))]
 pub fn sources() -> Vec<SourceInfo> {
     platform::sources()
 }
