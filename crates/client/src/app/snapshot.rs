@@ -17,7 +17,7 @@ use t7_proto::tls::Fingerprint;
 use t7_proto::{BanInfo, S2C};
 
 use super::channel_dialog::FormTab;
-use super::chat::{Line, LineKind, TabKind};
+use super::chat::{Line, LineKind, Speaker, TabKind};
 use super::server_settings::{Pick, SettingsTab};
 use super::sharing::Watching;
 use super::shelf::Card;
@@ -135,7 +135,7 @@ fn poke(from: u32, name: &str, message: &str, time: &str) -> PokeAlert {
 }
 
 fn msg(from: u32, name: &str) -> LineKind {
-    LineKind::Msg { from, name: name.into() }
+    LineKind::Msg { from: Speaker::Client(from), name: name.into() }
 }
 
 fn recents() -> Vec<Recent> {
@@ -277,7 +277,52 @@ fn settings_on(ctx: &egui::Context, page: SettingsPage) -> App {
 
 type Scene = (&'static str, (u32, u32), fn(&egui::Context) -> App);
 
+fn attachment_thread(ctx: &egui::Context) -> App {
+    use t7_proto::files::{Attachment, ChannelFile, Cursor, Event};
+    let mut capture = Canvas::new((860, 480), connected, 1.0);
+    capture.app.settings.status.muted = true;
+    capture.app.drive_audio(&capture.ctx);
+    capture.app.tabs[1].lines.retain(|line| !matches!(line.kind, LineKind::Error));
+    for frame in 0..3 {
+        capture.draw(capture.input(frame));
+    }
+    let pixels = capture.px.iter().map(|p| Color32::from_rgb(p[0], p[1], p[2])).collect();
+    let screenshot =
+        ctx.load_texture("channel screenshot", ColorImage::new([860, 480], pixels), TextureOptions::LINEAR);
+    let mut app = connected(ctx);
+    app.settings.status.muted = true;
+    app.drive_audio(ctx);
+    let channel = app.view.as_ref().unwrap().my_channel().unwrap();
+    app.file_event(Event::Access { readable: vec![channel], can_post_here: true });
+    app.files_joined(channel);
+    app.tabs[1].lines.clear();
+    app.shelf.folded.insert(channel);
+    for (id, nickname, name, caption, size) in [
+        (1, "Marta", "channel-layout.png", "Here’s the channel layout.", 106_500),
+        (2, "Kenji", "lobby-recording.mp4", "And here’s the recording.", 5_830_000),
+        (3, "Kenji", "session-notes.pdf", "", 48_900),
+    ] {
+        let file = ChannelFile {
+            channel,
+            attachment: Attachment {
+                key: Cursor { id: [id; 16], posted_ms: 0 },
+                author: Identity([if id == 1 { 1 } else { 2 }; 32]),
+                nickname: nickname.into(),
+                name: name.into(),
+                caption: caption.into(),
+                size,
+            },
+        };
+        if id <= 2 {
+            app.files.seed_thumbnail(&file, screenshot.clone());
+        }
+        app.tabs[1].lines.push(line("20:16", LineKind::File(file), ""));
+    }
+    app
+}
+
 const SCENES: &[Scene] = &[
+    ("chat-attachments", (1100, 820), attachment_thread),
     ("01-empty", (1100, 720), disconnected),
     ("02-connected", (1100, 720), connected),
     ("03-connected-small", (760, 480), connected),
@@ -981,6 +1026,19 @@ async fn clipboard_to_chat_and_files() {
     assert!(viewer.app.tabs[1].lines.iter().any(
         |line| matches!(&line.kind, LineKind::File(file) if file.attachment.caption == "**Caption**\n\tsecond line")
     ));
+    viewer.draw_observing(viewer.input(frame), |shapes| {
+        assert!(
+            !shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Clipboard image.png"))
+        );
+    });
+    let inline = tile_bounds(&viewer, [21, 215, 93]);
+    click_at(&mut viewer, &mut frame, inline.center());
+    until(&mut viewer, &mut frame, |c| has_green(c) && tile_bounds(c, [21, 215, 93]).width() > inline.width() + 20.0)
+        .await;
+    click(&mut viewer, &mut frame, "Close");
+    tick(&mut viewer, &mut frame, None);
     click(&mut viewer, &mut frame, "Files");
     assert!(viewer.app.files.drawer_open);
     tick(&mut viewer, &mut frame, None);
@@ -1024,6 +1082,34 @@ async fn clipboard_to_chat_and_files() {
         until(&mut viewer, &mut frame, |c| c.app.files.linked_preview_ready(&uri)).await;
     }
     server.abort();
+}
+
+#[test]
+fn composer_centers_single_line_text_with_send_button() {
+    for scale in [1.0, 1.5] {
+        let mut canvas = Canvas::new((1200, 800), connected, scale);
+        canvas.app.files.limit = Some(1_000_000);
+        canvas.app.focus_input = true;
+        for (draft, visible) in [("", "Message #Games"), ("hello", "hello")] {
+            canvas.app.input = draft.into();
+            for frame in 0..3 {
+                canvas.draw(canvas.input(frame));
+            }
+            let mut text_y = None;
+            canvas.draw_observing(canvas.input(3), |shapes| {
+                for shape in shapes {
+                    if let egui::Shape::Text(text) = &shape.shape
+                        && text.galley.text() == visible
+                    {
+                        text_y = Some(text.pos.y + text.galley.size().y / 2.0);
+                    }
+                }
+            });
+            let send = canvas.ctx.read_response(egui::Id::unique("chat-send")).unwrap();
+            let offset = text_y.expect("visible composer text") - send.rect.center().y;
+            assert!(offset.abs() <= 1.0, "{visible:?} at {scale}x: vertical offset {offset}");
+        }
+    }
 }
 
 #[test]

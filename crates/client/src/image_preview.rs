@@ -14,12 +14,41 @@ use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 pub const MAX_ENCODED: u64 = 8 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 4096;
 const MAX_DECODED: u64 = 64 * 1024 * 1024;
-const PREVIEW_SIZE: [u32; 2] = [512, 320];
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageSize {
+    Thumbnail,
+    Expanded,
+}
 
 pub fn is_image_name(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, ext)| {
         ["png", "jpg", "jpeg", "gif", "webp"].iter().any(|image| ext.eq_ignore_ascii_case(image))
     })
+}
+
+#[cfg(windows)]
+pub fn video_poster(path: &std::path::Path) -> Result<egui::ColorImage, String> {
+    use windows::Storage::FileProperties::{ThumbnailMode, ThumbnailType};
+    use windows::Storage::{StorageFile, Streams::DataReader};
+    let path = windows::core::HSTRING::from(path.as_os_str());
+    let file = StorageFile::GetFileFromPathAsync(&path).map_err(error)?.join().map_err(error)?;
+    let thumbnail = file
+        .GetThumbnailAsyncOverloadDefaultOptions(ThumbnailMode::VideosView, 480)
+        .map_err(error)?
+        .join()
+        .map_err(error)?;
+    let size = thumbnail.Size().map_err(error)?;
+    if thumbnail.Type().map_err(error)? != ThumbnailType::Image || !(1..=MAX_ENCODED).contains(&size) {
+        return Err("No video poster available".into());
+    }
+    let reader = DataReader::CreateDataReader(&thumbnail.GetInputStreamAt(0).map_err(error)?).map_err(error)?;
+    let count = reader.LoadAsync(size as u32).map_err(error)?.join().map_err(error)?;
+    if u64::from(count) != size {
+        return Err("Incomplete video poster".into());
+    }
+    let mut bytes = vec![0; count as usize];
+    reader.ReadBytes(&mut bytes).map_err(error)?;
+    decode(&bytes, ImageSize::Thumbnail)
 }
 
 pub fn link(word: &str) -> Option<Uri> {
@@ -60,7 +89,7 @@ pub fn fetch(url: &Uri) -> Result<Option<egui::ColorImage>, String> {
     if !is_image_name(url.path()) && image::guess_format(&bytes).is_err() {
         return Ok(None);
     }
-    decode(&bytes).map(Some)
+    decode(&bytes, ImageSize::Thumbnail).map(Some)
 }
 
 #[derive(Debug)]
@@ -103,7 +132,7 @@ fn public_address(ip: IpAddr) -> bool {
     }
 }
 
-pub fn decode(bytes: &[u8]) -> Result<egui::ColorImage, String> {
+pub fn decode(bytes: &[u8], size: ImageSize) -> Result<egui::ColorImage, String> {
     if bytes.len() as u64 > MAX_ENCODED {
         return Err("Image is too large to preview".into());
     }
@@ -114,12 +143,12 @@ pub fn decode(bytes: &[u8]) -> Result<egui::ColorImage, String> {
     limits.max_alloc = Some(MAX_DECODED);
     reader.limits(limits);
     let image = reader.decode().map_err(error)?;
-    let image = if image.width() > PREVIEW_SIZE[0] || image.height() > PREVIEW_SIZE[1] {
-        image.thumbnail(PREVIEW_SIZE[0], PREVIEW_SIZE[1])
-    } else {
-        image
-    }
-    .into_rgba8();
+    let (width, height) = match size {
+        ImageSize::Thumbnail => (512, 320),
+        ImageSize::Expanded => (1920, 1200),
+    };
+    let image = if image.width() > width || image.height() > height { image.thumbnail(width, height) } else { image }
+        .into_rgba8();
     let size = [image.width() as usize, image.height() as usize];
     Ok(egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()))
 }

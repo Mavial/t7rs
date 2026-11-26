@@ -51,6 +51,8 @@ windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"]
 # The same version cpal already pulls in, so this only adds features.
 windows = { version = "0.62", features = [
     "Foundation",
+    "Storage_FileProperties",
+    "Storage_Streams",
     "Graphics_Capture",
     "Graphics_DirectX_Direct3D11",
     "Security_Authorization_AppCapabilityAccess",

@@ -47,7 +47,10 @@ pub enum Source {
 
 pub enum Download {
     Save(PathBuf),
-    Preview,
+    Preview(crate::image_preview::ImageSize),
+    Video(&'static str),
+    #[cfg(windows)]
+    VideoPoster(&'static str),
 }
 
 pub enum Update {
@@ -58,6 +61,7 @@ pub enum Update {
 pub enum Outcome {
     Uploaded,
     Saved,
+    Video(tempfile::TempPath),
     Preview(egui::ColorImage),
     Canceled,
 }
@@ -189,18 +193,47 @@ async fn run_transfer(
                 partial.persist(path).map_err(message)?;
                 Ok(Outcome::Saved)
             }
-            Download::Preview if size <= crate::image_preview::MAX_ENCODED => {
+            Download::Preview(image_size) if size <= crate::image_preview::MAX_ENCODED => {
                 let mut bytes = Vec::with_capacity(size as usize);
                 download(&mut stream, &mut bytes, &mut scratch, size, progress).await?;
-                let image = tokio::task::spawn_blocking(move || crate::image_preview::decode(&bytes))
+                let image = tokio::task::spawn_blocking(move || crate::image_preview::decode(&bytes, image_size))
                     .await
                     .map_err(message)??;
                 Ok(Outcome::Preview(image))
             }
-            Download::Preview => Err("Image is too large to preview".into()),
+            Download::Preview(_) => Err("Image is too large to preview".into()),
+            Download::Video(suffix) => {
+                let path = download_clip(&mut stream, suffix, &mut scratch, size, progress).await?;
+                progress.finalize(size)?;
+                Ok(Outcome::Video(path))
+            }
+            #[cfg(windows)]
+            Download::VideoPoster(suffix) => {
+                if size > crate::image_preview::MAX_ENCODED {
+                    return Err("Video is too large for an automatic preview".into());
+                }
+                let path = download_clip(&mut stream, suffix, &mut scratch, size, progress).await?;
+                let poster = tokio::task::spawn_blocking(move || crate::image_preview::video_poster(&path))
+                    .await
+                    .map_err(message)??;
+                Ok(Outcome::Preview(poster))
+            }
         },
         _ => Err("The file size has changed".into()),
     }
+}
+
+async fn download_clip(
+    stream: &mut (impl AsyncRead + Unpin),
+    suffix: &str,
+    scratch: &mut Vec<u8>,
+    size: u64,
+    progress: &mut Progress<impl Fn(Update)>,
+) -> Result<tempfile::TempPath, String> {
+    let temporary = tempfile::Builder::new().prefix("t7-video-").suffix(suffix).tempfile().map_err(message)?;
+    let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(message)?);
+    download(stream, &mut file, scratch, size, progress).await?;
+    Ok(temporary.into_temp_path())
 }
 
 async fn upload(
@@ -301,6 +334,26 @@ mod tests {
     use t7_proto::files::{Command, Event, GB};
     use t7_proto::{PROTOCOL_VERSION, S2C};
     use tokio::net::TcpListener;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "set T7_TEST_VIDEO to a small MP4 with a Windows thumbnail provider"]
+    async fn downloaded_clip_has_a_video_poster() {
+        let bytes = std::fs::read(std::env::var_os("T7_TEST_VIDEO").expect("test clip")).unwrap();
+        let mut wire = Vec::new();
+        for chunk in bytes.chunks(CHUNK_BYTES) {
+            write_frame(&mut wire, &Reply::Chunk(chunk.to_vec())).await.unwrap();
+        }
+        write_frame(&mut wire, &Reply::Done).await.unwrap();
+        let mut progress = Progress { emit: |_| {}, last: Instant::now(), state: Arc::new(AtomicU8::new(ACTIVE)) };
+        let path = download_clip(&mut wire.as_slice(), ".mp4", &mut Vec::new(), bytes.len() as u64, &mut progress)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let poster =
+            tokio::task::spawn_blocking(move || crate::image_preview::video_poster(&path)).await.unwrap().unwrap();
+        assert!(poster.width() > 1 && poster.height() > 1);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "streams more than 4 GiB in each direction; run in release with 14 GB of temporary disk space"]

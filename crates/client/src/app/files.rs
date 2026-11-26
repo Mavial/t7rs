@@ -16,6 +16,7 @@ use super::key_bindings::modal_closed;
 use crate::bindings::Action;
 use crate::file_transfer::{self, Cancel, Download, Operation, Outcome, Source, Task, Update};
 use crate::icons::{self, Icon};
+use crate::image_preview::ImageSize;
 use crate::net::Net;
 use crate::theme::{self, Btn};
 use crate::{file_dialog, image_preview};
@@ -45,6 +46,7 @@ pub(super) struct Files {
     queued: VecDeque<Operation>,
     uploading: Option<Active>,
     downloading: Option<Active>,
+    playing: Option<tempfile::TempPath>,
     previewing: Option<(u64, PreviewKey, Cancel)>,
     detail: Option<ChannelFile>,
     jump: Option<ChannelFile>,
@@ -109,7 +111,7 @@ struct Active {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum PreviewKey {
-    File(ChannelId, FileId),
+    File(ChannelId, FileId, ImageSize),
     Link(Uri),
 }
 
@@ -144,6 +146,14 @@ impl Files {
     fn next_id(&mut self) -> u64 {
         self.serial += 1;
         self.serial
+    }
+
+    #[cfg(test)]
+    pub(super) fn seed_thumbnail(&mut self, file: &ChannelFile, texture: TextureHandle) {
+        self.track_image(
+            PreviewKey::File(file.channel, file.attachment.key.id, ImageSize::Thumbnail),
+            Preview::Ready(texture),
+        );
     }
 
     #[cfg(test)]
@@ -228,8 +238,8 @@ impl Files {
                 if self.library.scope.is_some_and(|channel| !reads(channel)) {
                     self.library.scope = None;
                 }
-                self.previews.retain(|key, _| !matches!(key, PreviewKey::File(channel, _) if !reads(*channel)));
-                if let Some((_, PreviewKey::File(channel, _), cancel)) = &self.previewing
+                self.previews.retain(|key, _| !matches!(key, PreviewKey::File(channel, _, _) if !reads(*channel)));
+                if let Some((_, PreviewKey::File(channel, _, _), cancel)) = &self.previewing
                     && !reads(*channel)
                 {
                     cancel.request();
@@ -413,8 +423,10 @@ impl Files {
         if self.previewing.as_ref().is_some_and(|(wanted, ..)| *wanted == id) {
             if let Update::Finished(result) = update {
                 let (_, key, _) = self.previewing.take().expect("checked");
-                if let PreviewKey::File(channel, _) = key
+                if let PreviewKey::File(channel, id, size) = key
                     && self.reads(channel)
+                    && (size == ImageSize::Thumbnail
+                        || self.detail.as_ref().is_some_and(|f| f.channel == channel && f.attachment.key.id == id))
                 {
                     self.finish_image(
                         ctx,
@@ -437,12 +449,26 @@ impl Files {
                 transfer.finalizing = finalizing;
             }
             Update::Finished(result) => {
-                let name = slot.take().expect("checked").name;
+                let transfer = slot.take().expect("checked");
+                let name = transfer.name;
                 match result {
                     Ok(Outcome::Uploaded) if self.queued.is_empty() => {
                         self.notice = Some((format!("Uploaded {name}"), true));
                     }
                     Ok(Outcome::Saved) => self.notice = Some((format!("Saved {name}"), true)),
+                    Ok(Outcome::Video(path)) if self.reads(transfer.channel) => {
+                        let opener = if cfg!(windows) {
+                            "explorer.exe"
+                        } else if cfg!(target_os = "macos") {
+                            "open"
+                        } else {
+                            "xdg-open"
+                        };
+                        match std::process::Command::new(opener).arg(path.as_os_str()).spawn() {
+                            Ok(_) => self.playing = Some(path),
+                            Err(error) => self.error(format!("Could not open the video player: {error}")),
+                        }
+                    }
                     Ok(Outcome::Canceled) => self.notice = Some((format!("Canceled {name}"), true)),
                     Err(error) => self.error(format!("{name}: {error}")),
                     _ => {}
@@ -567,30 +593,35 @@ impl Files {
         Some(image)
     }
 
-    fn preview_file(&mut self, ui: &mut egui::Ui, net: &Net, file: &ChannelFile) {
-        if !image_preview::is_image_name(&file.attachment.name) || file.attachment.size > image_preview::MAX_ENCODED {
-            return;
+    fn preview_file(&mut self, ui: &egui::Ui, net: &Net, file: &ChannelFile, size: ImageSize) -> Option<&Preview> {
+        if file.attachment.size > image_preview::MAX_ENCODED {
+            return None;
         }
-        let key = PreviewKey::File(file.channel, file.attachment.key.id);
+        let target = if image_preview::is_image_name(&file.attachment.name) {
+            Download::Preview(size)
+        } else {
+            #[cfg(windows)]
+            {
+                if size == ImageSize::Expanded {
+                    return None;
+                }
+                Download::VideoPoster(video_suffix(&file.attachment.name)?)
+            }
+            #[cfg(not(windows))]
+            return None;
+        };
+        let key = PreviewKey::File(file.channel, file.attachment.key.id, size);
         let may_load = self.previewing.is_none() && self.reads(file.channel);
         let visible = ui.is_rect_visible(egui::Rect::from_min_size(ui.next_widget_position(), vec2(1.0, 200.0)));
-        match self.see_image(&key, visible) {
-            Some(state) => show_preview(ui, state),
-            None if may_load && visible => {
-                let id = self.next_id();
-                let (cancel, token) = file_transfer::cancellation();
-                self.previewing = Some((id, key.clone(), cancel));
-                self.track_image(key, Preview::Loading);
-                let operation = Operation::Download {
-                    file: file.attachment.key.id,
-                    size: file.attachment.size,
-                    target: Download::Preview,
-                };
-                net.transfer(Task { id, operation, cancel: token });
-                show_preview(ui, &Preview::Loading);
-            }
-            None => {}
+        if self.see_image(&key, visible).is_none() && may_load && visible {
+            let id = self.next_id();
+            let (cancel, token) = file_transfer::cancellation();
+            self.previewing = Some((id, key.clone(), cancel));
+            self.track_image(key.clone(), Preview::Loading);
+            let operation = Operation::Download { file: file.attachment.key.id, size: file.attachment.size, target };
+            net.transfer(Task { id, operation, cancel: token });
         }
+        self.previews.get(&key).map(|(_, state)| state)
     }
 
     pub fn linked_image(&mut self, ui: &mut egui::Ui, url: &Uri) {
@@ -657,7 +688,7 @@ impl Files {
                     self.queued.clear();
                 }
                 if let Some(transfer) = &mut self.downloading {
-                    transfer_row(ui, "Saving", transfer);
+                    transfer_row(ui, "Downloading", transfer);
                 }
                 if let Some((message, ok)) = &self.notice {
                     let mut dismiss = false;
@@ -810,7 +841,7 @@ impl Files {
                 p.rect_filled(rect, 5, theme::SURFACE_HOVER);
             }
             let center = rect.left_center() + vec2(15.0, 0.0);
-            let texture = self.previews.get(&PreviewKey::File(file.channel, a.key.id));
+            let texture = self.previews.get(&PreviewKey::File(file.channel, a.key.id, ImageSize::Thumbnail));
             if let Some((_, Preview::Ready(texture))) = texture {
                 let wh = texture.size_vec2();
                 let display = egui::Rect::from_center_size(center, wh * (26.0 / wh.max_elem()));
@@ -843,43 +874,46 @@ impl Files {
         response.on_hover_text(&a.name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
     }
 
-    pub fn chat_post(
-        &mut self,
-        ui: &mut egui::Ui,
-        file: &ChannelFile,
-        time: &str,
-        caption: &super::markdown::Body,
-        cache: &mut egui_commonmark::CommonMarkCache,
-        net: &Net,
-    ) {
-        if !self.reads(file.channel) {
-            return;
-        }
+    pub fn chat_attachment(&mut self, ui: &mut egui::Ui, net: &Net, file: &ChannelFile) {
         let a = &file.attachment;
-        ui.add_space(7.0);
-        let card =
-            Frame::new().inner_margin(Margin::symmetric(10, 7)).fill(theme::SURFACE).corner_radius(6).show(ui, |ui| {
-                ui.set_max_width(ui.available_width().min(420.0));
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::Label::new(RichText::new(&a.nickname).strong().color(theme::avatar_color(&a.nickname)))
-                            .truncate(),
-                    );
-                    ui.label(RichText::new(time).small().color(theme::TEXT_FAINT));
-                });
-                if !a.caption.is_empty() {
-                    caption.show(ui, cache);
+        let response = ui.vertical(|ui| {
+            let available = self.downloading.is_none() && !self.dialog;
+            let preview = self.preview_file(ui, net, file, ImageSize::Thumbnail);
+            if let Some(suffix) = video_suffix(&a.name) {
+                let poster = match preview {
+                    Some(Preview::Ready(texture)) => Some(texture),
+                    _ => None,
+                };
+                let (play, details) = video_tile(ui, &a.name, a.size, poster, available);
+                if play {
+                    let op = Operation::Download { file: a.key.id, size: a.size, target: Download::Video(suffix) };
+                    self.downloading = Some(self.start(net, file.channel, a.name.clone(), a.size, op));
                 }
-                self.preview_file(ui, net, file);
-                if self.file_row(ui, file, false) {
+                if details {
                     self.detail = Some(file.clone());
                 }
-            });
+            } else if let Some(Preview::Ready(texture)) = preview {
+                let image =
+                    preview_image(ui, texture, vec2(480.0, 300.0)).alt_text(&a.name).sense(egui::Sense::click());
+                if ui.add(image).on_hover_text(&a.name).on_hover_cursor(egui::CursorIcon::ZoomIn).clicked() {
+                    self.detail = Some(file.clone());
+                }
+            } else {
+                let detail = match preview {
+                    Some(Preview::Loading) => "Loading image…".to_owned(),
+                    Some(Preview::Failed) => format!("Preview unavailable · {}", size_label(a.size)),
+                    _ => size_label(a.size),
+                };
+                if document_tile(ui, &a.name, &detail) {
+                    self.detail = Some(file.clone());
+                }
+            }
+        });
         if self.scroll_to == Some(a.key.id) {
-            card.response.scroll_to_me(Some(Align::Center));
+            response.response.scroll_to_me(Some(Align::Center));
             self.scroll_to = None;
         }
-        ui.add_space(5.0);
+        ui.add_space(4.0);
     }
 }
 
@@ -934,10 +968,17 @@ impl App {
         let mut jump = false;
         let mut close = false;
         let modal = theme::modal("file-detail").show(ctx, |ui| {
-            ui.set_width(392.0);
+            let width: f32 = if image_preview::is_image_name(&file.attachment.name) { 960.0 } else { 392.0 };
+            ui.set_width(width.min(ctx.content_rect().width() - 48.0).max(1.0));
             ui.label(RichText::new(&file.attachment.name).size(17.0).strong().color(theme::TEXT));
             ui.add_space(8.0);
-            self.files.preview_file(ui, &self.net, &file);
+            if let Some(state) = self.files.preview_file(ui, &self.net, &file, ImageSize::Expanded) {
+                if let Preview::Ready(texture) = state {
+                    ui.add(preview_image(ui, texture, vec2(width, (ctx.content_rect().height() - 170.0).max(1.0))));
+                } else {
+                    show_preview(ui, state);
+                }
+            }
             ui.label(
                 RichText::new(format!("{} · {}", size_label(file.attachment.size), channel)).color(theme::TEXT_DIM),
             );
@@ -966,11 +1007,12 @@ impl App {
                 self.insert_file_post(file.clone());
             } else {
                 let channel = file.channel;
-                self.files.jump = Some(file);
+                self.files.jump = Some(file.clone());
                 self.join_channel(channel);
             }
         }
         if save || jump || close || modal_closed(&modal, self.pressed.contains(&Action::DismissDialog)) {
+            self.files.previews.remove(&PreviewKey::File(file.channel, file.attachment.key.id, ImageSize::Expanded));
             self.files.detail = None;
         }
     }
@@ -1027,6 +1069,99 @@ fn staged_file_row(ui: &mut egui::Ui, name: &str, detail: &str) -> bool {
         .inner
     })
     .inner
+}
+
+fn document_tile(ui: &mut egui::Ui, name: &str, detail: &str) -> bool {
+    let width = ui.available_width().min(320.0);
+    let (rect, row) = ui.allocate_exact_size(vec2(width, 46.0), egui::Sense::click());
+    let p = ui.painter();
+    p.rect_filled(rect, 6, if row.hovered() { theme::SURFACE_HOVER } else { theme::SURFACE });
+    icons::paint(
+        p,
+        egui::Rect::from_center_size(rect.left_center() + vec2(21.0, 0.0), vec2(20.0, 20.0)),
+        Icon::File,
+        theme::ACCENT_TEXT,
+    );
+    let label =
+        super::widgets::truncated(ui, name, egui::FontId::proportional(13.0), theme::TEXT, (width - 53.0).max(0.0));
+    p.galley(rect.min + vec2(42.0, 6.0), label, theme::TEXT);
+    p.text(
+        rect.min + vec2(42.0, 24.0),
+        egui::Align2::LEFT_TOP,
+        detail,
+        egui::FontId::proportional(11.5),
+        theme::TEXT_DIM,
+    );
+    row.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+    row.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+fn video_tile(
+    ui: &mut egui::Ui,
+    name: &str,
+    bytes: u64,
+    poster: Option<&TextureHandle>,
+    available: bool,
+) -> (bool, bool) {
+    let width = ui.available_width().min(320.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, width * 9.0 / 16.0), egui::Sense::hover());
+    let (screen, footer) = rect.split_top_bottom_at_y((rect.bottom() - 32.0).max(rect.top()));
+    let play = ui.interact(
+        screen,
+        ui.auto_id_with("play"),
+        if available { egui::Sense::click() } else { egui::Sense::hover() },
+    );
+    let details = ui.interact(footer, ui.auto_id_with("details"), egui::Sense::click());
+    let p = ui.painter();
+    p.rect_filled(rect, 7, theme::SURFACE);
+    p.rect_filled(screen, egui::CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, theme::SURFACE_HOVER);
+    if let Some(texture) = poster {
+        let size = texture.size_vec2();
+        let scale = (screen.width() / size.x).min(screen.height() / size.y);
+        let rect = egui::Rect::from_center_size(screen.center(), size * scale);
+        egui::Image::new((texture.id(), rect.size())).corner_radius(6).paint_at(ui, rect);
+    }
+    let center = screen.center();
+    p.circle_filled(center, 21.0, if play.hovered() && available { theme::ACCENT_HOVER } else { theme::BG });
+    p.add(egui::Shape::convex_polygon(
+        vec![center + vec2(-4.0, -7.0), center + vec2(7.0, 0.0), center + vec2(-4.0, 7.0)],
+        if available { theme::TEXT } else { theme::TEXT_FAINT },
+        egui::Stroke::NONE,
+    ));
+    let size = p.layout_no_wrap(size_label(bytes), egui::FontId::proportional(11.5), theme::TEXT_DIM);
+    let size_pos = footer.right_center() - vec2(size.size().x + 10.0, size.size().y / 2.0);
+    let label = super::widgets::truncated(
+        ui,
+        name,
+        egui::FontId::proportional(13.0),
+        theme::TEXT,
+        (size_pos.x - footer.left() - 18.0).max(0.0),
+    );
+    p.galley(footer.left_center() + vec2(10.0, -label.size().y / 2.0), label, theme::TEXT);
+    p.galley(size_pos, size, theme::TEXT_DIM);
+    play.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, available, format!("Play {name}")));
+    details.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("File details for {name}")));
+    (
+        available
+            && play
+                .on_hover_text("Play in your video player")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked(),
+        details.on_hover_text("File details").on_hover_cursor(egui::CursorIcon::PointingHand).clicked(),
+    )
+}
+
+fn video_suffix(name: &str) -> Option<&'static str> {
+    let extension = std::path::Path::new(name).extension()?.to_str()?;
+    [".mp4", ".m4v", ".webm", ".mov", ".mkv", ".avi", ".mpeg", ".mpg", ".ogv"]
+        .into_iter()
+        .find(|suffix| extension.eq_ignore_ascii_case(&suffix[1..]))
+}
+
+fn preview_image(ui: &egui::Ui, texture: &TextureHandle, bounds: egui::Vec2) -> egui::Image<'static> {
+    let native = texture.size_vec2();
+    let scale = (ui.available_width().min(bounds.x).max(1.0) / native.x).min(bounds.y / native.y).min(1.0);
+    egui::Image::new((texture.id(), native * scale)).corner_radius(6)
 }
 
 fn show_preview(ui: &mut egui::Ui, state: &Preview) {

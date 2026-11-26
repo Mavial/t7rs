@@ -6,7 +6,7 @@ use t7_proto::{
     C2S, ChannelId, ChannelInfo, ClientId, ClientInfo, ClientStatus, LeaveReason, S2C, ServerInfo, Speech, TextTarget,
 };
 
-use super::chat::{LineKind, TabKind, base_tabs};
+use super::chat::{LineKind, Speaker, TabKind, base_tabs};
 use super::connect::{CertChange, MAX_RECENT};
 use super::{App, Conn, Login, Lost};
 use crate::net::{Ended, NetEvent, ServerKey};
@@ -160,6 +160,7 @@ impl App {
             S2C::Text { from, target, channel, text } => {
                 let Some(view) = &self.view else { return };
                 let name = view.nickname(from).unwrap_or("unknown").to_owned();
+                let speaker = view.clients.get(&from).map_or(Speaker::Client(from), |c| Speaker::Author(c.identity));
                 let my_id = view.my_id;
                 let tab = match target {
                     TextTarget::Server => 0,
@@ -167,7 +168,7 @@ impl App {
                     TextTarget::Channel => return,
                     TextTarget::Client(to) => self.private_tab(if from == my_id { to } else { from }),
                 };
-                self.push(tab, LineKind::Msg { from, name }, text);
+                self.push(tab, LineKind::Msg { from: speaker, name }, text);
                 if from != my_id && matches!(target, TextTarget::Client(_)) {
                     self.sound(Sound::Message);
                 }

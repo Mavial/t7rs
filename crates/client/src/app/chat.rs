@@ -26,7 +26,7 @@ const TEXT_X: f32 = 44.0;
 pub(super) enum LineKind {
     System,
     Error,
-    Msg { from: ClientId, name: String },
+    Msg { from: Speaker, name: String },
     File(ChannelFile),
 }
 
@@ -83,7 +83,22 @@ pub(super) enum Entry<'a> {
     Day(NaiveDate),
     Said { name: &'a str, lines: &'a [Line] },
     Note(&'a Line),
-    File(&'a ChannelFile, &'a str, &'a Body),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Speaker {
+    Client(ClientId),
+    Author(t7_proto::Identity),
+}
+
+impl LineKind {
+    fn speaker(&self) -> Option<(Speaker, &str)> {
+        match self {
+            Self::Msg { from, name } => Some((*from, name)),
+            Self::File(file) => Some((Speaker::Author(file.attachment.author), &file.attachment.nickname)),
+            Self::System | Self::Error => None,
+        }
+    }
 }
 
 pub(super) fn entries(lines: &[Line]) -> impl Iterator<Item = Entry<'_>> {
@@ -96,17 +111,14 @@ pub(super) fn entries(lines: &[Line]) -> impl Iterator<Item = Entry<'_>> {
             day = Some(date);
             return Some(Entry::Day(date));
         }
-        let LineKind::Msg { from, name } = &line.kind else {
+        let Some((speaker, name)) = line.kind.speaker() else {
             i += 1;
-            return Some(match &line.kind {
-                LineKind::File(file) => Entry::File(file, &line.time, &line.body),
-                _ => Entry::Note(line),
-            });
+            return Some(Entry::Note(line));
         };
         let start = i;
         i += 1;
         while let Some(next) = lines.get(i)
-            && matches!(&next.kind, LineKind::Msg { from: f, .. } if f == from)
+            && next.kind.speaker() == Some((speaker, name))
             && lines[i - 1].body.link.is_none()
             && next.at.date() == date
             && next.at - lines[i - 1].at < GROUP_GAP
@@ -482,11 +494,10 @@ impl App {
                         .desired_rows(1)
                         .return_key(None)
                         .hint_text(RichText::new(hint).color(theme::TEXT_FAINT))
-                        .frame(egui::Frame::NONE)
+                        .frame(egui::Frame::NONE.inner_margin(Margin::symmetric(0, 6)))
                         .desired_width(width)
                         .min_size(vec2(0.0, 34.0))
-                        .margin(Margin::symmetric(0, 6))
-                        .align(Align2::LEFT_TOP)
+                        .align(Align2::LEFT_CENTER)
                         .font(FontId::proportional(14.0))
                         .layouter(&mut layouter);
                     let mut output = egui::ScrollArea::vertical()
@@ -569,12 +580,9 @@ impl App {
                     match entry {
                         Entry::Day(day) => day_separator(ui, &day_label(day, today)),
                         Entry::Said { name, lines } => {
-                            said(ui, name, lines, &mut self.files, &mut self.markdown_cache);
+                            said(ui, name, lines, &mut self.files, &mut self.markdown_cache, &self.net);
                         }
                         Entry::Note(line) => note(ui, line),
-                        Entry::File(file, time, caption) => {
-                            self.files.chat_post(ui, file, time, caption, &mut self.markdown_cache, &self.net);
-                        }
                     }
                 }
             });
@@ -616,6 +624,7 @@ fn said(
     lines: &[Line],
     files: &mut Files,
     cache: &mut egui_commonmark::CommonMarkCache,
+    net: &crate::net::Net,
 ) {
     let width = ui.available_width();
     let color = theme::avatar_color(name);
@@ -636,11 +645,21 @@ fn said(
     }
     egui::Frame::new().inner_margin(Margin { left: TEXT_X as i8, ..Margin::ZERO }).show(ui, |ui| {
         for line in lines {
-            line.body.show(ui, cache);
+            if let LineKind::File(file) = &line.kind {
+                if files.reads(file.channel) {
+                    if !line.body.text.is_empty() {
+                        line.body.show(ui, cache);
+                        ui.add_space(4.0);
+                    }
+                    files.chat_attachment(ui, net, file);
+                }
+            } else {
+                line.body.show(ui, cache);
+                if let Some(url) = &line.body.link {
+                    files.linked_image(ui, url);
+                }
+            }
             ui.add_space(2.0);
-        }
-        if let Some(url) = lines.last().and_then(|line| line.body.link.as_ref()) {
-            files.linked_image(ui, url);
         }
     });
     ui.add_space(6.0);
@@ -679,7 +698,7 @@ mod tests {
     }
 
     fn msg(from: ClientId, name: &str) -> LineKind {
-        LineKind::Msg { from, name: name.into() }
+        LineKind::Msg { from: Speaker::Client(from), name: name.into() }
     }
 
     fn shape(lines: &[Line]) -> Vec<(&'static str, usize)> {
@@ -688,7 +707,6 @@ mod tests {
                 Entry::Day(_) => ("day", 0),
                 Entry::Said { lines, .. } => ("said", lines.len()),
                 Entry::Note(_) => ("note", 1),
-                Entry::File(..) => ("file", 1),
             })
             .collect()
     }
@@ -704,6 +722,33 @@ mod tests {
             Line::new(at(24, 20, 17), msg(3, "Kenji"), "back".into()),
         ];
         assert_eq!(shape(&lines), [("day", 0), ("note", 1), ("said", 1), ("said", 2), ("note", 1), ("said", 1)]);
+    }
+
+    #[test]
+    fn groups_text_and_attachments_by_identity() {
+        use t7_proto::files::{Attachment, Cursor};
+        let at = at(24, 20, 14);
+        let file = |author| {
+            Line::new(
+                at,
+                LineKind::File(ChannelFile {
+                    channel: 1,
+                    attachment: Attachment {
+                        key: Cursor { posted_ms: 0, id: [0; 16] },
+                        author,
+                        nickname: "Marta".into(),
+                        name: "photo.png".into(),
+                        size: 1,
+                        caption: String::new(),
+                    },
+                }),
+                String::new(),
+            )
+        };
+        let author = t7_proto::Identity([7; 32]);
+        let text = LineKind::Msg { from: Speaker::Author(author), name: "Marta".into() };
+        let lines = [Line::new(at, text, "Here it is".into()), file(author), file(t7_proto::Identity([8; 32]))];
+        assert_eq!(shape(&lines), [("day", 0), ("said", 2), ("said", 1)]);
     }
 
     #[test]
