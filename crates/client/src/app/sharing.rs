@@ -188,7 +188,7 @@ impl App {
                 ui.label(RichText::new("Quality").size(11.5).color(theme::TEXT_FAINT));
                 theme::segmented(ui, &mut self.settings.screen_quality, &QUALITIES);
                 let monitors = self.share_sources.iter().filter(|s| matches!(s.source, Source::Monitor(_)));
-                let windows = self.share_sources.iter().filter(|s| matches!(s.source, Source::Window(_)));
+                let windows = self.share_sources.iter().filter(|s| s.source.is_window());
                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                     for (heading, list) in [("Screens", monitors.collect::<Vec<_>>()), ("Windows", windows.collect())] {
                         if list.is_empty() {

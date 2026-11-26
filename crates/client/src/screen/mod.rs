@@ -32,6 +32,20 @@ pub struct AccessUnit {
 pub enum Source {
     Monitor(Handle),
     Window(Handle),
+    League(LeagueWindow),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeagueWindow {
+    handle: Handle,
+    pid: u32,
+    in_game: bool,
+}
+
+impl Source {
+    pub fn is_window(self) -> bool {
+        !matches!(self, Self::Monitor(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
