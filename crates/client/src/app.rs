@@ -10,6 +10,7 @@ mod key_bindings;
 mod markdown;
 mod moderation;
 mod server_settings;
+mod share_picker;
 mod sharing;
 mod shelf;
 mod sidebar;
@@ -101,7 +102,8 @@ pub struct App {
     sharing: Option<sharing::Sharing>,
     watching: Vec<sharing::Watching>,
     screen_wake: crate::watch::Wake,
-    share_sources: Vec<crate::screen::SourceInfo>,
+    share_picker: Option<share_picker::Picker>,
+    share_sources: fn() -> crate::screen::PickerSources,
     shelf: shelf::Shelf,
     pressed: BTreeSet<Action>,
     captured_keys: BTreeSet<egui::Key>,
@@ -154,7 +156,8 @@ impl App {
             sharing: None,
             watching: Vec::new(),
             screen_wake,
-            share_sources: Vec::new(),
+            share_picker: None,
+            share_sources: crate::screen::picker_sources,
             shelf: shelf::Shelf::new(),
             pressed: BTreeSet::new(),
             captured_keys: BTreeSet::new(),
