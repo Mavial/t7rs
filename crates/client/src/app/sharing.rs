@@ -5,10 +5,11 @@ use t7_proto::model::ServerView;
 use t7_proto::{C2S, ClientId, MAX_WATCHED, Speech};
 
 use super::chat::LineKind;
+use super::share_picker::Picker;
 use super::widgets::{icon_button, mic_held, toggle};
 use super::{App, Conn};
 use crate::icons::Icon;
-use crate::screen::{Quality, Share, Source, SourceInfo};
+use crate::screen::{Quality, Share, Source};
 use crate::theme;
 use crate::watch::{self, Frames, Stream};
 
@@ -166,6 +167,7 @@ impl App {
 
     pub(super) fn share_button(&mut self, ui: &mut egui::Ui) {
         if let Some(tip) = cannot_share(self) {
+            self.share_picker = None;
             return mic_held(ui, Icon::Screen, theme::TEXT_FAINT, tip);
         }
         if self.sharing.is_some() {
@@ -176,35 +178,26 @@ impl App {
             return;
         }
         let resp = icon_button(ui, Icon::Screen, "Share your screen");
-        if resp.clicked() {
-            self.share_sources = crate::screen::sources();
-        }
         let mut picked = None;
-        egui::Popup::menu(&resp)
+        let arrived = self.share_picker.as_mut().is_some_and(|picker| picker.poll(ui.ctx()));
+        let popup = egui::Popup::menu(&resp)
             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
             .align(RectAlign::TOP_END)
+            .sizing_pass(arrived)
             .show(|ui| {
                 ui.set_width(320.0);
+                ui.strong("Share your screen");
                 ui.label(RichText::new("Quality").size(11.5).color(theme::TEXT_FAINT));
                 theme::segmented(ui, &mut self.settings.screen_quality, &QUALITIES);
-                let monitors = self.share_sources.iter().filter(|s| matches!(s.source, Source::Monitor(_)));
-                let windows = self.share_sources.iter().filter(|s| s.source.is_window());
-                egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
-                    for (heading, list) in [("Screens", monitors.collect::<Vec<_>>()), ("Windows", windows.collect())] {
-                        if list.is_empty() {
-                            continue;
-                        }
-                        ui.add_space(6.0);
-                        ui.label(RichText::new(heading).size(11.5).color(theme::TEXT_FAINT));
-                        for SourceInfo { source, name } in list {
-                            if ui.add(egui::Button::new(name.as_str()).truncate()).on_hover_text(name).clicked() {
-                                picked = Some(*source);
-                                ui.close();
-                            }
-                        }
-                    }
-                });
+                let picker = self.share_picker.get_or_insert_with(|| Picker::open(ui.ctx(), self.share_sources));
+                picked = picker.show(ui);
+                if picked.is_some() {
+                    ui.close();
+                }
             });
+        if popup.is_none() || !egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp)) {
+            self.share_picker = None;
+        }
         if let Some(source) = picked {
             self.start_sharing(source, ui.ctx());
         }

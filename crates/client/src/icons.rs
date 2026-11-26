@@ -28,6 +28,7 @@ pub enum Icon {
     Crown,
     SpeakerPlus,
     Screen,
+    Window,
     ScreenStop,
     Update,
     Plus,
@@ -176,6 +177,10 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.poly(&[(2.0, 9.0), (6.0, 9.0), (11.0, 5.0), (11.0, 19.0), (6.0, 15.0), (2.0, 15.0)], true);
             pen.line((14.5, 12.0), (21.5, 12.0));
             pen.line((18.0, 8.5), (18.0, 15.5));
+        }
+        Icon::Window => {
+            pen.rrect(3.0, 4.0, 21.0, 20.0, 2.0);
+            pen.line((3.0, 9.0), (21.0, 9.0));
         }
         Icon::Screen | Icon::ScreenStop => {
             pen.rrect(2.5, 4.0, 21.5, 17.0, 2.0);

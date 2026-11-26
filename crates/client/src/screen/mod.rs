@@ -46,15 +46,46 @@ impl Source {
     pub fn is_window(self) -> bool {
         !matches!(self, Self::Monitor(_))
     }
+
+    #[cfg(windows)]
+    fn handle(self) -> Handle {
+        match self {
+            Self::Monitor(h) | Self::Window(h) => h,
+            Self::League(w) => w.handle,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Handle(isize);
+
+#[cfg(test)]
+impl Handle {
+    pub fn fake(id: isize) -> Self {
+        Self(id)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SourceInfo {
     pub source: Source,
     pub name: String,
+}
+
+pub(crate) struct AppWindows {
+    pub name: String,
+    pub icon: Option<egui::ColorImage>,
+    pub windows: Vec<SourceInfo>,
+}
+
+#[derive(Default)]
+pub(crate) struct PickerSources {
+    pub screens: Vec<SourceInfo>,
+    pub apps: Vec<AppWindows>,
+}
+
+pub(crate) fn picker_sources() -> PickerSources {
+    platform::picker_sources()
 }
 
 /// Monitors (the primary first), then the windows that can be captured.

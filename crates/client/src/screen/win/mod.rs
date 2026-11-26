@@ -1,11 +1,14 @@
+mod app_info;
 mod capture;
 mod convert;
 mod decode;
 mod encode;
+mod picker;
 mod share;
 
 pub use capture::sources;
 pub use decode::Decoder;
+pub(crate) use picker::picker_sources;
 pub use share::Share;
 
 use std::mem::ManuallyDrop;

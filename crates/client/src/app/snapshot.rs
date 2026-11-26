@@ -145,6 +145,49 @@ fn recents() -> Vec<Recent> {
     ]
 }
 
+fn fake_share_sources() -> crate::screen::PickerSources {
+    use crate::screen::{AppWindows, Handle, PickerSources, Source, SourceInfo};
+    let source = |id, name: &str| SourceInfo { source: Source::Window(Handle::fake(id)), name: name.into() };
+    let icon = |[r, g, b]: [u8; 3]| {
+        let pixels = (0..32 * 32)
+            .map(|i| {
+                let (x, y) = (i % 32, i / 32);
+                let inside = (4..28).contains(&x) && (4..28).contains(&y);
+                if inside { Color32::from_rgb(r, g, b) } else { Color32::TRANSPARENT }
+            })
+            .collect();
+        Some(ColorImage::new([32, 32], pixels))
+    };
+    let app = |name: &str, tint: Option<[u8; 3]>, windows| AppWindows {
+        name: name.into(),
+        icon: tint.and_then(icon),
+        windows,
+    };
+    PickerSources {
+        screens: vec![
+            SourceInfo { source: Source::Monitor(Handle::fake(1)), name: "Screen 1 (2560 × 1440)".into() },
+            SourceInfo { source: Source::Monitor(Handle::fake(2)), name: "Screen 2 (1920 × 1080)".into() },
+        ],
+        apps: vec![
+            app("Discord", Some([88, 101, 242]), vec![source(10, "#general - Discord")]),
+            app(
+                "Google Chrome",
+                Some([234, 67, 53]),
+                vec![source(11, "Patch notes 14.3 - Google Chrome"), source(12, "Tournament bracket - Google Chrome")],
+            ),
+            app("League of Legends", Some([200, 160, 60]), vec![source(13, "League of Legends")]),
+            app("Spotify", Some([30, 215, 96]), vec![source(14, "Daft Punk - Something About Us")]),
+            app("Untitled tool", None, vec![source(15, "Untitled tool")]),
+        ],
+    }
+}
+
+fn share_picker(ctx: &egui::Context) -> App {
+    let mut app = connected(ctx);
+    app.share_sources = fake_share_sources;
+    app
+}
+
 fn connected(ctx: &egui::Context) -> App {
     let mut settings = Settings { nickname: "Santi".into(), recent: recents(), ..Default::default() };
     settings.user_volumes.insert("Marta".into(), 0.6);
@@ -595,6 +638,32 @@ const MENUS: &[Menu] = &[
         size: (1100, 720),
         make: connected,
         steps: &[press(80.0, 238.0, RIGHT), release(80.0, 238.0, RIGHT), hover(150.0, 260.0)],
+    },
+    Menu {
+        name: "59-share-picker",
+        size: (1100, 720),
+        make: share_picker,
+        steps: &[
+            press(256.0, 692.0, LEFT),
+            release(256.0, 692.0, LEFT),
+            hover(400.0, 300.0),
+            hover(400.0, 300.0),
+            hover(330.0, 540.0),
+        ],
+    },
+    Menu {
+        name: "60-share-picker-expanded",
+        size: (1100, 720),
+        make: share_picker,
+        steps: &[
+            press(256.0, 692.0, LEFT),
+            release(256.0, 692.0, LEFT),
+            hover(400.0, 300.0),
+            hover(400.0, 300.0),
+            press(330.0, 590.0, LEFT),
+            release(330.0, 590.0, LEFT),
+            hover(330.0, 630.0),
+        ],
     },
     Menu { name: "34-hover-channel", size: (1100, 720), make: connected, steps: &[hover(120.0, 529.0)] },
     Menu {
