@@ -226,7 +226,8 @@ fn settings_on(ctx: &egui::Context, page: SettingsPage) -> App {
         packs: vec![("Custom folder".into(), "custom".into())],
         inputs: vec!["Microphone (USB)".into()],
         outputs: vec!["Headphones".into()],
-        binding: false,
+        capture: None,
+        binding_error: None,
     });
     app
 }
@@ -254,6 +255,8 @@ const SCENES: &[Scene] = &[
         app
     }),
     ("45-settings-small", (760, 480), |ctx| settings_on(ctx, SettingsPage::Voice)),
+    ("46-key-bindings", (1100, 720), |ctx| settings_on(ctx, SettingsPage::KeyBindings)),
+    ("47-key-bindings-small", (760, 480), |ctx| settings_on(ctx, SettingsPage::KeyBindings)),
     ("06-edit-channel", (1100, 720), |ctx| {
         let mut app = connected(ctx);
         app.open_edit_channel(2);
@@ -637,8 +640,9 @@ impl Canvas {
         self.draw_observing(raw, |_| {});
     }
 
-    fn draw_observing(&mut self, raw: egui::RawInput, inspect: impl FnOnce(&[egui::epaint::ClippedShape])) {
+    fn draw_observing(&mut self, mut raw: egui::RawInput, inspect: impl FnOnce(&[egui::epaint::ClippedShape])) {
         let app = &mut self.app;
+        app.prepare_input(&self.ctx, &mut raw, || None);
         let out = self.ctx.run_ui(raw, |ui| app.ui(ui));
         for command in out.platform_output.commands {
             if let egui::OutputCommand::CopyText(text) = command {
@@ -976,4 +980,196 @@ fn composer_grows_to_fit_wrapped_and_fenced_drafts() {
         assert!(tall > medium && tall <= 242.0 && (tall - taller).abs() < 1.0, "{size:?}: {medium} {tall} {taller}");
         assert!((height("") - empty).abs() < 1.0);
     }
+}
+
+fn key_event(key: egui::Key, modifiers: egui::Modifiers, pressed: bool) -> egui::Event {
+    egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }
+}
+
+fn press_key(canvas: &mut Canvas, frame: &mut usize, key: egui::Key, modifiers: egui::Modifiers) {
+    for pressed in [true, false] {
+        let mut raw = canvas.input(*frame);
+        *frame += 1;
+        raw.events.push(key_event(key, modifiers, pressed));
+        canvas.draw(raw);
+    }
+}
+
+fn bind(canvas: &mut Canvas, action: Action, key: egui::Key, modifiers: egui::Modifiers) {
+    use crate::bindings::{Binding, Chord};
+    let chord = Chord::from_press(&key_event(key, modifiers, true)).unwrap().0;
+    let settings = &mut canvas.app.settings;
+    settings.bindings.set(action, &mut settings.audio.ptt_key, Some(Binding::Chord(chord))).unwrap();
+}
+
+#[test]
+fn capture_consumes_shortcuts_and_saves_the_new_key() {
+    use egui::{Key, Modifiers};
+    let mut canvas = Canvas::new((760, 480), |ctx| settings_on(ctx, SettingsPage::KeyBindings), 1.0);
+    for frame in 0..3 {
+        canvas.draw(canvas.input(frame));
+    }
+    let label = canvas.app.settings.bindings.get(Action::ToggleAway, None).unwrap().label(&canvas.ctx);
+    let mut pos = None;
+    canvas.draw_observing(canvas.input(3), |shapes| {
+        pos = shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos + text.galley.size() / 2.0),
+            _ => None,
+        });
+    });
+    let pos = pos.expect("visible Away binding");
+    for (frame, pressed) in [(4, true), (5, false)] {
+        let mut raw = canvas.input(frame);
+        raw.events.extend([
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        canvas.draw(raw);
+    }
+    assert!(canvas.app.capturing_binding());
+    let mut frame = 6;
+    let command_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    press_key(&mut canvas, &mut frame, Key::M, command_shift);
+    assert!(!canvas.app.settings.status.muted);
+    assert!(canvas.app.capturing_binding(), "an overlapping binding is rejected");
+    press_key(&mut canvas, &mut frame, Key::C, Modifiers::COMMAND);
+    assert!(canvas.app.capturing_binding(), "the platform copy chord cannot be assigned here");
+    press_key(&mut canvas, &mut frame, Key::Escape, Modifiers::NONE);
+    assert!(!canvas.app.capturing_binding());
+    assert!(canvas.app.settings_dialog.is_some(), "cancelling recording also closed Settings");
+    assert_eq!(canvas.app.settings.bindings.get(Action::ToggleAway, None).unwrap().label(&canvas.ctx), label);
+    for pressed in [true, false] {
+        let mut raw = canvas.input(frame);
+        frame += 1;
+        raw.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        canvas.draw(raw);
+    }
+    assert!(canvas.app.capturing_binding());
+    let ctrl = Modifiers::CTRL | Modifiers::COMMAND;
+    for event in [
+        key_event(Key::ControlLeft, ctrl, true),
+        egui::Event::ModifiersChanged(ctrl),
+        key_event(Key::F6, ctrl, true),
+        key_event(Key::F6, ctrl, false),
+        key_event(Key::ControlLeft, Modifiers::NONE, false),
+        egui::Event::ModifiersChanged(Modifiers::NONE),
+    ] {
+        let mut raw = canvas.input(frame);
+        frame += 1;
+        raw.events.push(event);
+        canvas.draw(raw);
+    }
+    assert!(!canvas.app.capturing_binding());
+    assert!(!canvas.app.settings.status.away);
+    press_key(&mut canvas, &mut frame, Key::A, command_shift);
+    assert!(!canvas.app.settings.status.away);
+    press_key(&mut canvas, &mut frame, Key::F6, Modifiers::NONE);
+    assert!(!canvas.app.settings.status.away);
+    press_key(&mut canvas, &mut frame, Key::F6, ctrl);
+    assert!(canvas.app.settings.status.away);
+}
+
+#[test]
+fn only_the_top_dialog_uses_its_submit_binding() {
+    use egui::{Key, Modifiers};
+    let mut canvas = Canvas::new((760, 480), connected, 1.0);
+    canvas.app.open_poke(2);
+    canvas.app.open_edit_channel(2);
+    bind(&mut canvas, Action::SendPoke, Key::F6, Modifiers::NONE);
+    bind(&mut canvas, Action::EditChannel, Key::F6, Modifiers::NONE);
+    bind(&mut canvas, Action::DismissDialog, Key::F7, Modifiers::NONE);
+    for frame in 0..3 {
+        canvas.draw(canvas.input(frame));
+    }
+    let mut frame = 3;
+    press_key(&mut canvas, &mut frame, Key::Enter, Modifiers::NONE);
+    press_key(&mut canvas, &mut frame, Key::Escape, Modifiers::NONE);
+    assert!(canvas.app.channel_dialog.is_some() && canvas.app.poke_form.is_some());
+    press_key(&mut canvas, &mut frame, Key::F7, Modifiers::NONE);
+    assert!(canvas.app.channel_dialog.is_none() && canvas.app.poke_form.is_some());
+    press_key(&mut canvas, &mut frame, Key::F6, Modifiers::NONE);
+    assert!(canvas.app.poke_form.is_none());
+}
+
+#[test]
+fn remapped_composer_keys_work_with_prose_and_code() {
+    use egui::{Event, Key, Modifiers};
+    let mut canvas = Canvas::new((760, 480), connected, 1.0);
+    bind(&mut canvas, Action::ToggleAway, Key::E, Modifiers::NONE);
+    for (action, key) in [
+        (Action::SendChat, Key::F6),
+        (Action::ChatNewline, Key::F7),
+        (Action::ChatIndent, Key::F8),
+        (Action::SendCode, Key::F6),
+        (Action::CodeNewline, Key::F7),
+        (Action::CodeIndent, Key::F8),
+        (Action::CodeOutdent, Key::F9),
+    ] {
+        bind(&mut canvas, action, key, Modifiers::NONE);
+    }
+    canvas.app.focus_input = true;
+    canvas.draw(canvas.input(0));
+    let mut raw = canvas.input(1);
+    raw.events.extend([key_event(Key::E, Modifiers::NONE, true), Event::Text("Example".into())]);
+    canvas.draw(raw);
+    assert!(!canvas.app.settings.status.away);
+    let mut frame = 2;
+    press_key(&mut canvas, &mut frame, Key::Enter, Modifiers::NONE);
+    press_key(&mut canvas, &mut frame, Key::Enter, Modifiers::SHIFT);
+    assert_eq!(canvas.app.input, "Example");
+    press_key(&mut canvas, &mut frame, Key::F8, Modifiers::NONE);
+    press_key(&mut canvas, &mut frame, Key::F7, Modifiers::NONE);
+    assert_eq!(canvas.app.input, "Example\t\n");
+    let mut raw = canvas.input(frame);
+    frame += 1;
+    raw.events.push(Event::Paste("```rust\n".into()));
+    canvas.draw(raw);
+    press_key(&mut canvas, &mut frame, Key::F8, Modifiers::NONE);
+    assert_eq!(canvas.app.input, "Example\t\n```rust\n\t");
+    press_key(&mut canvas, &mut frame, Key::F9, Modifiers::NONE);
+    press_key(&mut canvas, &mut frame, Key::F7, Modifiers::NONE);
+    assert_eq!(canvas.app.input, "Example\t\n```rust\n\n");
+    press_key(&mut canvas, &mut frame, Key::Enter, Modifiers::COMMAND);
+    assert_eq!(canvas.app.input, "Example\t\n```rust\n\n");
+    press_key(&mut canvas, &mut frame, Key::F6, Modifiers::NONE);
+    assert_eq!(canvas.app.input, "");
+
+    let mut raw = canvas.input(frame);
+    frame += 1;
+    raw.events.push(Event::Text("Still here".into()));
+    canvas.draw(raw);
+    canvas.ctx.memory_mut(|m| m.request_focus(egui::Id::unique("chat-send")));
+    press_key(&mut canvas, &mut frame, Key::Enter, Modifiers::NONE);
+    assert_eq!(canvas.app.input, "Still here", "focused send button cannot bypass the remap");
+    press_key(&mut canvas, &mut frame, Key::F6, Modifiers::NONE);
+    assert_eq!(canvas.app.input, "");
+}
+
+#[test]
+fn chat_paste_remap_keeps_platform_text_paste() {
+    use egui::{Event, Key, Modifiers};
+    let mut canvas = Canvas::new((760, 480), connected, 1.0);
+    bind(&mut canvas, Action::ChatPaste, Key::F6, Modifiers::NONE);
+    canvas.app.focus_input = true;
+    canvas.draw(canvas.input(0));
+    let mut raw = canvas.input(1);
+    raw.events.push(Event::Paste("plain ".into()));
+    canvas.draw(raw);
+    assert_eq!(canvas.app.input, "plain ");
+
+    let mut raw = canvas.input(2);
+    raw.events.push(key_event(Key::F6, Modifiers::NONE, true));
+    canvas.app.prepare_input(&canvas.ctx, &mut raw, || Some(Event::Paste("custom".into())));
+    canvas.ctx.run_ui(raw, |ui| canvas.app.ui(ui)).drop_without_applying_deltas();
+    assert_eq!(canvas.app.input, "plain custom");
 }

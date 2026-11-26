@@ -55,7 +55,7 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Roles and the ban list | ⋯ next to the server's name → Server settings…, with a Roles tab and a Bans tab |
 | Disconnect, reconnect | ⋯ next to the server's name → Disconnect. If the connection drops or you're kicked, the tree stays dimmed with why, and Reconnect |
 | Private message | Double-click a user, or right-click → Send private message |
-| Format a message | Type Markdown or paste formatted text into chat. **Enter** sends and **Shift+Enter** adds a line. Start a line with three backticks and an optional language such as `python` to write a code block. Inside the block, **Enter** adds a line, **Tab** indents, and the **↑** send button or **Ctrl+Enter** (**⌘+Enter** on Mac) sends the draft |
+| Format a message | Type Markdown or paste formatted text into chat. By default, **Enter** sends and **Shift+Enter** adds a line. Start a line with three backticks and an optional language such as `python` to write a code block. Inside the block, **Enter** adds a line, **Tab** indents, **Shift+Tab** outdents, and the **↑** send button or **Ctrl+Enter** (**⌘+Enter** on Mac) sends the draft |
 | Share an image | Paste its public HTTP(S) URL into chat, or paste an image into the channel message field. Check the thumbnail, optionally add a caption, then click the **↑** send button. T7 previews PNG, JPEG, GIF and WebP images up to 8 MiB and 4096 pixels per side. Larger images can still be attached as files |
 | Upload or save a file | In channel chat, choose **+**, select files, optionally enter a caption and click the **↑** send button. Select a posted file and choose **Save file**. Linux uses Zenity for file dialogs |
 | Find a file | **Files** opens the current channel's drawer beside chat. **All files** searches accessible channels by filename, uploader or channel name. Select a file to save it or show its post in chat |
@@ -66,8 +66,18 @@ machine with separate settings, set `T7_PROFILE=<name>`.
 | Someone's volume | Right-click them: 0% (muted for you) to 200%. Remembered by nickname |
 | Share your screen | The screen button next to your name: pick a screen or window, and a quality (720p 30, 1080p 30 or 1080p 60). Click it again to stop. Windows only for now |
 | Watch screens | **Watch** under someone's still in the shelf over the chat, the red **LIVE** badge next to someone in your channel, or right-click them → Watch screen. Point at a still for a fresh one; **Hide** folds the shelf to one line in that channel. Up to 4 screens share one Screens window, side by side. Click one to make it large with the others in a strip below, and **Show all** to go back. Hover a screen for its name and × to stop watching it. Double-click or `F11` for full screen, `Esc` to leave it. Windows only for now |
-| Settings | Click your name bottom-left → Settings…, or `Ctrl+,`. **Voice**: microphone, speakers, voice activation sensitivity with a live meter, push-to-talk key, volumes. **Sound cleanup**: noise suppression, echo cancellation, automatic volume. **Notifications**: sounds, sound pack and their own volume. **Screen sharing**: quality. **About**: version and updates |
 | Poke | Right-click a user → Poke…, with an optional message. They get a card at the top right of the window, a sound and a flashing taskbar entry. More pokes stack in the same card, which has **Reply** and **Join** and stays until dismissed |
+| Settings | Click your name bottom-left → Settings…, or `Ctrl+,`. **Voice** has devices, voice activation, and voice volume. **Sound cleanup** has noise suppression, echo cancellation, and automatic volume. **Notifications** has sounds and their own volume. **Screen sharing** controls quality. **Key bindings** has shortcuts and the hold-to-talk key. **About** shows the version and updates |
+
+Open **Settings → Key bindings** and click an action's shortcut to change it.
+Press and release the new shortcut. Use **Clear** to turn the shortcut off or
+**Reset** to restore its default. T7 saves changes for the current profile.
+Escape cancels recording by default. A main-window shortcut assigned to a
+letter or other printable key leaves that key available while typing in a field.
+The same shortcut can be used in different windows or forms when the actions
+cannot fire together. Chat has separate bindings for prose and open code blocks.
+Changing chat paste moves formatted text conversion and image attachments to
+the new shortcut. Your system's text paste shortcut still inserts plain text.
 
 A green ring around an avatar means that person is talking. On Windows the
 push-to-talk key works while another app, like a game, has focus.

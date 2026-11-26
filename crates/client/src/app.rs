@@ -6,6 +6,7 @@ mod chat;
 mod connect;
 mod events;
 mod files;
+mod key_bindings;
 mod markdown;
 mod moderation;
 mod server_settings;
@@ -18,12 +19,14 @@ mod tree;
 mod voice;
 mod widgets;
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use t7_proto::model::ServerView;
 use t7_proto::perms::{Perm, Scope};
 use t7_proto::{C2S, ChannelId, ClientId, ClientStatus, Speech};
 
+use crate::bindings::Action;
 use crate::net::{Net, ServerKey, SessionId};
 use crate::settings::Settings;
 use crate::sounds::{Pack, Resolved, Sound};
@@ -100,6 +103,9 @@ pub struct App {
     screen_wake: crate::watch::Wake,
     share_sources: Vec<crate::screen::SourceInfo>,
     shelf: shelf::Shelf,
+    pressed: BTreeSet<Action>,
+    captured_keys: BTreeSet<egui::Key>,
+    local_ptt: crate::ptt::Held,
 }
 
 impl App {
@@ -150,6 +156,9 @@ impl App {
             screen_wake,
             share_sources: Vec::new(),
             shelf: shelf::Shelf::new(),
+            pressed: BTreeSet::new(),
+            captured_keys: BTreeSet::new(),
+            local_ptt: crate::ptt::Held::Up,
         };
         app.sound_pack = Pack::open(app.settings.audio.sound_pack.as_deref());
         if let Some(l) = launch {
@@ -231,35 +240,23 @@ impl App {
         self.view.as_ref().and_then(|v| v.channels.get(&id)).map_or_else(|| "?".into(), |c| c.name.clone())
     }
 
-    fn shortcuts(&mut self, ctx: &egui::Context) {
-        let [connect, mute, deafen, away, settings] = ctx.input_mut(|i| {
-            use egui::{Key, KeyboardShortcut, Modifiers};
-            let shift = Modifiers::COMMAND | Modifiers::SHIFT;
-            [
-                (Modifiers::COMMAND, Key::S),
-                (shift, Key::M),
-                (shift, Key::D),
-                (shift, Key::A),
-                (Modifiers::COMMAND, Key::Comma),
-            ]
-            .map(|(modifiers, key)| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
-        });
-        if connect && self.form.is_none() {
+    fn shortcuts(&mut self) {
+        if self.pressed.remove(&Action::OpenConnect) && self.form.is_none() {
             self.open_connect_form();
         }
-        if mute {
+        if self.pressed.remove(&Action::ToggleMic) {
             let s = self.settings.status;
             self.set_status(ClientStatus { muted: !s.muted, ..s });
         }
-        if deafen {
+        if self.pressed.remove(&Action::ToggleSound) {
             let s = self.settings.status;
             self.set_status(ClientStatus { deafened: !s.deafened, ..s });
         }
-        if away {
+        if self.pressed.remove(&Action::ToggleAway) {
             let s = self.settings.status;
             self.set_status(ClientStatus { away: !s.away, ..s });
         }
-        if settings && self.settings_dialog.is_none() {
+        if self.pressed.remove(&Action::OpenSettings) && self.settings_dialog.is_none() {
             self.open_voice_settings();
         }
     }
@@ -286,7 +283,7 @@ impl App {
         self.poll_file_workers(&ctx);
         self.sync_shelf(&ctx);
         self.drive_audio(&ctx);
-        self.shortcuts(&ctx);
+        self.shortcuts();
         self.sidebar(ui);
         self.main_pane(ui);
         self.connect_dialog(&ctx);

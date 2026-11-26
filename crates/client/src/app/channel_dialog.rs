@@ -9,11 +9,13 @@ use t7_proto::{
     MAX_CHANNEL_TOPIC_LEN, PasswordChange,
 };
 
+use super::key_bindings::modal_closed;
 use super::server_settings::perm_label;
 use super::widgets::{
     described_switch, dialog_footer, dialog_header, field, hint, paint_avatar, placeholder, row, section, text_input,
 };
 use super::{App, default_channel_name, manages};
+use crate::bindings::Action;
 use crate::icons::Icon;
 use crate::theme::Btn;
 use crate::{icons, theme};
@@ -24,6 +26,19 @@ pub(super) enum ChannelDialog {
     Password { channel: ChannelId, name: String, password: String, focused: bool },
     Delete { channel: ChannelId, name: String, sub_channels: Vec<String>, occupants: usize },
     ClaimOwnership { token: String, focused: bool },
+}
+
+impl ChannelDialog {
+    pub(super) fn submit_action(&self) -> Option<Action> {
+        Some(match self {
+            Self::Form(form) if form.editing.is_some() => Action::EditChannel,
+            Self::Form(form) if form.parent.is_some() => Action::CreateSubchannel,
+            Self::Form(_) => Action::CreateChannel,
+            Self::Password { .. } => Action::JoinPassword,
+            Self::ClaimOwnership { .. } => Action::ClaimOwnership,
+            Self::Delete { .. } => return None,
+        })
+    }
 }
 
 /// Creating (`editing: None`) or editing a channel.
@@ -400,51 +415,49 @@ impl App {
             self.channel_dialog = None;
         }
         let Some(dialog) = &mut self.channel_dialog else { return };
+        let enter = dialog.submit_action().is_some_and(|action| self.pressed.remove(&action));
         let view = self.view.as_ref();
         let form_context = match dialog {
             ChannelDialog::Form(form) => Some(FormContext::new(view, form)),
             _ => None,
         };
         let mut reply = Reply::default();
-        let modal = theme::modal("channel-dialog").show(ctx, |ui| {
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            match dialog {
-                ChannelDialog::Form(form) => {
-                    ui.set_width(440.0);
-                    let cx = form_context.as_ref().expect("made for the form");
-                    channel_form(ui, view, form, cx, enter, &mut reply);
+        let modal = theme::modal("channel-dialog").show(ctx, |ui| match dialog {
+            ChannelDialog::Form(form) => {
+                ui.set_width(440.0);
+                let cx = form_context.as_ref().expect("made for the form");
+                channel_form(ui, view, form, cx, enter, &mut reply);
+            }
+            ChannelDialog::Password { channel, name, password, focused } => {
+                ui.set_width(380.0);
+                dialog_header(ui, &format!("Join {name}"), "This channel has a password.");
+                let edit = field(ui, "Password", text_input(password).password(true));
+                if !*focused {
+                    edit.request_focus();
+                    *focused = true;
                 }
-                ChannelDialog::Password { channel, name, password, focused } => {
-                    ui.set_width(380.0);
-                    dialog_header(ui, &format!("Join {name}"), "This channel has a password.");
-                    let edit = field(ui, "Password", text_input(password).password(true));
-                    if !*focused {
-                        edit.request_focus();
-                        *focused = true;
+                let ready = !password.is_empty();
+                dialog_footer(ui, |ui| {
+                    if ui.add_enabled(ready, Btn::primary("Join")).clicked() || (ready && enter) {
+                        reply.send.push(C2S::JoinChannel { channel: *channel, password: Some(password.clone()) });
                     }
-                    let ready = !password.is_empty();
-                    dialog_footer(ui, |ui| {
-                        if ui.add_enabled(ready, Btn::primary("Join")).clicked() || (ready && enter) {
-                            reply.send.push(C2S::JoinChannel { channel: *channel, password: Some(password.clone()) });
-                        }
-                        reply.close |= ui.add(Btn::secondary("Cancel")).clicked();
-                    });
-                }
-                ChannelDialog::Delete { channel, name, sub_channels, occupants } => {
-                    ui.set_width(380.0);
-                    let default = view.map_or_else(|| "the default channel".to_owned(), default_channel_name);
-                    dialog_header(ui, &format!("Delete {name}?"), &delete_note(sub_channels, *occupants, &default));
-                    dialog_footer(ui, |ui| {
-                        if ui.add(Btn::danger("Delete")).clicked() {
-                            reply.send.push(C2S::DeleteChannel { id: *channel });
-                        }
-                        reply.close |= ui.add(Btn::secondary("Cancel")).clicked();
-                    });
-                }
-                ChannelDialog::ClaimOwnership { token, focused } => {
-                    ui.set_width(420.0);
-                    claim_ownership(ui, token, focused, enter, &mut reply);
-                }
+                    reply.close |= ui.add(Btn::secondary("Cancel")).clicked();
+                });
+            }
+            ChannelDialog::Delete { channel, name, sub_channels, occupants } => {
+                ui.set_width(380.0);
+                let default = view.map_or_else(|| "the default channel".to_owned(), default_channel_name);
+                dialog_header(ui, &format!("Delete {name}?"), &delete_note(sub_channels, *occupants, &default));
+                dialog_footer(ui, |ui| {
+                    if ui.add(Btn::danger("Delete")).clicked() {
+                        reply.send.push(C2S::DeleteChannel { id: *channel });
+                    }
+                    reply.close |= ui.add(Btn::secondary("Cancel")).clicked();
+                });
+            }
+            ChannelDialog::ClaimOwnership { token, focused } => {
+                ui.set_width(420.0);
+                claim_ownership(ui, token, focused, enter, &mut reply);
             }
         });
         if let Some(message) = reply.now {
@@ -456,7 +469,7 @@ impl App {
             }
             reply.close = true;
         }
-        if reply.close || modal.should_close() {
+        if reply.close || modal_closed(&modal, self.pressed.contains(&Action::DismissDialog)) {
             self.channel_dialog = None;
         }
     }

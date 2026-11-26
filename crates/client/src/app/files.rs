@@ -12,6 +12,8 @@ use ureq::http::Uri;
 
 use super::App;
 use super::chat::{Line, LineKind};
+use super::key_bindings::modal_closed;
+use crate::bindings::Action;
 use crate::file_transfer::{self, Cancel, Download, Operation, Outcome, Source, Task, Update};
 use crate::icons::{self, Icon};
 use crate::net::Net;
@@ -968,7 +970,7 @@ impl App {
                 self.join_channel(channel);
             }
         }
-        if save || jump || close || modal.should_close() {
+        if save || jump || close || modal_closed(&modal, self.pressed.contains(&Action::DismissDialog)) {
             self.files.detail = None;
         }
     }

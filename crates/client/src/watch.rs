@@ -10,11 +10,11 @@ use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, StrokeKind
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use t7_proto::ClientId;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Fullscreen, Theme, WindowId};
 
+use crate::bindings::{Action as KeyAction, Bindings, Chord};
 use crate::icons::{self, Icon};
 use crate::net::ScreenSink;
 use crate::screen::scale::{Area, Scaler};
@@ -137,6 +137,7 @@ struct Tile {
 
 pub struct Window {
     winit: Rc<winit::window::Window>,
+    input: egui_winit::State,
     surface: softbuffer::Surface<Rc<winit::window::Window>, Rc<winit::window::Window>>,
     tiles: Vec<Tile>,
     layout: Layout,
@@ -161,8 +162,18 @@ impl Window {
         let surface = softbuffer::Context::new(window.clone())
             .and_then(|cx| softbuffer::Surface::new(&cx, window.clone()))
             .map_err(|e| e.to_string())?;
+        let mut input = egui_winit::State::new(
+            egui::Context::default(),
+            egui::ViewportId::ROOT,
+            &window,
+            None,
+            Some(Theme::Dark),
+            None,
+        );
+        input.set_clipboard_shortcuts(false);
         let mut window = Window {
             winit: window,
+            input,
             surface,
             tiles: Vec::new(),
             layout: Layout::Grid,
@@ -240,7 +251,7 @@ impl Window {
         }
     }
 
-    pub fn event(&mut self, event: &WindowEvent) -> Option<Action> {
+    pub fn event(&mut self, event: &WindowEvent, bindings: &Bindings, capturing: bool) -> Option<Action> {
         match event {
             WindowEvent::CloseRequested => return Some(Action::Close),
             WindowEvent::RedrawRequested => self.paint(),
@@ -252,14 +263,16 @@ impl Window {
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 return self.press();
             }
-            WindowEvent::KeyboardInput {
-                event: KeyEvent { logical_key, state: ElementState::Pressed, repeat: false, .. },
-                ..
-            } => match logical_key {
-                Key::Named(NamedKey::F11) => self.set_fullscreen(!self.fullscreen()),
-                Key::Named(NamedKey::Escape) => self.set_fullscreen(false),
-                _ => {}
-            },
+            WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) | WindowEvent::Focused(_) => {
+                let _ = self.input.on_window_event(&self.winit, event);
+                let events = std::mem::take(&mut self.input.egui_input_mut().events);
+                if !capturing
+                    && matches!(event, WindowEvent::KeyboardInput { event, .. } if !event.repeat)
+                    && let Some(action) = events.iter().find_map(|event| fullscreen_action(bindings, event))
+                {
+                    self.set_fullscreen(action == KeyAction::ToggleFullscreen && !self.fullscreen());
+                }
+            }
             _ => {}
         }
         None
@@ -447,6 +460,13 @@ impl Window {
             ppp: self.ppp(),
         }
     }
+}
+
+fn fullscreen_action(bindings: &Bindings, event: &egui::Event) -> Option<KeyAction> {
+    let (chord, false) = Chord::from_press(event)? else { return None };
+    [KeyAction::ToggleFullscreen, KeyAction::ExitFullscreen]
+        .into_iter()
+        .find(|&action| bindings.chord(action) == Some(chord))
 }
 
 #[derive(Clone, Copy)]
@@ -661,17 +681,38 @@ impl Overlay {
             ..Default::default()
         };
         input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
-        let out = self.ctx.run_pass(input, |ctx| draw(&ctx.layer_painter(egui::LayerId::background())));
+        let mut out = self.ctx.run_pass(input, |ctx| draw(&ctx.layer_painter(egui::LayerId::background())));
         let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
         let px: &mut [[u8; 4]] = bytemuck::cast_slice_mut(buffer);
         let mut target = BufferMutRef::new(px, width, height);
         self.renderer.render(&mut target, &prims, &out.textures_delta, out.pixels_per_point);
+        out.textures_delta.clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fullscreen_actions_follow_the_live_profile_bindings() {
+        let mut bindings = Bindings::default();
+        let mut hold = None;
+        let down = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_eq!(fullscreen_action(&bindings, &down(egui::Key::F11)), Some(KeyAction::ToggleFullscreen));
+        assert_eq!(fullscreen_action(&bindings, &down(egui::Key::Escape)), Some(KeyAction::ExitFullscreen));
+        let f6 = down(egui::Key::F6);
+        let binding = crate::bindings::Binding::Chord(Chord::from_press(&f6).unwrap().0);
+        bindings.set(KeyAction::ExitFullscreen, &mut hold, Some(binding)).unwrap();
+        assert_eq!(fullscreen_action(&bindings, &down(egui::Key::Escape)), None);
+        assert_eq!(fullscreen_action(&bindings, &f6), Some(KeyAction::ExitFullscreen));
+    }
 
     fn area(x: usize, y: usize, width: usize, height: usize) -> Area {
         Area { x, y, width, height }

@@ -8,12 +8,14 @@ use egui::{Align, Layout, Margin, RichText, Sense, Stroke, vec2};
 use t7_proto::Speech;
 
 use super::chat::LineKind;
+use super::key_bindings::{Capture, bindings_page, modal_closed};
 use super::sharing::QUALITIES;
 use super::widgets::{
     SLIDER_VALUE_W, Unit, described_switch, dialog_header, hint, list_row, row, row_hint, section, slider, value_box,
 };
 use super::{App, Conn};
-use crate::audio::{AudioSettings, PttKey, TxMode, VoiceSink};
+use crate::audio::{AudioSettings, TxMode, VoiceSink};
+use crate::bindings::Action;
 use crate::screen::Quality;
 use crate::sounds::{Pack, Sound};
 use crate::theme::Btn;
@@ -79,8 +81,8 @@ pub(super) struct SettingsDialog {
     pub(super) packs: Vec<(String, std::path::PathBuf)>,
     pub(super) inputs: Vec<String>,
     pub(super) outputs: Vec<String>,
-    /// Waiting for a key press to bind push-to-talk.
-    pub(super) binding: bool,
+    pub(super) capture: Option<Capture>,
+    pub(super) binding_error: Option<(Action, String)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,11 +91,13 @@ pub(super) enum SettingsPage {
     Cleanup,
     Notifications,
     Sharing,
+    KeyBindings,
     About,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 5] = [Self::Voice, Self::Cleanup, Self::Notifications, Self::Sharing, Self::About];
+    const ALL: [Self; 6] =
+        [Self::Voice, Self::Cleanup, Self::Notifications, Self::Sharing, Self::KeyBindings, Self::About];
 
     fn title(self) -> &'static str {
         match self {
@@ -101,6 +105,7 @@ impl SettingsPage {
             Self::Cleanup => "Sound cleanup",
             Self::Notifications => "Notifications",
             Self::Sharing => "Screen sharing",
+            Self::KeyBindings => "Key bindings",
             Self::About => "About",
         }
     }
@@ -111,6 +116,7 @@ impl SettingsPage {
             Self::Cleanup => "Runs on your microphone before anyone hears it.",
             Self::Notifications => "Sounds for what happens while you're on a server.",
             Self::Sharing => "What others get when you share your screen.",
+            Self::KeyBindings => "Shortcuts for this T7 profile.",
             Self::About => "",
         }
     }
@@ -156,8 +162,14 @@ impl App {
         let (inputs, outputs) = audio::device_names();
         let custom = sounds_dir().map(|d| ("Custom folder".to_owned(), d));
         let packs = custom.into_iter().chain(sounds::installed_packs()).collect();
-        self.settings_dialog =
-            Some(SettingsDialog { page: SettingsPage::Voice, packs, inputs, outputs, binding: false });
+        self.settings_dialog = Some(SettingsDialog {
+            page: SettingsPage::Voice,
+            packs,
+            inputs,
+            outputs,
+            capture: None,
+            binding_error: None,
+        });
     }
 
     /// Keeps the audio engine and its shared state in line with the app state.
@@ -179,11 +191,6 @@ impl App {
         if finishing && !connected {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
-        let binding = self.settings_dialog.as_ref().is_some_and(|d| d.binding);
-        if let (TxMode::PushToTalk, Some(key), false) = (self.settings.audio.mode, self.settings.audio.ptt_key, binding)
-        {
-            v.shared.set_ptt_local(ctx.input(|i| ptt::is_down(key.vk, i)));
-        }
         // Talking rings fade out without any input event, so poll while anyone talks.
         if v.shared.transmitting() || !v.playback.speaking().is_empty() {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -204,14 +211,7 @@ impl App {
         let mut quality = self.settings.screen_quality;
         let mut close = false;
         let mut test_sound = false;
-        if dlg.binding {
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                dlg.binding = false;
-            } else if let Some(vk) = ctx.input(ptt::capture) {
-                a.ptt_key = Some(PttKey { vk });
-                dlg.binding = false;
-            }
-        }
+        let was_capturing = dlg.capture.is_some();
         let level = Level { db: self.voice.shared.level_db(), open: self.voice.shared.transmitting() };
         let height = (ctx.content_rect().height() - AROUND_SETTINGS_H).clamp(240.0, SETTINGS_H);
         let frame = theme::modal_frame().inner_margin(Margin::ZERO);
@@ -219,20 +219,32 @@ impl App {
         let modal = theme::modal("voice-settings").frame(frame).show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                settings_nav(ui, &mut dlg.page, height);
+                ui.add_enabled_ui(!was_capturing, |ui| settings_nav(ui, &mut dlg.page, height));
                 let (rect, _) = ui.allocate_exact_size(vec2(PAGE_W, height), Sense::hover());
                 let inner = rect.shrink2(vec2(22.0, 20.0));
                 let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
                 let page = dlg.page;
                 dialog_header(ui, page.title(), page.subtitle());
                 let body = ui.available_height() - theme::CONTROL_H - 14.0;
-                egui::ScrollArea::vertical().max_height(body).auto_shrink(false).show(ui, |ui| {
+                let mut scroll = egui::ScrollArea::vertical().max_height(body).auto_shrink(false);
+                if page == SettingsPage::KeyBindings {
+                    ui.spacing_mut().scroll.floating = false;
+                    scroll = scroll.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
+                }
+                scroll.show(ui, |ui| {
                     ui.spacing_mut().interact_size.x = SLIDER_VALUE_W;
                     match page {
                         SettingsPage::Voice => voice_page(ui, &mut a, dlg, speech, level),
                         SettingsPage::Cleanup => cleanup_page(ui, &mut a),
                         SettingsPage::Notifications => test_sound = notifications_page(ui, &mut a, dlg),
                         SettingsPage::Sharing => sharing_page(ui, &mut quality),
+                        SettingsPage::KeyBindings => bindings_page(
+                            ui,
+                            &mut self.settings.bindings,
+                            &mut a.ptt_key,
+                            &mut dlg.capture,
+                            &mut dlg.binding_error,
+                        ),
                         SettingsPage::About => about_page(ui, &self.updater),
                     }
                 });
@@ -242,7 +254,7 @@ impl App {
                 });
             });
         });
-        if modal.should_close() && !dlg.binding {
+        if modal_closed(&modal, self.pressed.contains(&Action::DismissDialog)) && !was_capturing {
             close = true;
         }
         let page = dlg.page;
@@ -255,6 +267,14 @@ impl App {
         if a != self.settings.audio {
             self.voice.shared.set_settings(&a);
             self.settings.audio = a;
+        }
+        match (was_capturing, dlg.capture.is_some() && !close) {
+            (false, true) => self.voice.shared.start_binding_capture(),
+            (true, false) => {
+                self.local_ptt = ptt::Held::Up;
+                self.voice.shared.finish_binding_capture();
+            }
+            _ => {}
         }
         self.settings.screen_quality = quality;
         if test_sound {
@@ -327,13 +347,9 @@ fn voice_page(ui: &mut egui::Ui, a: &mut AudioSettings, dlg: &mut SettingsDialog
         }
         TxMode::PushToTalk => {
             row(ui, "Key", |ui| {
-                let text = match (dlg.binding, a.ptt_key) {
-                    (true, _) => "Press a key or mouse button…".to_owned(),
-                    (false, Some(k)) => ptt::label(k.vk),
-                    (false, None) => "Click to set a key".to_owned(),
-                };
-                if ui.add(Btn::secondary(&text).min_width(200.0)).clicked() {
-                    dlg.binding = true;
+                let text = a.ptt_key.map_or_else(|| "Unbound".into(), |k| ptt::label(k.vk));
+                if ui.add(Btn::secondary(&text).min_width(200.0)).on_hover_text("Open Key bindings").clicked() {
+                    dlg.page = SettingsPage::KeyBindings;
                 }
                 if level.open {
                     ui.label(RichText::new("Transmitting").size(12.5).color(theme::GREEN));
