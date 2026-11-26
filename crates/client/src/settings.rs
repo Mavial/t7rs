@@ -8,7 +8,7 @@ use t7_proto::identity::IdentityKey;
 use t7_proto::tls::Fingerprint;
 
 use crate::audio::AudioSettings;
-use crate::bindings::Bindings;
+use crate::bindings::{BackgroundShortcuts, Bindings};
 use crate::net::ServerKey;
 use crate::screen::Quality;
 
@@ -20,6 +20,8 @@ pub struct Settings {
     pub audio: AudioSettings,
     #[serde(skip_serializing_if = "Bindings::is_empty")]
     pub bindings: Bindings,
+    #[serde(skip_serializing_if = "BackgroundShortcuts::is_default")]
+    pub background: BackgroundShortcuts,
     pub recent: Vec<Recent>,
     /// Per-person volume by nickname; only values other than 100% are kept.
     pub user_volumes: std::collections::BTreeMap<String, f32>,
@@ -121,6 +123,7 @@ mod tests {
             status: ClientStatus { muted: true, deafened: false, away: false },
             audio: AudioSettings { ptt_key: Some(crate::audio::PttKey { vk: 0x56 }), ..Default::default() },
             bindings: Bindings::default(),
+            background: BackgroundShortcuts { toggle_mic: true, toggle_sound: false },
             recent: vec![Recent { address: "1.2.3.4".into(), server_name: "T7 Server".into() }],
             user_volumes: [("Some One".to_owned(), 0.5)].into(),
             server_certs: [(ServerKey::of("1.2.3.4"), Fingerprint([0xab; 32]))].into(),
@@ -154,5 +157,24 @@ mod tests {
         assert_eq!(loaded.bindings.chord(Action::SendChat), None);
         assert_eq!(loaded.bindings.chord(Action::CodeNewline).unwrap().key, egui::Key::Enter);
         assert_eq!(loaded.nickname, "Mira");
+        assert!(loaded.background.is_default());
+        assert!(!saved.contains("background"), "an untouched profile keeps its file as it was");
+    }
+
+    #[test]
+    fn background_opt_in_is_saved_apart_from_the_bindings() {
+        use crate::bindings::Action;
+        let mut s: Settings = toml::from_str(
+            "[bindings.toggle_mic]
+kind = 'unbound'
+",
+        )
+        .unwrap();
+        assert!(!s.background.get(Action::ToggleMic));
+        s.background.set(Action::ToggleSound, true);
+        let loaded: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert!(loaded.background.get(Action::ToggleSound));
+        assert!(!loaded.background.get(Action::ToggleMic));
+        assert_eq!(loaded.bindings.chord(Action::ToggleMic), None);
     }
 }

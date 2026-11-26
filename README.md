@@ -83,6 +83,11 @@ the new shortcut. Your system's text paste shortcut still inserts plain text.
 A green ring around an avatar means that person is talking. On Windows the
 push-to-talk key works while another app, like a game, has focus.
 
+On Windows, click the globe next to a mute shortcut to make it work while
+another app has focus or T7 is minimized. Both globes start off. Use a
+combination with Ctrl or Alt, or a key like F6. T7 takes priority over shortcuts
+in the focused app. If it can't register the shortcut, the row explains why.
+
 Notification sounds play for connecting, people connecting to or leaving your
 channel, switching channels, pokes, private messages and muting. The built-in
 sounds are short chimes synthesized on the fly. Under Settings →

@@ -8,6 +8,7 @@ mod channel_drop;
 mod dsp;
 mod file_dialog;
 mod file_transfer;
+mod hotkey;
 mod icons;
 mod image_preview;
 mod net;

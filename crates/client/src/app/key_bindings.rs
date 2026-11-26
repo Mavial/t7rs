@@ -1,11 +1,13 @@
 use egui::{Align, Event, Key, Layout, Modifiers, RawInput};
 
-use super::widgets::{hint, section};
+use super::widgets::{Item, hint, menu_button, menu_style, section};
 use super::{App, Conn};
 use crate::audio::PttKey;
-use crate::bindings::{Action, Binding, Bindings, Chord, Scope};
+use crate::bindings::{Action, BackgroundShortcuts, Binding, Bindings, Chord, Scope};
+use crate::hotkey::{Hotkeys, State};
+use crate::icons::Icon;
 use crate::theme::Btn;
-use crate::{ptt, theme};
+use crate::{icons, ptt, theme};
 
 pub(super) struct Capture {
     action: Action,
@@ -277,46 +279,62 @@ pub(super) fn bindings_page(
     ui: &mut egui::Ui,
     bindings: &mut Bindings,
     hold: &mut Option<PttKey>,
+    background: &mut BackgroundShortcuts,
+    hotkeys: &Hotkeys,
     capture: &mut Option<Capture>,
     error: &mut Option<(Action, String)>,
 ) {
+    const VOICE: [Action; 3] = [Action::ToggleMic, Action::ToggleSound, Action::HoldToTalk];
+    let other = Action::ALL.iter().copied().filter(|action| !VOICE.contains(action));
+    ui.spacing_mut().item_spacing.y = 4.0;
     let mut group = "";
-    for &action in Action::ALL {
-        if action.group() != group {
-            group = action.group();
+    for action in VOICE.into_iter().chain(other) {
+        let next_group = if VOICE.contains(&action) { "Voice" } else { action.group() };
+        if next_group != group {
+            group = next_group;
             section(ui, group);
         }
         ui.push_id(action, |ui| {
             let binding = bindings.get(action, *hold);
             let label = binding.map_or_else(|| "Unbound".into(), |key| key.label(ui.ctx()));
             let mutating = capture.as_ref().is_some_and(|c| c.action == action);
+            let idle = capture.is_none();
             ui.horizontal(|ui| {
                 ui.label(action.label());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add_enabled(
-                            capture.is_none() && !bindings.is_default(action, *hold),
-                            Btn::ghost("Reset").small(),
-                        )
-                        .clicked()
-                    {
-                        *error = bindings.reset(action, hold).err().map(|error| (action, error));
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let more = ui.add_enabled_ui(idle, |ui| menu_button(ui, Icon::Dots)).inner;
+                    let more = more.on_hover_text("Shortcut options");
+                    if idle {
+                        egui::Popup::menu(&more).align(egui::RectAlign::BOTTOM_END).show(|ui| {
+                            menu_style(ui, 142.0);
+                            if ui.add_enabled(binding.is_some(), Item::new(Icon::Cross, "Clear shortcut")).clicked() {
+                                *error = bindings.set(action, hold, None).err().map(|error| (action, error));
+                            }
+                            if ui
+                                .add_enabled(
+                                    !bindings.is_default(action, *hold),
+                                    Item::new(Icon::Update, "Restore default"),
+                                )
+                                .clicked()
+                            {
+                                *error = bindings.reset(action, hold).err().map(|error| (action, error));
+                            }
+                        });
                     }
-                    if ui.add_enabled(capture.is_none() && binding.is_some(), Btn::ghost("Clear").small()).clicked() {
-                        *error = bindings.set(action, hold, None).err().map(|error| (action, error));
-                    }
+                    const KEY_WIDTH: f32 = 122.0;
                     if mutating {
                         let tip = bindings.hint(ui.ctx(), Action::CancelCapture, "Cancel recording");
-                        if ui.add(Btn::secondary("Cancel").small()).on_hover_text(tip).clicked() {
+                        if ui.add(Btn::secondary("Cancel").small().min_width(KEY_WIDTH)).on_hover_text(tip).clicked() {
                             *capture = None;
                         }
-                    } else if ui
-                        .add_enabled(capture.is_none(), Btn::secondary(&label).small().min_width(106.0))
-                        .clicked()
-                    {
+                    } else if ui.add_enabled(idle, Btn::secondary(&label).small().min_width(KEY_WIDTH)).clicked() {
                         *error = None;
                         *capture =
                             Some(Capture { action, pending: None, error: None, modifiers: ui.input(|i| i.modifiers) });
+                    }
+                    if cfg!(windows) && BackgroundShortcuts::ACTIONS.contains(&action) {
+                        ui.add_enabled_ui(idle, |ui| background_toggle(ui, action, background, hotkeys.state(action)));
                     }
                 });
             });
@@ -333,6 +351,41 @@ pub(super) fn bindings_page(
             } else if let Some((_, error)) = error.as_ref().filter(|(row, _)| *row == action) {
                 ui.colored_label(theme::RED, error);
             }
+            if cfg!(windows)
+                && idle
+                && background.get(action)
+                && let State::Failed(why) = hotkeys.state(action)
+            {
+                ui.colored_label(theme::RED, format!("Can't use in the background because {why}."));
+            }
         });
     }
+}
+
+fn background_toggle(ui: &mut egui::Ui, action: Action, background: &mut BackgroundShortcuts, state: &State) {
+    let (rect, mut response) = ui.allocate_exact_size(egui::Vec2::splat(28.0), egui::Sense::click());
+    if response.clicked() {
+        background.set(action, !background.get(action));
+        response.mark_changed();
+    }
+    let on = background.get(action);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::CheckBox, response.enabled(), on, "Works in background")
+    });
+    let (fill, color) = match (on, state) {
+        (true, State::Failed(_)) => (theme::RED.gamma_multiply(0.14), theme::RED),
+        (true, _) => (theme::ACCENT_BG, theme::ACCENT_TEXT),
+        (false, _) if response.is_pointer_button_down_on() => (theme::SURFACE_ACTIVE, theme::TEXT),
+        (false, _) if response.hovered() => (theme::SURFACE_HOVER, theme::TEXT),
+        (false, _) => (egui::Color32::TRANSPARENT, theme::TEXT_DIM),
+    };
+    let focus = if response.has_focus() { egui::Stroke::new(1.0, theme::ACCENT_TEXT) } else { egui::Stroke::NONE };
+    let painter = ui.painter();
+    painter.rect(rect, theme::RADIUS, fill, focus, egui::StrokeKind::Inside);
+    icons::paint(painter, egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(18.0)), Icon::Globe, color);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if on {
+        "Use this shortcut only in T7"
+    } else {
+        "Use this shortcut when T7 is in the background"
+    });
 }

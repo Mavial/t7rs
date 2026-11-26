@@ -29,6 +29,7 @@ pub enum Icon {
     SpeakerPlus,
     Screen,
     Window,
+    Globe,
     ScreenStop,
     Update,
     Plus,
@@ -181,6 +182,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Window => {
             pen.rrect(3.0, 4.0, 21.0, 20.0, 2.0);
             pen.line((3.0, 9.0), (21.0, 9.0));
+        }
+        Icon::Globe => {
+            let center = rect.center();
+            let scale = rect.width() / 24.0;
+            p.circle_stroke(center, 9.0 * scale, pen.stroke);
+            p.add(Shape::ellipse_stroke(center, egui::vec2(4.0, 9.0) * scale, pen.stroke));
+            pen.line((3.0, 12.0), (21.0, 12.0));
         }
         Icon::Screen | Icon::ScreenStop => {
             pen.rrect(2.5, 4.0, 21.5, 17.0, 2.0);
