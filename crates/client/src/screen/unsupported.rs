@@ -2,6 +2,10 @@ use super::{AccessUnit, Params, Picture, ShareStats, SourceInfo};
 
 const UNSUPPORTED: &str = "screen sharing is not supported on this platform";
 
+pub(crate) fn picker_sources() -> super::PickerSources {
+    super::PickerSources::default()
+}
+
 pub fn sources() -> Vec<SourceInfo> {
     Vec::new()
 }

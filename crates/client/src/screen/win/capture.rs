@@ -19,8 +19,9 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetShellWindow, GetWindow, GetWindowLongPtrW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, MONITORINFOF_PRIMARY, WS_EX_TOOLWINDOW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetClientRect, GetShellWindow, GetWindow,
+    GetWindowDisplayAffinity, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindow, IsWindowVisible, MONITORINFOF_PRIMARY, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, Interface, Owned};
 
@@ -106,7 +107,7 @@ pub(super) fn list_windows(ordinary: Option<&mut Vec<SourceInfo>>) -> Option<Lea
     list.league
 }
 
-fn window_pid(window: HWND) -> u32 {
+pub(super) fn window_pid(window: HWND) -> u32 {
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(window, Some(&raw mut pid)) };
     pid
@@ -117,29 +118,27 @@ unsafe extern "system" fn add_window(window: HWND, list: LPARAM) -> BOOL {
     let pid = window_pid(window);
     let handle = Handle(window.0 as isize);
     if let Some(&(_, in_game)) = list.league_processes.iter().find(|&&(id, _)| id == pid) {
-        if list.league.is_none_or(|old| in_game && !old.in_game) && capturable(window).is_some() {
+        if list.league.is_none_or(|old| in_game && !old.in_game) && app_window_title(window).is_some() {
             list.league = Some(LeagueWindow { handle, pid, in_game });
         }
     } else if let Some(ordinary) = &mut list.ordinary
-        && let Some(name) = capturable(window)
+        && let Some(name) = app_window_title(window)
     {
         ordinary.push(SourceInfo { source: Source::Window(handle), name });
     }
     true.into()
 }
 
-/// The title of a window people would recognise as an app: visible, not
-/// cloaked (other virtual desktops, suspended store apps), not a tool window
-/// or an owned dialog, not the desktop.
-fn capturable(window: HWND) -> Option<String> {
+fn app_window_title(window: HWND) -> Option<String> {
     unsafe {
-        if !IsWindowVisible(window).as_bool() || window == GetShellWindow() {
+        if !IsWindowVisible(window).as_bool() || IsIconic(window).as_bool() || window == GetShellWindow() {
             return None;
         }
-        if GetWindow(window, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
+        let style = GetWindowLongPtrW(window, GWL_EXSTYLE) as u32;
+        if style & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0 {
             return None;
         }
-        if GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW.0 as isize != 0 {
+        if style & WS_EX_APPWINDOW.0 == 0 && GetWindow(window, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
             return None;
         }
         let mut cloaked = 0u32;
@@ -147,7 +146,29 @@ fn capturable(window: HWND) -> Option<String> {
         if DwmGetWindowAttribute(window, DWMWA_CLOAKED, (&raw mut cloaked).cast(), size).is_ok() && cloaked != 0 {
             return None;
         }
-        let mut title = [0u16; 256];
+        let mut bounds = RECT::default();
+        if GetClientRect(window, &raw mut bounds).is_ok()
+            && (bounds.right <= bounds.left || bounds.bottom <= bounds.top)
+        {
+            return None;
+        }
+        let mut affinity = 0;
+        if GetWindowDisplayAffinity(window, &raw mut affinity).is_ok() && affinity != 0 {
+            return None;
+        }
+        let mut class = [0u16; 64];
+        let len = GetClassNameW(window, &mut class);
+        if matches!(
+            String::from_utf16_lossy(&class[..len as usize]).as_str(),
+            "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+        ) {
+            return None;
+        }
+        let length = GetWindowTextLengthW(window);
+        if length <= 0 {
+            return None;
+        }
+        let mut title = vec![0u16; length.min(32767) as usize + 1];
         let len = GetWindowTextW(window, &mut title);
         let title = String::from_utf16_lossy(&title[..len.max(0) as usize]);
         (!title.trim().is_empty()).then_some(title)
