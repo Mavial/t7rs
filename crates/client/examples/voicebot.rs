@@ -137,9 +137,7 @@ async fn main() {
     if mode == "share" {
         let sources = screen::sources();
         let source = match &window {
-            Some(title) => {
-                sources.iter().find(|s| matches!(s.source, Source::Window(_)) && s.name.contains(title.as_str()))
-            }
+            Some(title) => sources.iter().find(|s| s.source.is_window() && s.name.contains(title.as_str())),
             None => sources.iter().find(|s| matches!(s.source, Source::Monitor(_))),
         };
         let Some(source) = source else { return println!("nothing to share called {window:?}") };

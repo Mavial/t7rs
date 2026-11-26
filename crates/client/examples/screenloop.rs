@@ -40,7 +40,7 @@ fn main() {
     let mut monitors = sources.iter().filter(|s| matches!(s.source, Source::Monitor(_)));
     let chosen = match &args.window {
         Some(title) if !args.decode_bench => {
-            sources.iter().find(|s| matches!(s.source, Source::Window(_)) && s.name.contains(title.as_str()))
+            sources.iter().find(|s| s.source.is_window() && s.name.contains(title.as_str()))
         }
         _ => monitors.nth(if args.decode_bench { 0 } else { args.monitor }),
     };

@@ -13,15 +13,18 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetShellWindow, GetWindow, GetWindowLongPtrW, GetWindowTextW, IsWindow,
-    IsWindowVisible, MONITORINFOF_PRIMARY, WS_EX_TOOLWINDOW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetShellWindow, GetWindow, GetWindowLongPtrW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, MONITORINFOF_PRIMARY, WS_EX_TOOLWINDOW,
 };
-use windows::core::{BOOL, Interface};
+use windows::core::{BOOL, Interface, Owned};
 
-use super::super::{Handle, Source, SourceInfo};
+use super::super::{Handle, LeagueWindow, Source, SourceInfo};
 use super::share::Wake;
 use super::{Context, TICKS_PER_SECOND};
 
@@ -39,27 +42,26 @@ pub fn sources() -> Vec<SourceInfo> {
             name: format!("Screen {} ({} × {})", i + 1, r.right - r.left, r.bottom - r.top),
         })
         .collect();
-    unsafe {
-        let _ = EnumWindows(Some(add_window), lparam(&mut list));
+    if let Some(window) = list_windows(Some(&mut list)) {
+        list.push(SourceInfo { source: Source::League(window), name: "League of Legends".into() });
     }
     list
 }
 
-fn lparam<T>(list: &mut Vec<T>) -> LPARAM {
+fn lparam<T>(list: &mut T) -> LPARAM {
     LPARAM(&raw mut *list as isize)
 }
 
 /// # Safety
 ///
-/// `list` is what [`lparam`] made of a `Vec<T>` for the enumeration calling back.
-unsafe fn handed<'a, T>(list: LPARAM) -> &'a mut Vec<T> {
-    // SAFETY: the enumeration calls back only during the call that borrows the
-    // vector, one callback at a time on that call's thread.
-    unsafe { &mut *(list.0 as *mut Vec<T>) }
+/// `list` is what [`lparam`] made of a `T` for the enumeration calling back.
+unsafe fn handed<'a, T>(list: LPARAM) -> &'a mut T {
+    // SAFETY: the enumeration calls back synchronously on the borrowing thread.
+    unsafe { &mut *(list.0 as *mut T) }
 }
 
 unsafe extern "system" fn add_monitor(monitor: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> BOOL {
-    let list = unsafe { handed(list) };
+    let list: &mut Vec<(bool, RECT, HMONITOR)> = unsafe { handed(list) };
     let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
     if unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool() {
         list.push((info.dwFlags & MONITORINFOF_PRIMARY != 0, info.rcMonitor, monitor));
@@ -67,10 +69,61 @@ unsafe extern "system" fn add_monitor(monitor: HMONITOR, _: HDC, _: *mut RECT, l
     true.into()
 }
 
+struct WindowList<'a> {
+    ordinary: Option<&'a mut Vec<SourceInfo>>,
+    league_processes: Vec<(u32, bool)>,
+    league: Option<LeagueWindow>,
+}
+
+fn league_processes() -> Vec<(u32, bool)> {
+    let mut league = Vec::new();
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return league };
+        let snapshot = Owned::new(snapshot);
+        let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut read = Process32FirstW(*snapshot, &raw mut entry);
+        while read.is_ok() {
+            let name = entry.szExeFile.split(|&c| c == 0).next().unwrap_or_default();
+            let name = String::from_utf16_lossy(name);
+            let in_game = name.eq_ignore_ascii_case("League of Legends.exe");
+            if in_game || name.eq_ignore_ascii_case("LeagueClientUx.exe") {
+                league.push((entry.th32ProcessID, in_game));
+            }
+            read = Process32NextW(*snapshot, &raw mut entry);
+        }
+    }
+    league
+}
+
+pub(super) fn list_windows(ordinary: Option<&mut Vec<SourceInfo>>) -> Option<LeagueWindow> {
+    let mut list = WindowList { ordinary, league_processes: league_processes(), league: None };
+    if list.ordinary.is_none() && list.league_processes.is_empty() {
+        return None;
+    }
+    unsafe {
+        let _ = EnumWindows(Some(add_window), lparam(&mut list));
+    }
+    list.league
+}
+
+fn window_pid(window: HWND) -> u32 {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(window, Some(&raw mut pid)) };
+    pid
+}
+
 unsafe extern "system" fn add_window(window: HWND, list: LPARAM) -> BOOL {
-    let list = unsafe { handed(list) };
-    if let Some(name) = capturable(window) {
-        list.push(SourceInfo { source: Source::Window(Handle(window.0 as isize)), name });
+    let list: &mut WindowList<'_> = unsafe { handed(list) };
+    let pid = window_pid(window);
+    let handle = Handle(window.0 as isize);
+    if let Some(&(_, in_game)) = list.league_processes.iter().find(|&&(id, _)| id == pid) {
+        if list.league.is_none_or(|old| in_game && !old.in_game) && capturable(window).is_some() {
+            list.league = Some(LeagueWindow { handle, pid, in_game });
+        }
+    } else if let Some(ordinary) = &mut list.ordinary
+        && let Some(name) = capturable(window)
+    {
+        ordinary.push(SourceInfo { source: Source::Window(handle), name });
     }
     true.into()
 }
@@ -104,7 +157,7 @@ fn capturable(window: HWND) -> Option<String> {
 pub struct Capture {
     session: GraphicsCaptureSession,
     pool: Direct3D11CaptureFramePool,
-    source: Source,
+    pub(super) source: Source,
     device: IDirect3DDevice,
     size: SizeInt32,
 }
@@ -118,9 +171,15 @@ impl Capture {
             match source {
                 Source::Monitor(Handle(h)) => interop.CreateForMonitor(HMONITOR(h as _)),
                 Source::Window(Handle(h)) => interop.CreateForWindow(HWND(h as _)),
+                Source::League(w) => interop.CreateForWindow(HWND(w.handle.0 as _)),
             }
         }
         .context("cannot capture this source")?;
+        if let Source::League(w) = source
+            && window_pid(HWND(w.handle.0 as _)) != w.pid
+        {
+            return Err("the League of Legends window closed".into());
+        }
         let dxgi: IDXGIDevice = d3d.cast().context("DXGI device")?;
         let device: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
             .and_then(|d| d.cast())
@@ -160,6 +219,7 @@ impl Capture {
         unsafe {
             match self.source {
                 Source::Window(Handle(h)) => IsWindow(Some(HWND(h as _))).as_bool(),
+                Source::League(w) => window_pid(HWND(w.handle.0 as _)) == w.pid,
                 Source::Monitor(Handle(h)) => {
                     let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
                     GetMonitorInfoW(HMONITOR(h as _), &raw mut info).as_bool()
