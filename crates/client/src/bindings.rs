@@ -203,6 +203,17 @@ impl Chord {
                     || (self.mods.command && self.key == Insert))
     }
 
+    pub fn hotkey(self) -> Result<Hotkey, &'static str> {
+        if self.types_text() {
+            return Err("it needs Ctrl or Alt, so it doesn't take over typing in other apps");
+        }
+        // Avoid OEM virtual-key codes whose punctuation varies by keyboard layout.
+        let vk = ptt::vk(self.key)
+            .filter(|vk| !matches!(*vk, 0xBA | 0xBF..=0xC0 | 0xDB..=0xDE))
+            .ok_or("Windows can't register that key reliably")?;
+        Ok(Hotkey { ctrl: self.mods.command || self.mods.control, alt: self.mods.alt, shift: self.mods.shift, vk })
+    }
+
     pub fn types_text(self) -> bool {
         use Key::{
             Backslash, Backtick, CloseBracket, CloseCurlyBracket, Colon, Comma, Equals, Exclamationmark, Minus,
@@ -233,6 +244,45 @@ impl Chord {
                         | Backtick
                         | Quote
                 ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hotkey {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub vk: u16,
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackgroundShortcuts {
+    pub toggle_mic: bool,
+    pub toggle_sound: bool,
+}
+
+impl BackgroundShortcuts {
+    pub const ACTIONS: [Action; 2] = [Action::ToggleMic, Action::ToggleSound];
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn get(&self, action: Action) -> bool {
+        match action {
+            Action::ToggleMic => self.toggle_mic,
+            Action::ToggleSound => self.toggle_sound,
+            _ => false,
+        }
+    }
+
+    pub fn set(&mut self, action: Action, on: bool) {
+        match action {
+            Action::ToggleMic => self.toggle_mic = on,
+            Action::ToggleSound => self.toggle_sound = on,
+            _ => {}
+        }
     }
 }
 
@@ -287,6 +337,14 @@ impl Bindings {
 
     pub fn get(&self, action: Action, hold: Option<PttKey>) -> Option<Binding> {
         if action == Action::HoldToTalk { hold.map(Binding::Hold) } else { self.chord(action).map(Binding::Chord) }
+    }
+
+    pub fn global_shortcut_conflict(&self, action: Action, hold: Option<PttKey>) -> Option<Action> {
+        let chord = Binding::Chord(self.chord(action)?);
+        Action::ALL
+            .iter()
+            .copied()
+            .find(|&other| other != action && self.get(other, hold).is_some_and(|existing| chord.overlaps(existing)))
     }
 
     pub fn is_default(&self, action: Action, hold: Option<PttKey>) -> bool {
@@ -368,6 +426,24 @@ mod tests {
         assert!(bindings.set(Action::DismissDialog, &mut hold, f6).is_err());
         bindings.reset(Action::SendChat, &mut hold).unwrap();
         assert_eq!(bindings.chord(Action::SendChat).unwrap().key, Key::Enter);
+    }
+
+    #[test]
+    fn background_shortcuts_refuse_typing_keys_and_report_shared_chords() {
+        assert!(new_chord(Mods::COMMAND_SHIFT, Key::M).hotkey().is_ok());
+        assert!(new_chord(Mods::NONE, Key::A).hotkey().is_err());
+        assert!(new_chord(Mods::SHIFT, Key::A).hotkey().is_err());
+        assert!(new_chord(Mods::COMMAND, Key::Exclamationmark).hotkey().is_err());
+        assert!(new_chord(Mods::COMMAND, Key::Slash).hotkey().is_err());
+        let f6 = new_chord(Mods::NONE, Key::F6).hotkey().unwrap();
+        assert_eq!((f6.vk, f6.ctrl, f6.alt, f6.shift), (0x75, false, false, false));
+
+        let mut bindings = Bindings::default();
+        let mut hold = None;
+        assert_eq!(bindings.global_shortcut_conflict(Action::ToggleMic, hold), None);
+        let f11 = Some(Binding::Chord(new_chord(Mods::NONE, Key::F11)));
+        bindings.set(Action::ToggleMic, &mut hold, f11).unwrap();
+        assert_eq!(bindings.global_shortcut_conflict(Action::ToggleMic, hold), Some(Action::ToggleFullscreen));
     }
 
     #[test]

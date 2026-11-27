@@ -1328,3 +1328,49 @@ fn chat_paste_remap_keeps_platform_text_paste() {
     canvas.ctx.run_ui(raw, |ui| canvas.app.ui(ui)).drop_without_applying_deltas();
     assert_eq!(canvas.app.input, "plain custom");
 }
+
+#[cfg(windows)]
+#[test]
+fn background_shortcuts_toggle_without_a_frame_and_follow_the_settings() {
+    use crate::hotkey::{Backend, Hotkeys, State};
+    struct Accept;
+    impl Backend for Accept {
+        fn register(&mut self, _: i32, _: crate::bindings::Hotkey) -> Result<(), String> {
+            Ok(())
+        }
+        fn unregister(&mut self, _: i32) {}
+    }
+    let mut canvas = Canvas::new((760, 480), connected, 1.0);
+    canvas.app.hotkeys = Hotkeys::with_backend(Box::new(Accept));
+    let mut frame = 0;
+    let mut draw = |canvas: &mut Canvas| {
+        canvas.draw(canvas.input(frame));
+        frame += 1;
+    };
+    draw(&mut canvas);
+    assert_eq!(canvas.app.hotkeys.state(Action::ToggleMic), &State::Off);
+    assert!(!canvas.app.background_hotkey(1), "nothing is registered until it is opted in");
+
+    canvas.app.settings.background.set(Action::ToggleMic, true);
+    draw(&mut canvas);
+    let (id, _) = (1..=2).find_map(|id| canvas.app.hotkeys.resolve(id).map(|found| (id, found))).unwrap();
+    assert!(canvas.app.background_hotkey(id));
+    let status = canvas.app.settings.status;
+    assert!(status.muted && !status.deafened, "only the microphone toggles");
+    assert!(canvas.app.background_hotkey(id));
+    assert!(!canvas.app.settings.status.muted);
+    assert!(!canvas.app.background_hotkey(id + 40), "an unknown registration is ignored");
+
+    bind(&mut canvas, Action::ToggleMic, egui::Key::F11, egui::Modifiers::NONE);
+    assert!(!canvas.app.background_hotkey(id), "a message for the old chord is dropped");
+    draw(&mut canvas);
+    assert!(matches!(
+        canvas.app.hotkeys.state(Action::ToggleMic),
+        State::Failed(why) if why.contains(Action::ToggleFullscreen.label())
+    ));
+    assert!(canvas.app.hotkeys.resolve(id).is_none());
+
+    canvas.app.settings.background.set(Action::ToggleMic, false);
+    draw(&mut canvas);
+    assert_eq!(canvas.app.hotkeys.state(Action::ToggleMic), &State::Off);
+}

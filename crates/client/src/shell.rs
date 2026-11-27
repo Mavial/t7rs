@@ -15,6 +15,8 @@ use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{StartCause, WindowEvent};
+#[cfg(windows)]
+use winit::event_loop::EventLoopProxy;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Theme, Window, WindowId};
 
@@ -25,6 +27,8 @@ use crate::watch;
 enum Wake {
     Repaint(Duration),
     Screen,
+    #[cfg(windows)]
+    Hotkey(i32),
 }
 
 struct Gfx {
@@ -51,18 +55,38 @@ pub fn run(
     store: Store,
     make_app: impl FnOnce(&egui::Context, watch::Wake) -> App,
 ) -> Result<(), winit::error::EventLoopError> {
-    let event_loop = EventLoop::<Wake>::with_user_event().build()?;
+    let mut builder = EventLoop::<Wake>::with_user_event();
+    // The proxy only exists once the loop is built, and the hook is installed before that.
+    #[cfg(windows)]
+    let hotkey_proxy = {
+        use winit::platform::windows::EventLoopBuilderExtWindows;
+        let cell = Rc::new(std::cell::OnceCell::<EventLoopProxy<Wake>>::new());
+        let hook_proxy = cell.clone();
+        builder.with_msg_hook(move |msg| {
+            // SAFETY: winit passes a pointer to the MSG it just retrieved.
+            let Some(id) = (unsafe { crate::hotkey::message_id(msg) }) else { return false };
+            if let Some(proxy) = hook_proxy.get() {
+                let _ = proxy.send_event(Wake::Hotkey(id));
+            }
+            true
+        });
+        cell
+    };
+    let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
+    #[cfg(windows)]
+    let _ = hotkey_proxy.set(proxy.clone());
     let repaint = proxy.clone();
     ctx.set_request_repaint_callback(move |info| {
         let _ = repaint.send_event(Wake::Repaint(info.delay));
     });
-    let app = make_app(
+    let mut app = make_app(
         &ctx,
         Arc::new(move || {
             let _ = proxy.send_event(Wake::Screen);
         }),
     );
+    app.sync_hotkeys(&ctx);
     let mut shell = Shell { ctx, app, store, gfx: None, next_repaint: None, title: String::new(), screen: None };
     event_loop.run_app(&mut shell)
 }
@@ -210,6 +234,13 @@ impl ApplicationHandler<Wake> for Shell {
             Wake::Screen => {
                 if let Some(screen) = &self.screen {
                     screen.wake();
+                }
+            }
+            #[cfg(windows)]
+            Wake::Hotkey(id) => {
+                if self.app.background_hotkey(id) {
+                    self.store.save(self.app.settings());
+                    self.schedule(Duration::ZERO);
                 }
             }
         }

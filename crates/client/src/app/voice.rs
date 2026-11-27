@@ -159,6 +159,7 @@ const SENSITIVITY_MAX_DB: f32 = -5.0;
 
 impl App {
     pub(super) fn open_voice_settings(&mut self) {
+        self.hotkeys.retry_failed();
         let (inputs, outputs) = audio::device_names();
         let custom = sounds_dir().map(|d| ("Custom folder".to_owned(), d));
         let packs = custom.into_iter().chain(sounds::installed_packs()).collect();
@@ -172,12 +173,16 @@ impl App {
         });
     }
 
-    /// Keeps the audio engine and its shared state in line with the app state.
-    pub(super) fn drive_audio(&mut self, ctx: &egui::Context) {
+    pub(super) fn drive_audio_status(&self) {
         let s = self.settings.status;
         let silenced = self.my_speech() != Speech::Allowed;
+        self.voice.shared.set_status(s.muted || silenced, s.deafened);
+    }
+
+    /// Keeps the audio engine and its shared state in line with the app state.
+    pub(super) fn drive_audio(&mut self, ctx: &egui::Context) {
+        self.drive_audio_status();
         let v = &mut self.voice;
-        v.shared.set_status(s.muted || silenced, s.deafened);
         let connected = matches!(self.conn, Conn::Connected { .. });
         // A last sound (like "disconnected") finishes before the devices close.
         let finishing = v.engine.is_some() && v.playback.effects_active();
@@ -242,6 +247,8 @@ impl App {
                             ui,
                             &mut self.settings.bindings,
                             &mut a.ptt_key,
+                            &mut self.settings.background,
+                            &self.hotkeys,
                             &mut dlg.capture,
                             &mut dlg.binding_error,
                         ),

@@ -99,9 +99,7 @@ fn modifiers(m: Modifiers) -> [(u16, bool); 3] {
 
 pub fn capture(event: &Event, previous: Modifiers) -> Option<u16> {
     match *event {
-        Event::Key { pressed: true, repeat: false, key, .. } => {
-            KEYS.iter().find(|(_, k, _)| *k == key).map(|&(vk, ..)| vk)
-        }
+        Event::Key { pressed: true, repeat: false, key, .. } => vk(key),
         Event::PointerButton { button, pressed: true, .. } => {
             BUTTONS.iter().find(|(_, b, _)| *b == button).map(|&(vk, ..)| vk)
         }
@@ -111,6 +109,10 @@ pub fn capture(event: &Event, previous: Modifiers) -> Option<u16> {
             .map(|(vk, _)| vk),
         _ => None,
     }
+}
+
+pub fn vk(key: Key) -> Option<u16> {
+    KEYS.iter().find(|(_, k, _)| *k == key).map(|&(vk, ..)| vk)
 }
 
 pub fn label(vk: u16) -> String {

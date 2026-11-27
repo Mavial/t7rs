@@ -28,6 +28,7 @@ use t7_proto::perms::{Perm, Scope};
 use t7_proto::{C2S, ChannelId, ClientId, ClientStatus, Speech};
 
 use crate::bindings::Action;
+use crate::hotkey::{Target, Want};
 use crate::net::{Net, ServerKey, SessionId};
 use crate::settings::Settings;
 use crate::sounds::{Pack, Resolved, Sound};
@@ -108,6 +109,7 @@ pub struct App {
     pressed: BTreeSet<Action>,
     captured_keys: BTreeSet<egui::Key>,
     local_ptt: crate::ptt::Held,
+    hotkeys: crate::hotkey::Hotkeys,
 }
 
 impl App {
@@ -162,6 +164,7 @@ impl App {
             pressed: BTreeSet::new(),
             captured_keys: BTreeSet::new(),
             local_ptt: crate::ptt::Held::Up,
+            hotkeys: crate::hotkey::Hotkeys::new(),
         };
         app.sound_pack = Pack::open(app.settings.audio.sound_pack.as_deref());
         if let Some(l) = launch {
@@ -175,6 +178,7 @@ impl App {
         let mic_off = |s: ClientStatus| s.muted || s.deafened;
         let was_off = mic_off(self.settings.status);
         self.settings.status = status;
+        self.drive_audio_status();
         if matches!(self.conn, Conn::Connected { .. }) {
             self.net.send(C2S::SetStatus(status));
             match (was_off, mic_off(status)) {
@@ -248,12 +252,10 @@ impl App {
             self.open_connect_form();
         }
         if self.pressed.remove(&Action::ToggleMic) {
-            let s = self.settings.status;
-            self.set_status(ClientStatus { muted: !s.muted, ..s });
+            self.toggle(Action::ToggleMic);
         }
         if self.pressed.remove(&Action::ToggleSound) {
-            let s = self.settings.status;
-            self.set_status(ClientStatus { deafened: !s.deafened, ..s });
+            self.toggle(Action::ToggleSound);
         }
         if self.pressed.remove(&Action::ToggleAway) {
             let s = self.settings.status;
@@ -262,6 +264,57 @@ impl App {
         if self.pressed.remove(&Action::OpenSettings) && self.settings_dialog.is_none() {
             self.open_voice_settings();
         }
+    }
+}
+
+impl App {
+    fn toggle(&mut self, action: Action) {
+        let s = self.settings.status;
+        match action {
+            Action::ToggleMic => self.set_status(ClientStatus { muted: !s.muted, ..s }),
+            Action::ToggleSound => self.set_status(ClientStatus { deafened: !s.deafened, ..s }),
+            _ => {}
+        }
+    }
+
+    fn hotkey_want(settings: &Settings, recording: bool, action: Action) -> Want {
+        if !settings.background.get(action) {
+            return Want::Off;
+        }
+        if recording {
+            return Want::Recording;
+        }
+        let bindings = &settings.bindings;
+        let Some(chord) = bindings.chord(action) else { return Want::Refused("this action has no shortcut".into()) };
+        if let Some(other) = bindings.global_shortcut_conflict(action, settings.audio.ptt_key) {
+            return Want::Refused(format!("{} uses the same shortcut inside T7", other.label()));
+        }
+        match chord.hotkey() {
+            Ok(hotkey) => Want::Register(Target { chord, hotkey }),
+            Err(why) => Want::Refused(why.to_owned()),
+        }
+    }
+
+    pub(crate) fn sync_hotkeys(&mut self, ctx: &egui::Context) {
+        if !cfg!(windows) {
+            return;
+        }
+        let recording = self.capturing_binding();
+        let settings = &self.settings;
+        if self.hotkeys.sync(|action| Self::hotkey_want(settings, recording, action)) {
+            ctx.request_repaint();
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn background_hotkey(&mut self, id: i32) -> bool {
+        let Some((action, chord)) = self.hotkeys.resolve(id) else { return false };
+        let current = self.settings.bindings.chord(action) == Some(chord);
+        if self.capturing_binding() || !self.settings.background.get(action) || !current {
+            return false;
+        }
+        self.toggle(action);
+        true
     }
 }
 
@@ -298,6 +351,7 @@ impl App {
         self.channel_dialog(&ctx);
         self.file_detail(&ctx);
         self.cert_change_dialog(&ctx);
+        self.sync_hotkeys(&ctx);
     }
 
     /// True once after a poke arrived: the shell flashes the taskbar entry.
